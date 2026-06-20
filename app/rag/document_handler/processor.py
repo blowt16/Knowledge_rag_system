@@ -175,7 +175,7 @@ class DocumentProcessor:
             doc.metadata["original_filename"] = original_filename
             doc.metadata["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
-        # 7. 入库
+        # 7. 向量入库
         try:
             self._vector_store.add_documents(documents)
             logger.info(f"【向量数据库】文件 {original_filename} 入库完成: {len(documents)} 个 chunk")
@@ -183,8 +183,13 @@ class DocumentProcessor:
             logger.error(f"【向量数据库】文件入库失败: {e}")
             return {"status": "failed", "reason": str(e), "filename": original_filename, "md5": md5_hex}
 
-        # 8. MD5 记录
-        self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, str(file_path))
+        # 8. MD5 记录（失败则回滚 ChromaDB 写入，保证原子性）
+        try:
+            self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, str(file_path))
+        except Exception as e:
+            logger.error(f"【MD5】保存失败，回滚向量数据: {e}")
+            self._vector_store.delete_by_md5(user_id, md5_hex)
+            return {"status": "failed", "reason": f"MD5 保存失败: {e}", "filename": original_filename, "md5": md5_hex}
 
         return {
             "status": "done", "md5": md5_hex,

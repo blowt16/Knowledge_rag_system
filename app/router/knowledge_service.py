@@ -78,8 +78,29 @@ class KnowledgeService:
         return {"valid": False, "error": "文件类型校验失败"}
 
     def delete_by_md5(self, user_id: str, md5: str):
-        self._vector_store.delete_by_md5(user_id, md5)
-        self._md5_store.delete_single_md5(user_id, md5)
+        """原子化删除：先 MD5 → 后 ChromaDB，ChromaDB 失败则恢复 MD5。"""
+        records = self._md5_store.get_all_md5(user_id)
+        target = next((r for r in records if r.get("md5") == md5), None)
+
+        # 1. 先删 MD5 记录（失败则直接终止）
+        if not self._md5_store.delete_single_md5(user_id, md5):
+            return
+
+        # 2. 再删 ChromaDB
+        try:
+            self._vector_store.delete_by_md5(user_id, md5)
+        except Exception as e:
+            # 回滚：恢复 MD5 记录
+            if target:
+                self._md5_store.save_md5_hex(
+                    user_id, md5,
+                    target.get("original_filename", "unknown"),
+                    target.get("filename", ""),
+                )
+            logger.error(f"【原子性】ChromaDB 删除失败，已恢复 MD5: {e}")
+            return
+
+        # 3. 清理图片（尽力而为）
         self._delete_image_directory(user_id, md5)
         HybridRetriever.invalidate_cache(user_id)
 
@@ -90,7 +111,44 @@ class KnowledgeService:
         HybridRetriever.invalidate_cache(user_id)
 
     def get_documents(self, user_id: str) -> list[dict]:
-        return self._md5_store.get_user_documents_info(user_id)
+        """获取文档列表，以 ChromaDB 为准，MD5 存储双向同步。"""
+        chroma_metadatas = self._vector_store.get_user_documents(user_id)
+
+        # 按 MD5 去重（一个文档可能被切分为多个 chunk）
+        seen_md5s = set()
+        docs = []
+        for meta in chroma_metadatas:
+            md5 = meta.get("md5", "")
+            if md5 and md5 not in seen_md5s:
+                seen_md5s.add(md5)
+                docs.append({
+                    "md5": md5,
+                    "original_filename": meta.get("original_filename", "未知"),
+                    "upload_time": meta.get("created_at", ""),
+                })
+
+        md5_set = {r.get("md5") for r in self._md5_store.get_user_documents_info(user_id)}
+
+        # 反向同步：ChromaDB 有但 MD5 存储缺失的，补写回去（确保去重检查准确）
+        for doc in docs:
+            if doc["md5"] not in md5_set:
+                self._md5_store.save_md5_hex(
+                    user_id, doc["md5"], doc["original_filename"]
+                )
+                logger.warning(
+                    f"【一致性】补写缺失的 MD5 记录: {doc['original_filename']} ({doc['md5'][:12]}...)"
+                )
+
+        # 正向清理：MD5 存储有但 ChromaDB 不存在的，删除
+        for md5 in md5_set:
+            if md5 not in seen_md5s:
+                self._md5_store.delete_single_md5(user_id, md5)
+                logger.warning(f"【一致性】清理游离 MD5 记录: {md5[:12]}...")
+
+        if md5_set != seen_md5s:
+            HybridRetriever.invalidate_cache(user_id)
+
+        return docs
 
     def _delete_image_directory(self, user_id: str, md5: str):
         import shutil
