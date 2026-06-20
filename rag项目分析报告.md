@@ -282,48 +282,64 @@ MIME类型双重校验（MIME类型 + 扩展名，二者之一匹配即可）
 压缩包上传 (.zip / .tar.gz / .rar)
     │
     ▼
-文件校验
-    ├── 扩展名白名单 → 不通过 → 返回 400
-    └── 大小 ≤ 500MB → 不通过 → 返回 413
-    │
-    ▼
-创建任务 & 返回 task_id
-    │  POST /api/knowledge/upload_zip → {"task_id": "zip_abc123", "status": "pending"}
-    │
-    ▼
-后台异步处理 (zip_handler.py)
-    │
-    ├── 1. 解压到临时目录 data/tmp/{task_id}/
-    │
-    ├── 2. 递归扫描所有文件
-    │   ├── 格式在 allow_knowledge_file_types 内 → 加入处理队列
-    │   └── 格式不支持 → 跳过（记录 error_type: unsupported_format）
-    │
-    ├── 3. 并行处理 (ThreadPoolExecutor, max_workers=4)
-    │   │
-    │   │   for each file in parallel:
-    │   │   ├── MD5 去重检查 → 重复 → 跳过（error_type: duplicate）
-    │   │   ├── 格式校验 → 不支持 → 跳过（error_type: unsupported_format）
-    │   │   ├── 文档加载 → 失败 → 跳过（error_type: parse_failed）
-    │   │   ├── 文本切分 → 空 → 跳过（error_type: empty_content）
-    │   │   └── 向量入库 → 成功 → success++
-    │   │
-    │   └── 单文件失败不中断整包，收集所有错误
-    │
-    ├── 4. 清理临时目录
-    │   └── 删除 data/tmp/{task_id}/
-    │
-    └── 5. 更新任务状态
-        ├── status: completed
-        ├── progress: {total, success, skipped, failed}
-        └── error_details: [{file_path, error_type, reason}, ...]
+┌─ Zip压缩包上传（独有外层逻辑）──────────────┐
+│ 文件校验                                   │
+│   ├── 扩展名白名单 → 不通过 → 返回 400      │
+│   └── 大小 ≤ 300MB → 不通过 → 返回 413      │
+│                                             │
+│ 创建 zip_batch_task_id，状态 pending        │
+│   │  POST /api/knowledge/upload_zip         │
+│   │  → {"task_id": "zip_abc123",            │
+│   │     "status": "pending"}                │
+│                                             │
+│ 后台异步处理 (zip_handler.py)               │
+│   ├── 1. 解压到隔离临时目录                 │
+│   │      data/tmp/zip_{task_id}/            │
+│   │                                         │
+│   ├── 2. 递归扫描过滤有效子文件              │
+│   │   ├── 在 allow_knowledge_file_types → 加入队列 │
+│   │   ├── 格式不支持 → 跳过(unsupported_format)    │
+│   │   └── 解压后总大小 ≤ 200MB → 超限直接失败      │
+│   │                                         │
+│   ├── 3. 线程池并发 ─→ 逐个进入             │
+│   │   │           【全局公共复用文档管道】    │
+│   │   │              ↓                      │
+│   │   │   ┌─────────────────────────────┐  │
+│   │   │   │ ① MD5 全局查重               │  │
+│   │   │   │ ② 文件格式分流               │  │
+│   │   │   │ ③ 统一文本清洗               │  │
+│   │   │   │ ④ 切片处理                   │  │
+│   │   │   │ ⑤ 向量入库(全局并发写信号量)  │  │
+│   │   │   │ ⑥ MD5 入库记录               │  │
+│   │   │   └─────────────────────────────┘  │
+│   │   │   返回 FileProcessResult            │
+│   │   └── 单文件失败不中断整包              │
+│   │                                         │
+│   ├── 4. 聚合结果                           │
+│   │   ├── 成功文件数 → success++            │
+│   │   ├── 重复文件 → skipped (duplicate)    │
+│   │   └── 失败文件 → failed + error_details │
+│   │                                         │
+│   ├── 5. 清理隔离临时目录                   │
+│   │   └── 删除 data/tmp/zip_{task_id}/      │
+│   │                                         │
+│   ├── 6. 任一成功则刷新 BM25 缓存           │
+│   │   └── HybridRetriever.invalidate_cache  │
+│   │                                         │
+│   └── 7. 更新任务为 completed               │
+│       ├── progress: {total, success,        │
+│       │             skipped, failed}         │
+│       └── error_details: [{file_path,       │
+│            error_type, reason}, ...]         │
+│                                             │
+└─────────────────────────────────────────────┘
     │
     ▼
 前端轮询 GET /api/knowledge/task/{task_id}
     │
     ├── 成功文件 → 已入库，可检索
     ├── 跳过文件 → 提示「格式不支持，可单独上传」
-    └── 失败文件 → 提示「以下文件解析失败，请单独重新上传对应文件」
+    └── 失败文件 → 提示「以下文件解析失败，请单独重新上传」
 ```
 
 ### 3.0.1 rag系统文档检索流程
@@ -1433,19 +1449,51 @@ data/md5_hex_store/
 
 > 在知识库场景中，用户极少故意上传内容高度重叠的不同文件。文件级 MD5 已覆盖 >99% 的重复场景，无需引入 chunk 级内容指纹增加计算和存储开销。
 
-### 5.8 压缩包上传与并行解析
+### 5.8 压缩包上传与并行解析 — 优化版
 
-支持用户上传 `.zip` / `.tar.gz` / `.rar` 压缩包，后台异步解压后并行解析其中的文档文件，单文件失败不中断整包。
+支持用户上传 `.zip` / `.tar.gz` 压缩包，后台异步解压后通过**全局公共复用文档管道**并行处理子文件，单文件失败不中断整包。
 
-#### 5.8.1 设计原则
+#### 5.8.1 架构设计
+
+压缩包上传分为**外层独有逻辑**和**全局公共复用文档管道**两部分：
+
+**外层独有逻辑（zip_handler.py）**：解压、扫描、并行调度、结果聚合、缓存刷新
+**全局公共复用文档管道（_process_file_through_shared_pipeline）**：两条上传链路完全共用
+
+```
+┌─ Zip压缩包上传（独有外层逻辑）──────────────┐
+│ 总包校验：后缀白名单 + ≤ 300MB              │
+│ 创建 zip_batch_task_id，状态 pending        │
+│ 解压至隔离临时目录 data/tmp/zip_{task_id}/   │
+│ 递归扫描过滤有效子文件                      │
+│   ├── 解压后总和 ≤ 200MB → 超限直接失败     │
+│   └── 不支持的格式 → 计入 skipped           │
+│                                              │
+│ 线程池并发 → 逐个进入【全局公共复用文档管道】│
+│   └── _process_file_through_shared_pipeline │
+│       ├── ① MD5 全局查重                    │
+│       ├── ② 文件格式分流 (PDF/普通)          │
+│       ├── ③ 统一文本清洗                    │
+│       ├── ④ 切片处理                        │
+│       ├── ⑤ 向量入库(全局并发写信号量)      │
+│       └── ⑥ 写入 MD5 入库记录              │
+│       → 返回 FileProcessResult              │
+│                                              │
+│ 聚合统计 total/success/skipped/failed       │
+│ 任一成功 → HybridRetriever.invalidate_cache │
+│ 整体删除解压临时目录                        │
+│ 更新批量任务为 completed                    │
+└──────────────────────────────────────────────┘
+```
 
 | 原则 | 说明 |
 |------|------|
-| **单文件失败不中断整包** | 压缩包中某文件解析失败时，跳过该文件继续处理其余文件 |
-| **复用现有解析逻辑** | 解压后的文件直接走 5.2 ~ 5.7 的文档处理流程，零重复代码 |
-| **异步后台处理** | 压缩包上传后立即返回 `task_id`，后台异步处理，前端轮询获取进度 |
-| **结构化错误反馈** | 收集所有失败文件的路径和原因，前端可据此引导用户单独重传 |
-| **支持混合文件类型** | 压缩包内可同时包含 PDF、TXT、MD、DOCX、PPTX 等不同格式 |
+| **全局公共复用文档管道** | `_process_file_through_shared_pipeline()` 同时服务单文件和压缩包两条链路，零重复代码 |
+| **共享 DocumentProcessor** | `_get_shared_processor()` 懒加载单例，线程池中复用同一实例 |
+| **单文件失败不中断整包** | `asyncio.gather(return_exceptions=True)` 保障 |
+| **异步后台处理** | 压缩包上传后立即返回 `task_id`，前端轮询获取进度 |
+| **结构化错误反馈** | 每个子文件返回 `FileProcessResult`，聚合为 `error_details` |
+| **缓存一致性** | 任一文件成功入库后统一刷新 BM25 缓存 |
 
 #### 5.8.2 上传接口
 
@@ -1455,10 +1503,10 @@ POST /api/knowledge/upload_zip
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:---:|------|
-| `file` | UploadFile | ✅ | 压缩包文件（.zip / .tar.gz / .rar） |
+| `file` | UploadFile | ✅ | 压缩包文件（.zip / .tar.gz） |
 | `user_id` | str | ✅ | 用户 ID |
 
-**响应（立即返回）**：
+**响应（立即返回 200）**：
 
 ```json
 {
@@ -1485,13 +1533,7 @@ GET /api/knowledge/task/{task_id}
     "data": {
         "task_id": "zip_abc123def456",
         "status": "processing",
-        "progress": {
-            "total": 15,
-            "success": 8,
-            "skipped": 1,
-            "failed": 0,
-            "pending": 6
-        }
+        "progress": {"total": 15, "success": 8, "skipped": 1, "failed": 0, "pending": 6}
     }
 }
 ```
@@ -1504,30 +1546,12 @@ GET /api/knowledge/task/{task_id}
     "data": {
         "task_id": "zip_abc123def456",
         "status": "completed",
-        "progress": {
-            "total": 15,
-            "success": 12,
-            "skipped": 2,
-            "failed": 1
-        },
+        "progress": {"total": 15, "success": 12, "skipped": 2, "failed": 1},
         "error_details": [
-            {
-                "file_path": "report/2023/财务分析.xlsx",
-                "error_type": "unsupported_format",
-                "reason": "不支持的文件格式: .xlsx"
-            },
-            {
-                "file_path": "docs/损坏文件.pdf",
-                "error_type": "parse_failed",
-                "reason": "PDF 文件已损坏，无法打开"
-            },
-            {
-                "file_path": "images/logo.png",
-                "error_type": "unsupported_format",
-                "reason": "不支持的文件格式: .png"
-            }
-        ],
-        "summary": "成功 12 个，跳过 2 个（格式不支持），失败 1 个（解析失败）"
+            {"file_path": "report/2023/财务分析.xlsx", "error_type": "unsupported_format", "reason": "不支持的文件格式: .xlsx"},
+            {"file_path": "docs/损坏文件.pdf", "error_type": "parse_failed", "reason": "PDF 文件已损坏"},
+            {"file_path": "images/logo.png", "error_type": "unsupported_format", "reason": "不支持的文件格式: .png"}
+        ]
     }
 }
 ```
@@ -1540,240 +1564,17 @@ GET /api/knowledge/task/{task_id}
 | `parse_failed` | 格式支持但解析过程出错 | 提示「文件可能已损坏，请重新上传」 |
 | `duplicate` | MD5 重复，已存在知识库中 | 提示「该文件已上传，自动跳过」 |
 | `empty_content` | 解析后无有效文本内容 | 提示「文件内容为空，已跳过」 |
-| `size_exceeded` | 单文件超过大小限制 | 提示「文件过大，请压缩后上传」 |
+| `size_exceeded` | 压缩包或解压后总大小超限 | 提示「文件过大，请分批上传」 |
 
-#### 5.8.5 后台处理流程
+#### 5.8.5 与单文件上传的配合
 
-```
-POST /api/knowledge/upload_zip
-    │
-    ├── 1. 文件校验
-    │   ├── 检查扩展名（.zip / .tar.gz / .rar）
-    │   └── 检查文件大小（≤ 500MB）
-    │
-    ├── 2. 创建任务 & 返回 task_id
-    │   └── 状态: pending
-    │
-    └── 3. 后台异步处理（zip_handler.py）
-        │
-        ├── 3.1 解压到临时目录
-        │   └── data/tmp/{task_id}/
-        │
-        ├── 3.2 扫描所有文件（递归子目录）
-        │   ├── 过滤：仅保留 allow_knowledge_file_types 中的格式
-        │   └── 统计：total = 有效文件数 + 跳过文件数
-        │
-        ├── 3.3 并行处理（ThreadPoolExecutor, max_workers=4）
-        │   │
-        │   │   for each file in parallel:
-        │   │   ├── MD5 去重检查 → 重复则跳过（error_type: duplicate）
-        │   │   ├── 格式校验 → 不支持则跳过（error_type: unsupported_format）
-        │   │   ├── 文档加载 → 失败则跳过（error_type: parse_failed）
-        │   │   ├── 文本切分 → 空内容则跳过（error_type: empty_content）
-        │   │   └── 向量入库 → 失败则记录（error_type: parse_failed）
-        │   │
-        │   └── 收集所有失败文件路径 + 原因
-        │
-        ├── 3.4 清理临时目录
-        │   └── 删除 data/tmp/{task_id}/
-        │
-        └── 3.5 更新任务状态
-            ├── status: completed
-            └── error_details: [...]
-```
+| 场景 | 接口 | 说明 |
+|------|------|------|
+| 批量导入 | `POST /api/knowledge/upload_zip` | 压缩包上传，后台并行解析 |
+| 补传失败文件 | `POST /knowledge/add/single` | 复用现有单文件上传接口 |
+| 查询进度 | `GET /api/knowledge/task/{task_id}` | 前端轮询，间隔 2s |
 
-#### 5.8.6 核心代码
-
-```python
-# app/rag/zip_handler.py
-import zipfile
-import tarfile
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from app.utils.path_tool import get_data_path
-from app.utils.log_tool import get_logger
-
-logger = get_logger(__name__)
-
-class ZipTaskManager:
-    """压缩包任务管理器：解压 → 并行解析 → 错误收集"""
-
-    def __init__(self):
-        self.tasks: dict[str, dict] = {}  # task_id → 任务状态
-        self.executor = ThreadPoolExecutor(max_workers=4)
-
-    def create_task(self, file_path: Path, user_id: str) -> str:
-        """创建压缩包处理任务，返回 task_id"""
-        task_id = f"zip_{uuid.uuid4().hex[:12]}"
-        self.tasks[task_id] = {
-            "status": "pending",
-            "progress": {"total": 0, "success": 0, "skipped": 0, "failed": 0, "pending": 0},
-            "error_details": [],
-        }
-        asyncio.create_task(self._process(task_id, file_path, user_id))
-        return task_id
-
-    async def _process(self, task_id: str, file_path: Path, user_id: str):
-        """后台处理压缩包"""
-        tmp_dir = get_data_path(f"tmp/{task_id}")
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        error_details = []
-
-        try:
-            # 1. 解压
-            self._extract(file_path, tmp_dir)
-            logger.info(f"【压缩包】解压完成: {task_id}")
-
-            # 2. 扫描文件
-            from app.config.chroma_config import ALLOW_FILE_TYPES
-            all_files = list(tmp_dir.rglob("*"))
-            valid_files = [
-                f for f in all_files
-                if f.is_file() and f.suffix.lstrip(".") in ALLOW_FILE_TYPES
-            ]
-            skipped = [
-                f for f in all_files
-                if f.is_file() and f.suffix.lstrip(".") not in ALLOW_FILE_TYPES
-            ]
-
-            self.tasks[task_id]["progress"]["total"] = len(valid_files)
-            self.tasks[task_id]["progress"]["pending"] = len(valid_files)
-            self.tasks[task_id]["status"] = "processing"
-
-            # 记录跳过文件
-            for f in skipped:
-                relative_path = str(f.relative_to(tmp_dir))
-                error_details.append({
-                    "file_path": relative_path,
-                    "error_type": "unsupported_format",
-                    "reason": f"不支持的文件格式: {f.suffix}",
-                })
-                self.tasks[task_id]["progress"]["skipped"] += 1
-
-            # 3. 并行处理（单文件失败不中断）
-            loop = asyncio.get_event_loop()
-            futures = [
-                loop.run_in_executor(
-                    self.executor,
-                    self._process_single_file,
-                    f, user_id, tmp_dir,
-                )
-                for f in valid_files
-            ]
-            results = await asyncio.gather(*futures, return_exceptions=True)
-
-            # 4. 收集结果
-            for file_path_str, result in results:
-                if result["success"]:
-                    self.tasks[task_id]["progress"]["success"] += 1
-                else:
-                    self.tasks[task_id]["progress"]["failed"] += 1
-                    error_details.append({
-                        "file_path": file_path_str,
-                        "error_type": result["error_type"],
-                        "reason": result["reason"],
-                    })
-                self.tasks[task_id]["progress"]["pending"] -= 1
-
-            self.tasks[task_id]["status"] = "completed"
-            self.tasks[task_id]["error_details"] = error_details
-
-        except Exception as e:
-            self.tasks[task_id]["status"] = "failed"
-            self.tasks[task_id]["error_details"] = [{
-                "file_path": file_path.name,
-                "error_type": "parse_failed",
-                "reason": f"压缩包处理失败: {str(e)}",
-            }]
-            logger.error(f"【压缩包】处理失败: {task_id}, 原因: {e}")
-
-        finally:
-            # 清理临时目录
-            import shutil
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def _process_single_file(self, file_path: Path, user_id: str,
-                              base_dir: Path) -> tuple[str, dict]:
-        """处理单个文件（同步，在线程池中执行）"""
-        relative_path = str(file_path.relative_to(base_dir))
-        try:
-            # 复用现有文档处理流程
-            from app.rag.document_handler import DocumentHandler
-            handler = DocumentHandler()
-            handler.process(file_path, user_id)
-            return (relative_path, {"success": True})
-        except Exception as e:
-            return (relative_path, {
-                "success": False,
-                "error_type": self._classify_error(e),
-                "reason": str(e),
-            })
-
-    def _classify_error(self, error: Exception) -> str:
-        """分类错误类型"""
-        msg = str(error).lower()
-        if "md5" in msg or "duplicate" in msg or "已存在" in msg:
-            return "duplicate"
-        if "empty" in msg or "空" in msg:
-            return "empty_content"
-        if "size" in msg or "过大" in msg:
-            return "size_exceeded"
-        return "parse_failed"
-
-    def _extract(self, file_path: Path, dest: Path):
-        """解压文件（支持 zip / tar.gz / rar）"""
-        suffix = file_path.suffix.lower()
-        if suffix == ".zip":
-            with zipfile.ZipFile(file_path, "r") as zf:
-                zf.extractall(dest)
-        elif suffix in (".gz", ".tar") or ".tar" in file_path.name:
-            with tarfile.open(file_path, "r:*") as tf:
-                tf.extractall(dest)
-        else:
-            raise ValueError(f"不支持的压缩格式: {suffix}")
-
-    def get_task(self, task_id: str) -> dict | None:
-        """查询任务状态"""
-        return self.tasks.get(task_id)
-
-
-# zip_router.py
-from fastapi import APIRouter, UploadFile, File, Form
-from app.rag.zip_handler import ZipTaskManager
-
-zip_router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
-task_manager = ZipTaskManager()
-
-@zip_router.post("/upload_zip")
-async def upload_zip(file: UploadFile = File(...), user_id: str = Form(...)):
-    """上传压缩包，后台异步处理"""
-    # 保存临时文件
-    tmp_path = get_data_path(f"tmp/upload_{uuid.uuid4().hex[:8]}_{file.filename}")
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp_path, "wb") as f:
-        f.write(await file.read())
-
-    task_id = task_manager.create_task(tmp_path, user_id)
-    return {
-        "code": 200,
-        "data": {
-            "task_id": task_id,
-            "status": "pending",
-            "message": "压缩包已接收，正在后台处理",
-        },
-    }
-
-@zip_router.get("/task/{task_id}")
-async def query_task(task_id: str):
-    """查询压缩包处理任务状态"""
-    task = task_manager.get_task(task_id)
-    if not task:
-        return {"code": 404, "message": "任务不存在"}
-    return {"code": 200, "data": task}
-```
-
-#### 5.8.7 前端展示规范
+> 两条链路均通过 `_process_file_through_shared_pipeline()` 调用 `DocumentProcessor.process()`，共用全局公共复用文档管道。
 
 ```
 ┌────────────────────────────────────────────────┐
