@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话 ID，新会话传 null")
     user_id: str = Field("default_user", description="用户标识")
     stream: bool = Field(True, description="是否流式返回")
+    mode: str = Field("agent", description="模式：agent(Agent工具链) | rag(直接RAG检索) | auto(自动判定)")
 
 
 # ============================================================

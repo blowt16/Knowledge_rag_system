@@ -3220,7 +3220,6 @@ SQLite 持久化写入 db/conversation.db
 | 限流 5次/分钟 | 单文件上传端点限流 | 未实现 | 后续迭代加限流中间件 |
 | EnsembleRetriever | 使用 LangChain EnsembleRetriever 融合 | 自定义 RRF 融合实现 | 功能等价，自定义更灵活控制 |
 | 多步推理工具 | 独立 `multi_step_reasoning` 工具 | 未实现 | LLM ReAct 循环自行分解复杂问题，无需独立工具 |
-| "普通检索模式" 独立路径 | 非 Agent 直接 RAG 查询路径 | 所有查询都走 Agent | Agent 架构统一入口更简单，Agent 自行决定是否调用 RAG |
 | `DocumentLoadException` | 诊断结果以异常形式抛出 | 以字典从 `process()` 返回 | 调用方统一处理，无需额外异常类型 |
 | `public_md5` 目录 | 公共 MD5 存储与用户目录并列 | 仅有 `user_md5` | 当前无公共文档需求 |
 | `model.eval() + torch.no_grad()` | 重排序显式推理模式 | `CrossEncoder.predict()` 内部处理 | sentence-transformers 自动管理推理模式 |
