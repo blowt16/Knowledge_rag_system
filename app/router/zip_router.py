@@ -1,14 +1,19 @@
 """压缩包上传与任务查询路由。"""
 import os
+import json
 import uuid
+import asyncio
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from app.config.loader import get_config
 from app.rag.zip_handler.zip_handler import ZipTaskManager
 from app.core.success_response import success_response
 from app.core.failed_response import AppException
 from app.utils.path_tool import get_data_path
+from app.utils.log_tool import get_logger
 
+logger = get_logger(__name__)
 zip_router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 _task_manager = ZipTaskManager()
 
@@ -56,3 +61,33 @@ async def query_task(task_id: str):
     if not task:
         raise AppException(message="任务不存在", code=404)
     return success_response(task)
+
+
+@zip_router.get("/task/{task_id}/stream")
+async def stream_task_progress(task_id: str):
+    """SSE 流式推送压缩包处理进度。前端连接后实时接收每文件处理结果。"""
+    q = _task_manager.get_stream(task_id)
+    if q is None:
+        raise AppException(message="任务不存在或已过期", code=404)
+
+    async def event_generator():
+        try:
+            while True:
+                event = await asyncio.wait_for(q.get(), timeout=600)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("event") == "done":
+                    break
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'event': 'error', 'data': '任务超时'})}\n\n"
+        finally:
+            _task_manager.cleanup_queue(task_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
