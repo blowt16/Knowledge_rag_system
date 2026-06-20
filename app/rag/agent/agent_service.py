@@ -10,11 +10,9 @@ class AgentService:
     """LangChain Agent 编排服务：工具链注册 + 推理循环 + 流式输出。"""
 
     def __init__(self):
-        self._agent_executor = None
-        self._tools = None
+        self._tools_cache: dict[str, list] = {}
 
     def _get_llm(self):
-        """获取 LLM 实例。"""
         from app.core.background_init import init_manager
         llm = init_manager.chat_model
         if llm is None:
@@ -22,24 +20,22 @@ class AgentService:
             llm = create_chat_model()
         return llm
 
-    def _get_tools(self):
-        """注册 Agent 工具链。"""
-        if self._tools is not None:
-            return self._tools
+    def _get_tools(self, user_id: str):
+        """注册 Agent 工具链（按 user_id 缓存）。"""
+        if user_id in self._tools_cache:
+            return self._tools_cache[user_id]
 
         from langchain_core.tools import tool
         from app.rag.rag_service import RAGService
-        from app.memory.memory_service import ConversationMemoryService
 
         rag_service = RAGService()
-        memory_svc = ConversationMemoryService()
 
         @tool
         def knowledge_search(query: str) -> str:
             """从用户知识库中检索相关文档（HyDE 改写 + 混合检索 + 重排序 + 摘要）。
             当需要查找用户上传的文档内容时使用此工具。
             """
-            result = rag_service.search_sync(query=query)
+            result = rag_service.search_sync(query=query, user_id=user_id)
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
             answer = result.get("answer", "")
@@ -49,10 +45,13 @@ class AgentService:
                 answer = "\n\n".join(lines)
             return answer
 
+        from app.rag.web_search_service import WebSearchService
+        web_svc = WebSearchService()
+
         @tool
         def web_search(query: str) -> str:
             """联网搜索补充外部实时信息。仅在知识库无相关内容时使用。"""
-            return f"联网搜索功能暂未配置 API Key，请使用知识库检索。（搜索词：{query}）"
+            return web_svc.search(query)
 
         @tool
         def summarize_document(content: str) -> str:
@@ -61,7 +60,6 @@ class AgentService:
                 return content
             try:
                 llm = self._get_llm()
-                from app.utils.prompt_loader import PromptLoader
                 loader = PromptLoader()
                 prompt = loader.load("summary", content=content)
                 response = llm.invoke(prompt)
@@ -70,22 +68,18 @@ class AgentService:
                 logger.error(f"摘要生成失败: {e}")
                 return content[:300] + "..."
 
-        self._tools = [knowledge_search, web_search, summarize_document]
-        return self._tools
+        self._tools_cache[user_id] = [knowledge_search, web_search, summarize_document]
+        return self._tools_cache[user_id]
 
-    def create_agent_with_history(self, session_id: str, chat_history: list = None):
-        """创建带消息历史的 Agent Executor。
-
-        Returns:
-            RunnableWithMessageHistory: 绑定消息历史的 Agent Executor
-        """
+    def create_agent_with_history(self, session_id: str, user_id: str = "default_user"):
+        """创建带消息历史的 Agent Executor。"""
         from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
         from langchain_core.runnables.history import RunnableWithMessageHistory
         from app.memory.memory_service import ConversationMemoryService
 
         llm = self._get_llm()
-        tools = self._get_tools()
+        tools = self._get_tools(user_id)
         memory_svc = ConversationMemoryService()
 
         loader = PromptLoader()
@@ -118,12 +112,8 @@ class AgentService:
 
     async def stream_chat(self, query: str, session_id: str,
                           user_id: str = "default_user") -> AsyncIterator[dict]:
-        """流式执行 Agent 对话，通过 SSE 推送事件。
-
-        Yields:
-            dict: {"event": str, "data": str} 格式的事件
-        """
-        agent = self.create_agent_with_history(session_id)
+        """流式执行 Agent 对话，通过 SSE 推送事件。"""
+        agent = self.create_agent_with_history(session_id, user_id)
 
         try:
             async for event in agent.astream_events(
