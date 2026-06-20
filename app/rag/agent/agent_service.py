@@ -21,7 +21,6 @@ class AgentService:
         return llm
 
     def _get_tools(self, user_id: str):
-        """注册 Agent 工具链（按 user_id 缓存）。"""
         if user_id in self._tools_cache:
             return self._tools_cache[user_id]
 
@@ -71,16 +70,13 @@ class AgentService:
         self._tools_cache[user_id] = [knowledge_search, web_search, summarize_document]
         return self._tools_cache[user_id]
 
-    def create_agent_with_history(self, session_id: str, user_id: str = "default_user"):
-        """创建带消息历史的 Agent Executor。"""
+    def _create_executor(self, user_id: str, chat_history: list = None):
+        """创建 AgentExecutor（不含 RunnableWithMessageHistory，手动管理历史）。"""
         from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from langchain_core.runnables.history import RunnableWithMessageHistory
-        from app.memory.memory_service import ConversationMemoryService
 
         llm = self._get_llm()
         tools = self._get_tools(user_id)
-        memory_svc = ConversationMemoryService()
 
         loader = PromptLoader()
         system_prompt = loader.load("agent") or loader.load("system")
@@ -93,32 +89,30 @@ class AgentService:
         ])
 
         agent = create_tool_calling_agent(llm, tools, prompt)
-        agent_executor = AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=True,
-            handle_parsing_errors=True,
-            max_iterations=5,
+        return AgentExecutor(
+            agent=agent, tools=tools,
+            verbose=True, handle_parsing_errors=True, max_iterations=5,
         )
-
-        agent_with_history = RunnableWithMessageHistory(
-            agent_executor,
-            lambda sid: memory_svc.get_message_history(sid),
-            input_messages_key="input",
-            history_messages_key="chat_history",
-        )
-
-        return agent_with_history
 
     async def stream_chat(self, query: str, session_id: str,
                           user_id: str = "default_user") -> AsyncIterator[dict]:
         """流式执行 Agent 对话，通过 SSE 推送事件。"""
-        agent = self.create_agent_with_history(session_id, user_id)
+        from app.memory.memory_service import ConversationMemoryService
+        memory_svc = ConversationMemoryService()
+
+        # 手动加载历史消息
+        chat_history = memory_svc.load_context(session_id)
+
+        agent = self._create_executor(user_id, chat_history)
 
         try:
+            # 用 agent.ainvoke 同步执行，在线程池中流式？
+            # 改用 astream_events 在 sync-mode 关闭的情况下
             async for event in agent.astream_events(
-                {"input": query},
-                config={"configurable": {"session_id": session_id}},
+                {
+                    "input": query,
+                    "chat_history": chat_history or [],
+                },
                 version="v2",
             ):
                 kind = event.get("event", "")
@@ -147,6 +141,10 @@ class AgentService:
                         "event": "done",
                         "data": str(output),
                     }
+                    # 持久化消息
+                    memory_svc.append_messages(
+                        session_id, query, str(output) if output else "",
+                    )
 
         except Exception as e:
             logger.error(f"Agent 执行失败: {e}")
