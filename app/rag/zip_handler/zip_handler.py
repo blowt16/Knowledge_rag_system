@@ -125,6 +125,12 @@ class ZipTaskManager:
 
             self.tasks[task_id]["status"] = "completed"
             self.tasks[task_id]["error_details"] = error_details
+            logger.info(
+                f"【压缩包】处理完成: {task_id} | "
+                f"成功 {progress['success']}/{progress['total']} 个文件"
+                + (f", 跳过 {progress['skipped']} 个" if progress['skipped'] else "")
+                + (f", 失败 {progress['failed']} 个" if progress['failed'] else "")
+            )
 
         except Exception as e:
             self.tasks[task_id]["status"] = "failed"
