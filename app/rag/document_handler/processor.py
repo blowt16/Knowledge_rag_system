@@ -1,0 +1,213 @@
+"""文档处理核心 — 加载 → 清洗 → 切分 → 入库 → MD5 记录。"""
+import os
+import re
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from app.utils.log_tool import get_logger
+from app.rag.md5_manager.md5_store import MD5Store
+from app.rag.text_spliter import AsyncTextSplitter
+from app.rag.vector_store import VectorStoreService
+
+logger = get_logger(__name__)
+
+# 魔数映射表 — 用于诊断兜底
+MAGIC_SIGNATURES = {
+    b'%PDF': ('corrupted', 'PDF 文件已损坏，无法解析'),
+    b'PK\x03\x04': ('corrupted', 'ZIP 容器文件已损坏（内部结构异常）'),
+    b'\x89PNG': ('unsupported_format', 'PNG 图片'),
+    b'\xff\xd8\xff': ('unsupported_format', 'JPEG 图片'),
+    b'GIF8': ('unsupported_format', 'GIF 图片'),
+    b'\xd0\xcf\x11\xe0': ('unsupported_format', '旧版 Office 格式（.doc/.ppt），请转换为 docx/pptx'),
+}
+
+
+def _clean_text(documents: list) -> list:
+    """文本清洗流水线（5 步）：控制字符 → 空白规范化 → 页眉页脚 → 模型标记 → 空内容过滤。"""
+    if not os.getenv("TEXT_CLEAN_ENABLED", "true").lower() == "true":
+        return documents
+
+    cleaned = []
+    for doc in documents:
+        text = doc.page_content
+
+        # ① 控制字符清理
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+        # ② 空白规范化
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r' {2,}', ' ', text)
+        text = '\n'.join(line.strip() for line in text.split('\n'))
+
+        # ③ 页眉页脚模式清除（常见页码/重复模式）
+        text = re.sub(r'第\s*\d+\s*页\s*/\s*共\s*\d+\s*页', '', text)
+        text = re.sub(r'^\d{1,4}$', '', text, flags=re.MULTILINE)
+
+        # ④ 视觉模型输出标记清理
+        text = re.sub(r'---\s*Page\s*\d+\s*---', '', text)
+
+        # ⑤ 空内容过滤
+        if not text.strip():
+            continue
+
+        doc.page_content = text.strip()
+        cleaned.append(doc)
+
+    return cleaned
+
+
+def diagnose_failure(file_bytes: bytes, filename: str, loader_errors: list[str] = None) -> dict:
+    """诊断兜底：所有 Loader 均失败后，检测魔数给出明确失败原因。"""
+    file_size = len(file_bytes)
+
+    if file_size == 0:
+        return {
+            "status": "failed", "reason": "empty_file",
+            "detail": "文件为空",
+            "suggestion": "文件内容为空，请检查后重新上传",
+            "filename": filename,
+        }
+
+    magic_bytes = file_bytes[:8]
+    magic_hex = magic_bytes.hex()
+
+    for signature, (reason, detail) in MAGIC_SIGNATURES.items():
+        if magic_bytes.startswith(signature):
+            suggestion = "文件可能已损坏，请重新导出/保存后上传" if reason == "corrupted" \
+                else "不支持该格式，支持的格式：pdf/txt/md/docx/pptx"
+            _log_diagnosis(filename, file_size, magic_hex, loader_errors or [], reason, detail)
+            return {
+                "status": "failed", "reason": reason,
+                "detail": detail, "suggestion": suggestion,
+                "filename": filename,
+            }
+
+    _log_diagnosis(filename, file_size, magic_hex, loader_errors or [], "unknown_format", "无法识别文件类型")
+    return {
+        "status": "failed", "reason": "unknown_format",
+        "detail": "无法识别文件类型",
+        "suggestion": "无法识别文件类型，请确认文件格式正确后重新上传",
+        "filename": filename,
+    }
+
+
+def _log_diagnosis(filename: str, file_size: int, magic_hex: str,
+                   loader_errors: list[str], reason: str, detail: str):
+    logger.error(
+        f"【诊断兜底】文件: {filename} | 大小: {file_size}B"
+        f"{' | 魔数: ' + magic_hex if magic_hex else ''}"
+    )
+    for err in loader_errors:
+        logger.error(f"  Loader 失败: {err}")
+    logger.error(f"  诊断: {reason} → {detail}")
+
+
+class DocumentProcessor:
+    """文档处理核心 — 加载 → 清洗 → 切分 → 向量化 → MD5。"""
+
+    def __init__(self):
+        self._vector_store = VectorStoreService()
+        self._md5_store = MD5Store()
+        self._splitter = AsyncTextSplitter()
+
+    async def process(self, file_path: str | Path, user_id: str,
+                      original_filename: str = "") -> dict:
+        """完整的文档处理管线。
+
+        Returns:
+            {"status": "done"/"duplicate"/"failed", "md5": str, ...}
+        """
+        file_path = Path(file_path)
+        if not original_filename:
+            original_filename = file_path.name
+
+        # 1. 计算 MD5
+        try:
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            md5_hex = hashlib.md5(file_bytes).hexdigest()
+        except Exception as e:
+            logger.error(f"【MD5计算】读取文件失败: {e}")
+            return {"status": "failed", "reason": str(e), "filename": original_filename}
+
+        # 2. MD5 去重
+        if self._md5_store.check_md5_exists(user_id, md5_hex):
+            logger.info(f"【向量数据库】文件 {original_filename} 的 md5 值 {md5_hex} 已存在，跳过")
+            return {"status": "duplicate", "md5": md5_hex, "filename": original_filename}
+
+        # 3. 加载文档
+        extension = file_path.suffix.lower().lstrip(".")
+        documents = []
+        loader_errors = []
+
+        try:
+            if extension == "pdf":
+                import asyncio
+                from app.utils.pdf_multimodal_loader import pdf_multimodal_loader
+
+                blocks = await pdf_multimodal_loader(str(file_path), user_id, md5_hex)
+                from langchain_core.documents import Document
+                for block in blocks:
+                    doc = Document(
+                        page_content=block["content"],
+                        metadata={
+                            "page": block["page_num"],
+                            "source": str(file_path),
+                            "image_paths": block.get("metadata", {}).get("image_paths", []),
+                            "has_images": block.get("metadata", {}).get("has_images", False),
+                        },
+                    )
+                    documents.append(doc)
+            else:
+                from app.utils.file_handler import load_file
+                documents = load_file(file_path, extension)
+                if not documents:
+                    loader_errors.append(f"{extension.upper()} Loader 返回空列表")
+
+        except Exception as e:
+            loader_errors.append(f"{extension.upper()} Loader 异常: {str(e)}")
+            logger.error(f"【文档加载】{extension.upper()} 加载失败: {e}")
+
+        # 诊断兜底
+        if not documents:
+            logger.error(f"【向量数据库】文件 {original_filename} 加载内容为空")
+            diagnosis = diagnose_failure(file_bytes, original_filename, loader_errors)
+            return {"status": "failed", "diagnosis": diagnosis, "filename": original_filename}
+
+        # 4. 文本清洗
+        documents = _clean_text(documents)
+        if not documents:
+            return {"status": "failed", "reason": "empty_content",
+                    "filename": original_filename, "md5": md5_hex}
+
+        # 5. 文本切分
+        documents = self._splitter.split_documents(documents)
+        if not documents:
+            logger.info(f"【向量数据库】文件 {original_filename} 切分内容为空，跳过")
+            return {"status": "failed", "reason": "empty_content",
+                    "filename": original_filename, "md5": md5_hex}
+
+        # 6. 注入元数据
+        for doc in documents:
+            doc.metadata["user_id"] = user_id
+            doc.metadata["md5"] = md5_hex
+            doc.metadata["original_filename"] = original_filename
+            doc.metadata["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # 7. 向量入库
+        try:
+            self._vector_store.add_documents(documents)
+            logger.info(f"【向量数据库】文件 {original_filename} 入库完成: {len(documents)} 个 chunk")
+        except Exception as e:
+            logger.error(f"【向量数据库】文件入库失败: {e}")
+            return {"status": "failed", "reason": str(e), "filename": original_filename, "md5": md5_hex}
+
+        # 8. 保存 MD5 记录
+        self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, str(file_path))
+
+        return {
+            "status": "done",
+            "md5": md5_hex,
+            "filename": original_filename,
+            "chunks": len(documents),
+        }
