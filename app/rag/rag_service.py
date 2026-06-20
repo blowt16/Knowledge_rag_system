@@ -30,7 +30,7 @@ class RAGService:
             strategy_info = get_retrieval_strategy(query, chat_history)
             need_rw = strategy_info["need_rewrite"]
             strategy = strategy_info["strategy"]
-            logger.info(f"【HyDE】开始处理查询: {query}, 策略: {strategy}")
+            logger.debug(f"【HyDE】开始处理查询: {query}, 策略: {strategy}")
 
             rewritten_query = None
             if need_rw:
@@ -45,10 +45,10 @@ class RAGService:
                 rewritten_query=rewritten_query, strategy=strategy)
 
             if not merged_docs:
-                logger.info("【HyDE】未检索到知识库文档")
+                logger.debug("【HyDE】未检索到知识库文档")
                 return {"answer": "", "documents": [], "rewritten_query": rewritten_query or query}
 
-            logger.info(f"【HyDE】检索到 {len(merged_docs)} 个知识库文档")
+            logger.debug(f"【HyDE】检索到 {len(merged_docs)} 个知识库文档")
 
             try:
                 reranked = self._reorder_svc.rerank(

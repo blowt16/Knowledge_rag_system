@@ -29,7 +29,7 @@ class AsyncTextSplitter:
             return []
         splitter = self._create_splitter()
         result = splitter.split_documents(documents)
-        logger.info(f"【文本切分】{len(documents)} 个文档 → {len(result)} 个 chunk")
+        logger.debug(f"【文本切分】{len(documents)} 个文档 → {len(result)} 个 chunk")
         return result
 
     async def async_split_documents(self, documents: list) -> list:

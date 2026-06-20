@@ -55,7 +55,7 @@ class VisionService:
 
             response = await model.ainvoke([message])
             result = response.content if hasattr(response, "content") else str(response)
-            logger.info(f"【视觉服务】图片描述成功: {image_path}")
+            logger.debug(f"【视觉服务】图片描述成功: {image_path}")
             return result.strip()
         except Exception as e:
             logger.warning(f"【视觉服务】描述图片失败 ({image_path}): {e}")

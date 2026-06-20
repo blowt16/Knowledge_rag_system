@@ -115,7 +115,7 @@ class DocumentProcessor:
 
         # 2. 去重
         if self._md5_store.check_md5_exists(user_id, md5_hex):
-            logger.info(f"【向量数据库】文件 {original_filename} 的 md5 值 {md5_hex} 已存在，跳过")
+            logger.debug(f"【向量数据库】文件 {original_filename} 的 md5 值 {md5_hex} 已存在，跳过")
             return {"status": "duplicate", "md5": md5_hex, "filename": original_filename}
 
         # 3. 加载
@@ -164,7 +164,7 @@ class DocumentProcessor:
         # 5. 切分
         documents = self._splitter.split_documents(documents)
         if not documents:
-            logger.info(f"【向量数据库】文件 {original_filename} 切分内容为空，跳过")
+            logger.debug(f"【向量数据库】文件 {original_filename} 切分内容为空，跳过")
             return {"status": "failed", "reason": "empty_content",
                     "filename": original_filename, "md5": md5_hex}
 

@@ -102,7 +102,7 @@ async def process_text_pdf(pdf_path: str) -> list[dict]:
                 blocks.append({"page_num": page_num, "block_type": "text", "content": text, "metadata": {}})
         doc.close()
         if blocks:
-            logger.info(f"【多模态PDF加载】纯文本解析完成: {len(blocks)} 页")
+            logger.debug(f"【多模态PDF加载】纯文本解析完成: {len(blocks)} 页")
             return blocks
     except Exception as e:
         logger.warning(f"【多模态PDF加载】PyMuPDF 提取失败: {e}，尝试 pdfplumber 兜底")
@@ -114,7 +114,7 @@ async def process_text_pdf(pdf_path: str) -> list[dict]:
                 text = page.extract_text()
                 if text and text.strip():
                     blocks.append({"page_num": page_num, "block_type": "text", "content": text.strip(), "metadata": {}})
-        logger.info(f"【多模态PDF加载】pdfplumber 兜底完成: {len(blocks)} 页")
+        logger.debug(f"【多模态PDF加载】pdfplumber 兜底完成: {len(blocks)} 页")
     except Exception as e:
         logger.error(f"【多模态PDF加载】pdfplumber 也失败: {e}")
 
@@ -163,7 +163,7 @@ async def process_mix_pdf(pdf_path: str, user_id: str, pdf_md5: str,
                 })
 
         doc.close()
-        logger.info(f"【多模态PDF加载】图文混合解析完成: {len(blocks)} 页")
+        logger.debug(f"【多模态PDF加载】图文混合解析完成: {len(blocks)} 页")
     except Exception as e:
         logger.error(f"【多模态PDF加载】图文混合解析失败: {e}")
 
@@ -226,7 +226,7 @@ async def process_scan_pdf(pdf_path: str, user_id: str, pdf_md5: str,
             })
 
         doc.close()
-        logger.info(f"【多模态PDF加载】扫描件解析完成: {len(blocks)} 页")
+        logger.debug(f"【多模态PDF加载】扫描件解析完成: {len(blocks)} 页")
     except Exception as e:
         logger.error(f"【多模态PDF加载】扫描件解析失败: {e}")
 

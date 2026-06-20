@@ -97,7 +97,7 @@ class ConversationMemoryService:
                 (session_id, user_id, title or "", now, now),
             )
             conn.commit()
-            logger.info(f"【会话记忆】创建会话: {session_id}")
+            logger.debug(f"【会话记忆】创建会话: {session_id}")
         finally:
             conn.close()
 
@@ -137,7 +137,7 @@ class ConversationMemoryService:
             conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
             conn.execute("DELETE FROM message_store WHERE session_id = ?", (session_id,))
             conn.commit()
-            logger.info(f"【会话记忆】删除会话: {session_id}")
+            logger.debug(f"【会话记忆】删除会话: {session_id}")
         finally:
             conn.close()
 

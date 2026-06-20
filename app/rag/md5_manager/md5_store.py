@@ -31,7 +31,7 @@ class MD5Store:
         }
         with open(store_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        logger.info(f"【向量数据库】文件 {original_filename} 的 md5 值 {md5} 已保存")
+        logger.debug(f"【向量数据库】文件 {original_filename} 的 md5 值 {md5} 已保存")
 
     def check_md5_exists(self, user_id: str, md5: str) -> bool:
         """检查 MD5 是否已存在。"""

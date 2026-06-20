@@ -38,7 +38,7 @@ class _BM25IndexCache:
         with self._lock:
             if user_id in self._cache:
                 del self._cache[user_id]
-                logger.info(f"【混合检索】用户 {user_id} BM25 缓存已失效")
+                logger.debug(f"【混合检索】用户 {user_id} BM25 缓存已失效")
 
 
 _bm25_cache = _BM25IndexCache()
@@ -71,7 +71,7 @@ class HybridRetriever:
         bm25 = BM25Retriever.from_documents(docs, k=self._k)
 
         _bm25_cache.set(user_id, bm25)
-        logger.info(f"【混合检索】BM25 索引已构建: {len(documents)} 条文档")
+        logger.debug(f"【混合检索】BM25 索引已构建: {len(documents)} 条文档")
         return bm25
 
     async def retrieve(self, query: str, user_id: str,
@@ -108,7 +108,7 @@ class HybridRetriever:
                 _bm25_search(), _vector_search())
 
         merged = self._rrf_fusion(bm25_results, vector_results)
-        logger.info(f"【混合检索】BM25: {len(bm25_results)} + 向量: {len(vector_results)} → RRF 融合: {len(merged)}")
+        logger.debug(f"【混合检索】BM25: {len(bm25_results)} + 向量: {len(vector_results)} → RRF 融合: {len(merged)}")
         return merged, {"bm25": bm25_results, "vector": vector_results}
 
     def _rrf_fusion(self, bm25_docs: list, vector_docs: list, k: int = None) -> list:

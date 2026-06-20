@@ -38,7 +38,7 @@ def txt_loader(file_path: Path) -> list:
             loader = TextLoader(str(file_path), encoding=encoding)
             docs = loader.load()
             if docs and docs[0].page_content.strip():
-                logger.info(f"【文本文件加载】使用编码 {encoding} 成功加载")
+                logger.debug(f"【文本文件加载】使用编码 {encoding} 成功加载")
                 return docs
         except Exception as e:
             logger.debug(f"【文本文件加载】编码 {encoding} 加载失败: {e}")
@@ -53,7 +53,7 @@ def markdown_loader(file_path: Path) -> list:
         loader = UnstructuredMarkdownLoader(str(file_path), mode="single")
         docs = loader.load()
         if docs and docs[0].page_content.strip():
-            logger.info("【Markdown文件加载】UnstructuredMarkdownLoader 成功加载")
+            logger.debug("【Markdown文件加载】UnstructuredMarkdownLoader 成功加载")
             return docs
     except Exception as e:
         logger.warning(f"【Markdown文件加载】UnstructuredMarkdownLoader 失败: {e}，尝试 TextLoader 兜底")
@@ -63,7 +63,7 @@ def markdown_loader(file_path: Path) -> list:
         loader = TextLoader(str(file_path), encoding="utf-8")
         docs = loader.load()
         if docs and docs[0].page_content.strip():
-            logger.info("【Markdown文件加载】TextLoader 兜底成功")
+            logger.debug("【Markdown文件加载】TextLoader 兜底成功")
             return docs
     except Exception as e:
         logger.error(f"【Markdown文件加载】TextLoader 兜底也失败: {e}")
@@ -77,7 +77,7 @@ def docx_loader(file_path: Path) -> list:
         loader = Docx2txtLoader(str(file_path))
         docs = loader.load()
         if docs and docs[0].page_content.strip():
-            logger.info("【WORD文件加载】Docx2txtLoader 成功加载")
+            logger.debug("【WORD文件加载】Docx2txtLoader 成功加载")
             return docs
     except Exception as e:
         logger.warning(f"【WORD文件加载】Docx2txtLoader 失败: {e}，尝试 python-docx 兜底")
@@ -88,7 +88,7 @@ def docx_loader(file_path: Path) -> list:
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
         if text.strip():
             from langchain_core.documents import Document as LCDoc
-            logger.info("【WORD文件加载】python-docx 兜底成功")
+            logger.debug("【WORD文件加载】python-docx 兜底成功")
             return [LCDoc(page_content=text, metadata={"source": str(file_path)})]
     except Exception as e:
         logger.error(f"【WORD文件加载】python-docx 兜底也失败: {e}")
@@ -102,7 +102,7 @@ def pptx_loader(file_path: Path) -> list:
         loader = UnstructuredPowerPointLoader(str(file_path), mode="single")
         docs = loader.load()
         if docs and docs[0].page_content.strip():
-            logger.info("【PPT文件加载】UnstructuredPowerPointLoader 成功加载")
+            logger.debug("【PPT文件加载】UnstructuredPowerPointLoader 成功加载")
             return docs
     except Exception as e:
         logger.warning(f"【PPT文件加载】UnstructuredPowerPointLoader 失败: {e}，尝试 python-pptx 兜底")
@@ -121,7 +121,7 @@ def pptx_loader(file_path: Path) -> list:
         text = "\n".join(texts)
         if text.strip():
             from langchain_core.documents import Document as LCDoc
-            logger.info("【PPT文件加载】python-pptx 兜底成功")
+            logger.debug("【PPT文件加载】python-pptx 兜底成功")
             return [LCDoc(page_content=text, metadata={"source": str(file_path)})]
     except Exception as e:
         logger.error(f"【PPT文件加载】python-pptx 兜底也失败: {e}")
