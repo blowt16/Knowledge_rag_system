@@ -3215,12 +3215,7 @@ SQLite 持久化写入 db/conversation.db
 
 | 设计项 | 报告描述 | 实际实现 | 原因 |
 |--------|---------|---------|------|
-| 单文件异步上传 | <10MB 内存处理，>10MB 流式写入，返回 202 + task_id | 全同步处理，所有文件写入临时磁盘 | 简化初版，后续可加异步模式 |
-| PDF 加密检测 | `fitz.open` 前检测密码，提示用户输入 | 未实现 | 加密 PDF 实际场景极少，PyMuPDF 会直接报错 |
-| 混合 PDF 的 pdfplumber + bbox 裁剪 | pdfplumber 提取表格/图表坐标，PyMuPDF 裁剪区域 | PyMuPDF 直接提取全页文本 + 多模态描述 | PyMuPDF 文本提取足够，简化处理 |
-| 混合 PDF 的 pHash 去重 | 页面级感知哈希去重 | 仅扫描 PDF 做去重 | 混合 PDF 页数少，多模态调用成本可控 |
-| 扫描 PDF 的 OpenCV 预处理 | 灰度/二值化/倾斜矫正/裁白边/降噪 | 仅渲染 144dpi 直接送多模态 LLM | 多模态 LLM 有足够鲁棒性处理原始扫描件 |
-| 区块类型粒度 | text/table/chart/image + bbox/level 等 | text/mix/scan 三种 | 下游只需要分页文本，粒度够用 |
+| 单文件异步上传 | <10MB 内存处理，>10MB 流式写入，返回 202 + task_id | 全同步处理，所有文件写入临时磁盘 | 后续可加异步模式 |
 | SharedSystemClient.clear_system_cache() | ChromaDB 初始化前清缓存 | 未实现 | ChromaDB 1.5+ 架构变更，不再需要 |
 | 限流 5次/分钟 | 单文件上传端点限流 | 未实现 | 后续迭代加限流中间件 |
 | EnsembleRetriever | 使用 LangChain EnsembleRetriever 融合 | 自定义 RRF 融合实现 | 功能等价，自定义更灵活控制 |
