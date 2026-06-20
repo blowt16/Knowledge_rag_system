@@ -57,7 +57,7 @@ class HybridRetriever:
 
         from app.rag.vector_store import VectorStoreService
         vs = VectorStoreService()
-        collection = vs.get_collection()
+        collection = vs._get_collection()
         results = collection.get(where={"user_id": user_id})
 
         documents = results.get("documents", [])

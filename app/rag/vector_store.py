@@ -13,6 +13,7 @@ class VectorStoreService:
 
     _instance = None
     _init_lock = threading.Lock()
+    _write_lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
@@ -53,12 +54,13 @@ class VectorStoreService:
         return self.get_store()._collection
 
     def add_documents(self, documents: list):
-        """批量添加文档。"""
+        """批量添加文档（串行化写入，避免 SQLite 并发写冲突）。"""
         if not documents:
             return
-        ids = [f"{doc.metadata.get('md5', 'unknown')}_{i}" for i, doc in enumerate(documents)]
-        self.get_store().add_documents(documents, ids=ids)
-        logger.debug(f"【向量数据库】已入库 {len(documents)} 条文档")
+        with self._write_lock:
+            ids = [f"{doc.metadata.get('md5', 'unknown')}_{i}" for i, doc in enumerate(documents)]
+            self.get_store().add_documents(documents, ids=ids)
+            logger.debug(f"【向量数据库】已入库 {len(documents)} 条文档")
 
     def similarity_search(self, query: str, user_id: str, k: int = None) -> list:
         """向量相似度检索，按 user_id 隔离。"""
@@ -70,21 +72,23 @@ class VectorStoreService:
 
     def delete_by_md5(self, user_id: str, md5: str):
         """按 MD5 删除文档。"""
-        try:
-            self._get_collection().delete(
-                where={"$and": [{"user_id": user_id}, {"md5": md5}]}
-            )
-            logger.info(f"【向量数据库】已删除用户 {user_id} 中 md5={md5} 的文档")
-        except Exception as e:
-            logger.error(f"【向量数据库】删除出错: {e}")
+        with self._write_lock:
+            try:
+                self._get_collection().delete(
+                    where={"$and": [{"user_id": user_id}, {"md5": md5}]}
+                )
+                logger.info(f"【向量数据库】已删除用户 {user_id} 中 md5={md5} 的文档")
+            except Exception as e:
+                logger.error(f"【向量数据库】删除出错: {e}")
 
     def delete_by_user(self, user_id: str):
         """清空用户所有文档。"""
-        try:
-            self._get_collection().delete(where={"user_id": user_id})
-            logger.info(f"【向量数据库】已删除用户 {user_id} 的所有文档")
-        except Exception as e:
-            logger.error(f"【向量数据库】删除出错: {e}")
+        with self._write_lock:
+            try:
+                self._get_collection().delete(where={"user_id": user_id})
+                logger.info(f"【向量数据库】已删除用户 {user_id} 的所有文档")
+            except Exception as e:
+                logger.error(f"【向量数据库】删除出错: {e}")
 
     def get_user_documents(self, user_id: str) -> list[dict]:
         """获取用户所有文档的 metadata。"""
