@@ -1,6 +1,6 @@
 # 本地知识库检索系统  
 
->| 向量数据库：ChromaDB | LLM 框架：LangChain 0.3+ | Web 框架：FastAPI
+>| 向量数据库：ChromaDB 1.5+ | LLM 框架：LangChain 1.3+ | Web 框架：FastAPI | 更新时间：2026-06-20
 
 ---
 
@@ -54,7 +54,9 @@
 | 重排序 | BGE-Reranker-v2-m3 CrossEncoder 模型 |
 | Agent 智能体 | LangChain Agent 工具链编排，检索增强推理与多步决策 |
 | 去重 | 文件级 MD5 去重 |
-| 会话记忆 | LangChain Memory + SQLite 全量存储，多轮对话上下文保持 |
+| 会话记忆 | RunnableWithMessageHistory + SQLite 持久化，多轮对话上下文保持 |
+| 自动降级 | ChatModel `with_fallbacks()` 机制，DeepSeek 失败自动切换 ChatTongyi |
+| 配置管理 | `.env` + `chroma.yaml` 集中管理 50+ 配置项，零硬编码 |
 
 ---
 
@@ -64,7 +66,7 @@
 
 | 组件 | 技术选型 | 备选方案 | 说明 |
 |------|----------|----------|------|
-| Chat 模型 | DeepSeek-V4-Pro (DashScope) | ChatTongyi (qwen3-max) | 通过 LangChain LLM 工厂通过环境变量切换 |
+| Chat 模型 | DeepSeek 官网 (deepseek-chat) | ChatTongyi (qwen3-max) | DeepSeek 优先，`with_fallbacks()` 自动降级到 ChatTongyi |
 | Embedding 模型 | DashScope (text-embedding-v4) | OllamaEmbeddings (qwen3-embedding:0.6b) | 通过 LangChain Embedding 工厂环境变量切换 |
 | 视觉模型 | ChatTongyi (qwen3.7-max-2026-06-08) | ChatOllama (qwen-vl:7b) | 通过 VISION_MODEL_TYPE 环境变量切换 |
 | 重排序模型 | BGE-Reranker-v2-m3 (CrossEncoder) | — | 从 ModelScope 下载，本地运行 |
@@ -75,21 +77,23 @@
 |------|----------|------|
 | Web 框架 | FastAPI | REST API |
 | 异步处理 | asyncio | 异步文件 I/O 与 LLM 调用 |
-| LLM 框架 | LangChain 0.3+ / LangChain-Community / LangChain-Core | 文档加载、切分、检索链、Agent 编排 |
-| 向量数据库 | ChromaDB 0.5.x | 向量持久化存储 |
+| LLM 框架 | LangChain 1.3+ / LangChain-Core 1.4+ / LangChain-Community | 文档加载、切分、检索链、Agent 编排 |
+| Agent 框架 | LangChain-Classic 1.0+ | create_tool_calling_agent + AgentExecutor |
+| 向量数据库 | ChromaDB 1.5+ via langchain-chroma 1.1+ | 向量持久化存储，通过 `langchain_chroma.Chroma` 统一管理 |
 | 会话存储 | SQLite | 对话记录全量持久化 |
 | 文件类型检测 | python-magic | MIME 类型验证 |
 
 ### 文档处理关键库
 
 ```
-langchain, langchain-core, langchain-community, langchain-chroma, langgraph
+langchain 1.3, langchain-core 1.4, langchain-community 0.4, langchain-classic 1.0
+langchain-chroma 1.1 (向量存储), langchain-openai 1.3 (DeepSeek 兼容接口)
 pymupdf (fitz) — PDF 文本/图片提取 + 页面渲染
-sentence-transformers — CrossEncoder 重排序 (bge-reranker-v2-m3)
-dashscope — 阿里云百炼 SDK（DeepSeek-V4-Pro / text-embedding-v4 / qwen3.7-max）
-modelscope — 模型下载
-aiofiles — 异步文件 I/O
-imagehash — 感知哈希去重
+sentence-transformers 5.6 — CrossEncoder 重排序 (bge-reranker-v2-m3)
+dashscope 1.25 — 阿里云百炼 SDK（text-embedding-v4 / qwen3.7-max）
+modelscope 1.37 — 模型下载
+aiofiles 25.1 — 异步文件 I/O
+imagehash 4.3 — 感知哈希去重
 sqlite3 — 会话记忆持久化
 ```
 
@@ -520,74 +524,83 @@ Knowledge_rag_system/
 ├── app/
 │   ├── __init__.py
 │   │
-│   ├── core/                               # 🧱 核心基础设施
+│   ├── core/                               # 核心基础设施
 │   │   ├── __init__.py
-│   │   ├── background_init.py              # 后台初始化管理器（模型/ChromaDB/重排序）
-│   │   ├── logger_handler.py               # 日志配置
-│   │   ├── success_response.py             # 统一成功响应
-│   │   └── failed_response.py              # 统一异常处理
+│   │   ├── background_init.py              # 后台异步初始化管理器
+│   │   ├── logger_handler.py               # 日志 Handler/Formatter 配置
+│   │   ├── success_response.py             # 统一成功响应格式
+│   │   └── failed_response.py              # 统一异常处理 + AppException
 │   │
-│   ├── config/                             # 配置文件目录
-│   │   ├── chroma.yaml                     # ChromaDB 配置（chunk_size, k, separators）
-│   │   └── prompt.yaml                     # Prompt 模板路径配置
-│   │
-│   ├── schemas/                             # 数据模型定义
+│   ├── config/                             # 配置文件
 │   │   ├── __init__.py
-│   │   └── models.py                        # Pydantic 请求/响应模型
+│   │   ├── loader.py                       # 统一配置加载器（chroma.yaml 缓存）
+│   │   ├── chroma.yaml                     # 30+ 项：检索/切分/阈值/词表/MIME/魔数
+│   │   ├── prompt.yaml                     # Prompt 模板路径映射
+│   │   └── prompts/                        # 6 个 Prompt 模板
+│   │       ├── system.txt                  # 系统级 Agent Prompt
+│   │       ├── hyde.txt                    # HyDE 假设性文档生成
+│   │       ├── agent.txt                   # Agent 推理 Prompt
+│   │       ├── summary.txt                 # 文档摘要 Prompt
+│   │       ├── rewrite.txt                 # 查询改写 Prompt
+│   │       └── vision.txt                  # 视觉模型描述 Prompt
 │   │
-│   ├── router/                             # API 路由层
+│   ├── schemas/
 │   │   ├── __init__.py
-│   │   ├── chat_router.py                 # 统一对话入口（Agent + RAG + 会话管理）
-│   │   ├── chat_service.py                # 对话业务逻辑层
-│   │   ├── knowledge_router.py             # 知识库 REST API 路由定义
-│   │   ├── knowledge_service.py            # 知识库业务逻辑层
-│   │   ├── conversation_router.py          # 会话记忆 REST API 路由定义
-│   │   ├── conversation_service.py         # 会话记忆业务逻辑层
-│   │   └── zip_router.py                   # 压缩包上传 + 任务查询路由
+│   │   └── models.py                       # Pydantic 请求/响应模型
+│   │
+│   ├── router/                             # API 路由层（13 个端点）
+│   │   ├── __init__.py
+│   │   ├── chat_router.py                  # POST /chat 统一对话入口（SSE 流式）
+│   │   ├── chat_service.py                 # 会话管理 + Agent 编排
+│   │   ├── knowledge_router.py             # 5 个知识库端点
+│   │   ├── knowledge_service.py            # 文件校验 + 三层联动删除
+│   │   ├── conversation_router.py          # 5 个会话端点
+│   │   ├── conversation_service.py         # 会话管理业务逻辑
+│   │   └── zip_router.py                   # 压缩包上传 + 任务查询
 │   │
 │   ├── rag/                                # RAG 核心模块
 │   │   ├── __init__.py
-│   │   ├── vector_store.py                 # ChromaDB 单例管理（向量存储）
-│   │   ├── text_spliter.py                 # 文本切分器（RecursiveCharacterTextSplitter）
-│   │   ├── reorder_service.py              # 重排序服务（CrossEncoder）
-│   │   ├── rag_service.py                  # RAG 核心（HyDE + 检索 + 重排序 + 摘要）
+│   │   ├── vector_store.py                 # langchain_chroma.Chroma 单例管理
+│   │   ├── text_spliter.py                 # 文本切分（RecursiveCharacterTextSplitter）
+│   │   ├── reorder_service.py              # 重排序（CrossEncoder，配置驱动）
+│   │   ├── rag_service.py                  # RAG 核心（HyDE+混合检索+重排序+LCEL摘要）
 │   │   │
-│   │   ├── document_handler/               # 文档处理子模块
+│   │   ├── document_handler/
 │   │   │   ├── __init__.py
-│   │   │   └── processor.py                # 文档处理核心（加载→清洗→切分→存储）
+│   │   │   └── processor.py                # 文档处理全链路 + 诊断兜底
 │   │   │
-│   │   ├── retrievers/                     # 检索子模块
+│   │   ├── retrievers/
 │   │   │   ├── __init__.py
-│   │   │   ├── hybrid_retriever.py         # 混合检索器（BM25 + 向量）
-│   │   │   ├── query_rewriter.py           # 查询改写与必要性分类器
-│   │   │   └── empty_retriever.py          # 空检索器（未登录占位）
+│   │   │   ├── hybrid_retriever.py         # BM25(LRU缓存)+向量并行+RRF融合
+│   │   │   ├── query_rewriter.py           # 两层分类器+HyDE改写（配置驱动）
+│   │   │   └── empty_retriever.py          # 空检索器占位
 │   │   │
-│   │   ├── agent/                          # Agent 智能体子模块
+│   │   ├── agent/
 │   │   │   ├── __init__.py
-│   │   │   └── agent_service.py            # LangChain Agent 编排服务
+│   │   │   └── agent_service.py            # langchain_classic Agent 编排
 │   │   │
-│   │   └── md5_manager/                    # MD5 去重子模块
+│   │   ├── md5_manager/
+│   │   │   ├── __init__.py
+│   │   │   └── md5_store.py                # MD5 JSON Lines 去重存储
+│   │   │
+│   │   └── zip_handler/
 │   │       ├── __init__.py
-│   │       └── md5_store.py                # MD5 去重存储管理
+│   │       └── zip_handler.py              # 压缩包解压+并行解析+错误收集
 │   │
-│   │   └── zip_handler/                    # 压缩包处理子模块
-│   │       ├── __init__.py
-│   │       └── zip_handler.py              # 压缩包解压 + 并行解析 + 错误收集
-│   │
-│   ├── memory/                             # 会话记忆模块
+│   ├── memory/
 │   │   ├── __init__.py
-│   │   └── memory_service.py               # 会话记忆服务（LangChain Memory + SQLite）
+│   │   └── memory_service.py               # SQLChatMessageHistory + SQLite 持久化
 │   │
-│   └── utils/                              # 工具模块
+│   └── utils/
 │       ├── __init__.py
-│       ├── factory.py                      # 模型工厂（Chat / Embed / Vision）
-│       ├── file_handler.py                 # 多格式文件加载器（TXT/MD/PPTX/DOCX）
-│       ├── pdf_multimodal_loader.py        # PDF 多模态解析加载器
-│       ├── image_extractor.py              # PDF 图片提取工具
-│       ├── vision_service.py               # 视觉模型调用服务
-│       ├── prompt_loader.py                # Prompt 模板加载器
-│       ├── path_tool.py                    # 路径工具
-│       └── log_tool.py                     # 日志工具（统一日志管理）
+│       ├── factory.py                      # 模型工厂（with_fallbacks 自动降级）
+│       ├── file_handler.py                 # 多格式加载器（配置驱动编码/类型）
+│       ├── pdf_multimodal_loader.py        # PDF 三分支多模态解析
+│       ├── image_extractor.py              # PDF 图片提取
+│       ├── vision_service.py               # 视觉服务（Prompt 模板化）
+│       ├── prompt_loader.py                # Prompt 统一加载器
+│       ├── path_tool.py                    # 路径统一管理
+│       └── log_tool.py                     # 日志统一管理
 │
 ├── data/                                   # 数据持久化目录
 │   ├── chromadb/                           # ChromaDB 向量数据库文件
@@ -2185,11 +2198,15 @@ Agent 入口 (agent_service.py)
 **Agent 创建（LangChain 0.3+ API）**：
 
 ```python
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 
-# 0. 统一工具导入
+# 0. ChatModel 含自动降级：DeepSeek → ChatTongyi
+from app.utils.factory import create_chat_model
+llm = create_chat_model()  # 返回 RunnableWithFallbacks
+
+# 1. 统一工具导入
 from app.utils.path_tool import get_db_path
 from app.utils.prompt_loader import PromptLoader
 
@@ -2269,8 +2286,8 @@ async for event in agent_with_history.astream_events(
 
 | 组件 | 技术选型 | 说明 |
 |------|----------|------|
-| Agent 框架 | `create_tool_calling_agent` + `AgentExecutor` | LangChain 0.3+ 原生 Agent 接口，支持 Tool Calling |
-| LLM | DeepSeek-V4-Pro (首选) / qwen3-max (备选) | 通过 LangChain ChatModel 工厂切换 |
+| Agent 框架 | `langchain_classic.agents.create_tool_calling_agent` + `AgentExecutor` | LangChain 1.x 兼容层，支持 Tool Calling |
+| LLM | DeepSeek 官网 (主) → ChatTongyi (自动降级) | `with_fallbacks()` 机制，调用失败自动切换 |
 | 工具注册 | `@tool` 装饰器 + `StructuredTool` | 标准化工具定义，自动生成 JSON Schema |
 | 记忆管理 | `RunnableWithMessageHistory` + `ChatMessageHistory` | LangChain 0.3+ 推荐的消息历史管理方式 |
 | 流式输出 | `agent_executor.astream_events()` | 实时推送 Agent 推理步骤（Thought/Action/Observation） |
@@ -2745,37 +2762,105 @@ logs/
 | 文件持久化 | 业务日志同时写入 `logs/` 目录，文件级别 `DEBUG` 保留完整信息 |
 | 级别可配 | 日志级别通过 `.env` 的 `LOG_LEVEL` 控制，生产环境可降为 `WARNING` 减少 I/O |
 
-### 9.1 chroma.yaml
+### 9.0 统一配置加载器 — loader.py
+
+所有模块通过 `app/config/loader.py` 统一读取 `chroma.yaml`，缓存配置避免重复解析：
+
+```python
+from app.config.loader import get_config, load_chroma_config, reload_config
+
+k = get_config("k", 3)                    # 读取单个配置项（点号分隔）
+cfg = load_chroma_config()                # 获取完整配置字典
+reload_config()                           # 强制热更新缓存
+```
+
+这也消除了各模块中散落的 `yaml.safe_load(open(...))` 重复代码。
+
+### 9.1 chroma.yaml（完整版，30+ 配置项）
 
 ```yaml
+# --- ChromaDB ---
 collection_name: rag_collection
-persist_directory: data/chromadb        # 由 path_tool.get_data_path("chromadb") 解析为绝对路径
-k: 3
-data_path: data
-md5_hex_store: data/md5_hex_store/md5_hex_store.txt  # 由 path_tool 解析
+persist_directory: data/chromadb
+hnsw_space: cosine
+chromadb_telemetry: false
+
+# --- 文件类型 ---
 allow_knowledge_file_types: ["txt", "pdf", "md", "pptx", "docx"]
+allowed_zip_extensions: [".zip", ".tar.gz", ".rar"]
+text_encodings: ["utf-8", "gbk", "gb2312", "latin-1"]
+mime_detect_buffer_size: 2048
+allowed_mime_types: {application/pdf: pdf, text/plain: txt, ...}
+
+# --- 魔数签名（诊断兜底） ---
+magic_signatures: {"%PDF": [corrupted, ...], ...}
+
+# --- 检索 ---
+k: 3
+rrf_constant: 60
+vector_search_multiplier: 2
+bm25_cache_size: 20
+
+# --- 文本切分 ---
 chunk_size: 500
 chunk_overlap: 50
 separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
+semantic_merge_threshold: 0.7
+
+# --- 查询改写（词表 + 阈值） ---
+pure_keyword_max_length: 6
+short_query_max_length: 15
+hyde_min_length: 3
+history_max_chars: 200
+query_words: ["什么", "怎么", ...]
+pronoun_words: ["它", "他", ...]
+
+# --- PDF 多模态 ---
+vision_min_text_length: 100
+dedup_hamming_distance: 10
+
+# --- RAG 摘要 ---
+summary_max_chars: 800
+fallback_max_chars: 500
 ```
+
+所有模块通过 `app.config.loader.get_config(key, default)` 统一读取，零硬编码。
 
 ### 9.2 核心环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| LLM_TYPE | DEEPSEEK | Chat 模型类型（首选 deepseek-v4-pro，备选 qwen3-max） |
-| EMBED_MODEL_TYPE | ALIYUN | Embedding 类型（首选 text-embedding-v4，备选 Ollama） |
-| VISION_MODEL_TYPE | ALIYUN | 视觉模型类型（qwen3.7-max-2026-06-08） |
-| VISION_BATCH_SIZE | 5 | 批次大小 |
-| VISION_DEDUP_ENABLED | true | 感知哈希去重 |
-| VISION_BATCH_LOW_RES | false | 已统一 144dpi 渲染，不再使用低分辨率 |
+| LLM_TYPE | DEEPSEEK | Chat 模型类型（DEEPSEEK / QWEN） |
+| EMBED_MODEL_TYPE | ALIYUN | Embedding 类型（ALIYUN / OLLAMA） |
+| VISION_MODEL_TYPE | ALIYUN | 视觉模型类型（ALIYUN / OLLAMA） |
+| DEEPSEEK_API_KEY | — | DeepSeek 官网 API Key（优先，更便宜） |
+| DEEPSEEK_MODEL | deepseek-chat | DeepSeek 官网模型名 |
+| DEEPSEEK_BASE_URL | https://api.deepseek.com/v1 | DeepSeek 官网 API 地址 |
 | ALIYUN_ACCESS_KEY | — | 阿里云百炼 API Key |
+| DEEPSEEK_ALIYUN_MODEL | deepseek-v4-pro | 百炼 DeepSeek 模型名（无官网 Key 时使用） |
+| ALIYUN_BASE_URL | https://dashscope.aliyuncs.com/compatible-mode/v1 | 百炼 API 地址 |
+| QWEN_MODEL_NAME | qwen3-max | ChatTongyi 模型名（降级备用） |
+| ALIYUN_EMBED_MODEL | text-embedding-v4 | 阿里云 Embedding 模型 |
+| OLLAMA_EMBED_MODEL | qwen3-embedding:0.6b | Ollama Embedding 模型 |
+| ALIYUN_VISION_MODEL | qwen3.7-max-2026-06-08 | 阿里云视觉模型 |
+| OLLAMA_VISION_MODEL | qwen-vl:7b | Ollama 视觉模型 |
+| LLM_TEMPERATURE | 0.7 | LLM 温度参数 |
 | OLLAMA_BASE_URL | http://localhost:11434 | Ollama 服务地址 |
-| RERANKER_MODEL_PATH | models/bge-reranker-v2-m3 | 重排序模型路径（由 path_tool.get_models_path() 解析为绝对路径） |
-| LOG_LEVEL | INFO | 日志级别（DEBUG / INFO / WARNING / ERROR） |
-| LOG_DIR | logs | 日志文件输出目录（由 path_tool.get_logs_path() 解析） |
+| VISION_BATCH_SIZE | 5 | 多模态批次大小 |
+| VISION_DEDUP_ENABLED | true | 感知哈希去重开关 |
+| SCAN_RENDER_SCALE | 2 | 扫描 PDF 渲染缩放（2=144dpi） |
+| RERANKER_MODEL_PATH | models/bge-reranker-v2-m3 | 重排序模型本地路径 |
+| RERANKER_MODELSCOPE_NAME | BAAI/bge-reranker-v2-m3 | ModelScope 模型名（自动下载） |
+| RERANKER_BATCH_SIZE | 1 | 重排序批次大小 |
+| RERANKER_MAX_LENGTH | 512 | 重排序最大 token 数 |
+| MAX_FILE_SIZE | 31457280 | 单文件上传限制（30MB） |
+| MAX_ZIP_SIZE | 524288000 | 压缩包上传限制（500MB） |
+| ZIP_MAX_WORKERS | 4 | 压缩包并行处理线程数 |
+| SEMANTIC_MERGE_MODEL | paraphrase-multilingual-MiniLM-L12-v2 | 语义合并模型 |
+| LOG_LEVEL | INFO | 日志级别 |
+| LOG_DIR | logs | 日志输出目录 |
 | MAX_MEMORY_TURNS | 10 | 会话记忆最大加载轮数 |
-| CONVERSATION_DB_PATH | db/conversation.db | 会话记忆 SQLite 数据库路径（由 path_tool.get_db_path() 解析） |
+| TEXT_CLEAN_ENABLED | true | 文本清洗开关 |
 
 ### 9.3 会话记忆配置
 
@@ -3082,6 +3167,7 @@ templates:
   agent:   app/config/prompts/agent.txt
   summary: app/config/prompts/summary.txt
   rewrite: app/config/prompts/rewrite.txt
+  vision:  app/config/prompts/vision.txt
 ```
 
 ---
@@ -3099,6 +3185,12 @@ templates:
 > - DOCX 加载器：已替换为 `Docx2txtLoader`（见 5.3 节）
 > - 文本清洗：已新增通用文本清洗流水线（见 5.3 节后）
 > - BM25 索引缓存：已新增 LRU 内存缓存机制（见 6.2 节）
+> - LangChain 1.x 适配：已迁移至 `langchain_classic` 兼容层，版本约束对齐
+> - 向量存储：已改用 `langchain_chroma.Chroma` 内置 API
+> - 配置提取：50+ 硬编码项已全部迁移至 `.env` + `chroma.yaml`
+> - Chat 降级：已使用 `with_fallbacks()` 实现 DeepSeek→ChatTongyi 自动切换
+> - RAG 摘要：已改为 `ChatPromptTemplate | llm | StrOutputParser` LCEL 管线
+> - 代码精简：移除死代码 `get_memory()`、手动转换 `_to_documents()` 等
 
 ---
 
@@ -3106,40 +3198,41 @@ templates:
 
 | 文件 | 职责 | 关键类/函数 |
 |------|------|-------------|
-| app/rag/vector_store.py | ChromaDB 单例管理 | VectorStoreService |
-| app/rag/document_handler/processor.py | 文档处理核心 | DocumentProcessor.get_document() |
+| app/rag/vector_store.py | langchain_chroma.Chroma 单例管理 | VectorStoreService |
+| app/rag/document_handler/processor.py | 文档处理核心 + 诊断兜底 | DocumentProcessor.process() |
 | app/rag/text_spliter.py | 文本切分 | AsyncTextSplitter |
-| app/rag/retrievers/hybrid_retriever.py | 混合检索 | HybridRetriever |
-| app/rag/retrievers/query_rewriter.py | 查询改写与分类器 | QueryRewriter, need_rewrite() |
-| app/rag/reorder_service.py | 重排序 | ReorderService |
-| app/rag/rag_service.py | RAG 核心（HyDE + 检索 + 重排序 + 摘要） | RAGService |
-| app/rag/agent/agent_service.py | LangChain Agent 编排 | AgentService |
-| app/rag/md5_manager/md5_store.py | MD5 去重存储 | MD5Store |
-| app/rag/zip_handler/zip_handler.py | 压缩包解压 + 并行解析 + 错误收集 | ZipTaskManager |
-| app/memory/memory_service.py | 会话记忆服务（LangChain + SQLite） | ConversationMemoryService |
+| app/rag/retrievers/hybrid_retriever.py | BM25(LRU缓存)+向量并行+RRF融合 | HybridRetriever |
+| app/rag/retrievers/query_rewriter.py | 两层分类器+HyDE改写（配置驱动） | get_retrieval_strategy(), hyde_rewrite() |
+| app/rag/reorder_service.py | CrossEncoder 重排序（配置驱动） | ReorderService |
+| app/rag/rag_service.py | RAG 核心（LCEL 摘要管线） | RAGService |
+| app/rag/agent/agent_service.py | langchain_classic Agent 编排 | AgentService |
+| app/rag/md5_manager/md5_store.py | MD5 JSON Lines 去重存储 | MD5Store |
+| app/rag/zip_handler/zip_handler.py | 压缩包解压+并行解析+错误收集 | ZipTaskManager |
+| app/memory/memory_service.py | SQLChatMessageHistory + SQLite | ConversationMemoryService |
 | app/router/chat_router.py | 统一对话入口 | POST /chat |
 | app/router/chat_service.py | 对话业务逻辑层 | ChatService |
-| app/router/knowledge_router.py | API 路由 | /knowledge/* |
-| app/router/knowledge_service.py | 业务逻辑层 | KnowledgeService |
-| app/router/conversation_router.py | 会话记忆 API 路由 | /conversation/* |
-| app/router/conversation_service.py | 会话记忆业务逻辑层 | ConversationService |
-| app/router/zip_router.py | 压缩包上传 + 任务查询 | POST /api/knowledge/upload_zip, GET /api/knowledge/task/{task_id} |
-| app/schemas/models.py | Pydantic 请求/响应模型 | AddRequest, QueryRequest 等 |
-| app/utils/pdf_multimodal_loader.py | PDF 多模态加载 | pdf_multimodal_loader[_sync]() |
-| app/utils/file_handler.py | 文本文件加载 | txt_loader, markdown_loader 等 |
-| app/utils/vision_service.py | 视觉模型服务 | VisionService |
+| app/router/knowledge_router.py | 5 个知识库端点 | /knowledge/* |
+| app/router/knowledge_service.py | 文件校验+三层联动删除 | KnowledgeService |
+| app/router/conversation_router.py | 5 个会话端点 | /conversation/* |
+| app/router/conversation_service.py | 会话管理 | ConversationService |
+| app/router/zip_router.py | 压缩包上传+任务查询 | POST /api/knowledge/upload_zip |
+| app/schemas/models.py | Pydantic 数据模型 | ChatRequest, TaskStatusResponse 等 |
+| app/utils/factory.py | 模型工厂（with_fallbacks 自动降级） | create_chat_model(), create_embedding_model() |
+| app/utils/file_handler.py | 多格式加载器（配置驱动） | load_file(), txt_loader() 等 |
+| app/utils/pdf_multimodal_loader.py | PDF 三分支多模态解析 | pdf_multimodal_loader() |
 | app/utils/image_extractor.py | PDF 图片提取 | extract_images_from_pdf() |
-| app/utils/factory.py | 模型工厂 | ChatModelFactory 等 |
-| app/utils/prompt_loader.py | Prompt 模板加载器 | PromptLoader, load(), reload() |
-| app/utils/path_tool.py | 路径工具（统一管理项目所有绝对路径） | get_project_root, resolve_path, get_data_path, get_db_path, get_logs_path, get_models_path |
-| app/utils/log_tool.py | 日志工具（统一日志管理） | get_logger, setup_logger, get_all_loggers |
-| app/core/background_init.py | 后台初始化 | _BackgroundInitManager |
-| app/core/logger_handler.py | 日志配置 | LogHandler.setup() |
-| app/core/success_response.py | 统一成功响应 | SuccessResponse |
-| app/core/failed_response.py | 统一异常处理 | FailedResponse, ExceptionHandler |
-| db/conversation.db | 会话记忆 SQLite 数据库 | 全量对话记录 |
-| app/config/chroma.yaml | ChromaDB 配置 | chunk_size, k, separators |
-| app/config/prompt.yaml | Prompt 模板路径 | 各 prompt 文件路径 |
+| app/utils/vision_service.py | 视觉服务（Prompt 模板化） | VisionService |
+| app/utils/prompt_loader.py | Prompt 统一加载器 | PromptLoader |
+| app/utils/path_tool.py | 路径统一管理 | get_data_path(), get_db_path() 等 |
+| app/utils/log_tool.py | 日志统一管理 | get_logger(), setup_logger() |
+| app/config/loader.py | 统一配置加载器 | get_config(), load_chroma_config() |
+| app/core/background_init.py | 后台异步初始化 | _BackgroundInitManager |
+| app/core/logger_handler.py | 日志 Handler 配置 | LogHandler.setup() |
+| app/core/success_response.py | 统一成功响应 | success_response() |
+| app/core/failed_response.py | 统一异常处理 | AppException, DocumentLoadException |
+| app/config/chroma.yaml | 30+ 配置项 | 检索/切分/阈值/词表/MIME/魔数 |
+| app/config/prompt.yaml | 6 个 Prompt 模板路径 | system/hyde/agent/summary/rewrite/vision |
+| db/conversation.db | 会话记忆 SQLite | 全量对话记录 |
 
 ---
 
