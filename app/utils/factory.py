@@ -48,20 +48,30 @@ def create_chat_model():
 
     if llm_type == "DEEPSEEK":
         from langchain_openai import ChatOpenAI
+        from langchain_community.chat_models import ChatTongyi
+
         deepseek_key = _env("DEEPSEEK_API_KEY")
         if deepseek_key:
-            return ChatOpenAI(
+            primary = ChatOpenAI(
                 model=_env("DEEPSEEK_MODEL", "deepseek-chat"),
                 openai_api_key=deepseek_key,
                 openai_api_base=_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
                 temperature=temperature,
             )
-        return ChatOpenAI(
-            model=_env("DEEPSEEK_ALIYUN_MODEL", "deepseek-v4-pro"),
-            openai_api_key=get_api_key(),
-            openai_api_base=_env("ALIYUN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        else:
+            primary = ChatOpenAI(
+                model=_env("DEEPSEEK_ALIYUN_MODEL", "deepseek-v4-pro"),
+                openai_api_key=get_api_key(),
+                openai_api_base=_env("ALIYUN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                temperature=temperature,
+            )
+
+        fallback = ChatTongyi(
+            model_name=_env("QWEN_MODEL_NAME", "qwen3-max"),
+            dashscope_api_key=get_api_key(),
             temperature=temperature,
         )
+        return primary.with_fallbacks([fallback])
     elif llm_type == "QWEN":
         from langchain_community.chat_models import ChatTongyi
         return ChatTongyi(
