@@ -55,6 +55,21 @@ class ZipTaskManager:
             valid_files = [f for f in all_files if f.is_file() and f.suffix.lstrip(".") in allow_types]
             skipped_files = [f for f in all_files if f.is_file() and f.suffix.lstrip(".") not in allow_types]
 
+            # 解压后所有文件总和上限检查
+            max_total = int(os.getenv("MAX_ZIP_TOTAL_SIZE", "209715200"))
+            total_size = sum(f.stat().st_size for f in valid_files)
+            if total_size > max_total:
+                max_total_mb = max_total // 1048576
+                actual_mb = total_size // 1048576
+                self.tasks[task_id]["status"] = "failed"
+                self.tasks[task_id]["error_details"] = [{
+                    "file_path": file_path.name,
+                    "error_type": "size_exceeded",
+                    "reason": f"解压后文件总大小 {actual_mb}MB 超过限制 {max_total_mb}MB",
+                }]
+                logger.warning(f"【压缩包】解压后总大小超限: {actual_mb}MB > {max_total_mb}MB")
+                return
+
             progress = self.tasks[task_id]["progress"]
             progress["total"] = len(valid_files)
             progress["pending"] = len(valid_files)

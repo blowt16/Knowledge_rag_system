@@ -38,8 +38,9 @@ async def upload_zip(
     tmp_path = tmp_dir / f"upload_{uuid.uuid4().hex[:8]}_{Path(filename).name}"
     content = await file.read()
 
+    max_size_mb = _get_max_zip_size() // 1048576
     if len(content) > _get_max_zip_size():
-        raise AppException(message="压缩包大小超过限制（最大 500MB）", code=413)
+        raise AppException(message=f"压缩包大小超过限制（最大 {max_size_mb}MB）", code=413)
 
     tmp_path.write_bytes(content)
     task_id = _task_manager.create_task(tmp_path, user_id)
