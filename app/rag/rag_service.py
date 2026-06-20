@@ -6,8 +6,6 @@ from app.rag.retrievers.query_rewriter import (
 )
 from app.rag.retrievers.hybrid_retriever import HybridRetriever
 from app.rag.reorder_service import ReorderService
-from app.utils.prompt_loader import PromptLoader
-
 logger = get_logger(__name__)
 
 
@@ -80,6 +78,9 @@ class RAGService:
 
         try:
             from app.core.background_init import init_manager
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_core.output_parsers import StrOutputParser
+
             llm = init_manager.chat_model
             if llm is None:
                 return self._format_docs(documents)
@@ -95,14 +96,14 @@ class RAGService:
                     ctx += f", 第{page}页"
                 ctx += f"\n{doc.page_content[:max_chars]}"
                 contexts.append(ctx)
-
             context_text = "\n\n---\n\n".join(contexts)
-            loader = PromptLoader()
-            summary_prompt = loader.load("summary", content=context_text)
-            prompt = f"用户问题：{query}\n\n知识库检索结果：\n{summary_prompt}\n\n请基于以上检索结果回答问题。如果检索结果不足以回答问题，请说明。回答要简洁明了。"
 
-            response = await llm.ainvoke(prompt)
-            answer = response.content if hasattr(response, "content") else str(response)
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "你是一个 RAG 知识库助手。基于以下检索结果回答问题。如果检索结果不足以回答问题，请说明。回答要简洁明了。"),
+                ("human", "用户问题：{query}\n\n知识库检索结果：\n{context}"),
+            ])
+            chain = prompt | llm | StrOutputParser()
+            answer = await chain.ainvoke({"query": query, "context": context_text})
             return answer.strip()
         except Exception as e:
             logger.error(f"【RAG】生成摘要失败: {e}")

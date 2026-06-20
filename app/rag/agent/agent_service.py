@@ -79,7 +79,7 @@ class AgentService:
         Returns:
             RunnableWithMessageHistory: 绑定消息历史的 Agent Executor
         """
-        from langchain.agents import create_tool_calling_agent, AgentExecutor
+        from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
         from langchain_core.runnables.history import RunnableWithMessageHistory
         from app.memory.memory_service import ConversationMemoryService

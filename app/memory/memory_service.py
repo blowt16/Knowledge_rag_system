@@ -58,17 +58,6 @@ class ConversationMemoryService:
             connection=f"sqlite:///{self._db_path}",
         )
 
-    def get_memory(self, session_id: str):
-        """创建带记忆的对话缓冲区。"""
-        from langchain.memory import ConversationBufferMemory
-
-        history = self.get_message_history(session_id)
-        return ConversationBufferMemory(
-            chat_memory=history,
-            return_messages=True,
-            memory_key="chat_history",
-        )
-
     def load_context(self, session_id: str, max_turns: int = None) -> list:
         """加载最近 N 轮对话作为上下文。
 
