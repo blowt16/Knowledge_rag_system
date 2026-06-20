@@ -17,7 +17,11 @@ def _get_vision_type() -> str:
 
 
 def get_api_key() -> str:
-    return os.getenv("ALIYUN_ACCESS_KEY", "")
+    key = os.getenv("ALIYUN_ACCESS_KEY", "")
+    # ChatTongyi 要求 DASHSCOPE_API_KEY 环境变量
+    if key and not os.getenv("DASHSCOPE_API_KEY"):
+        os.environ["DASHSCOPE_API_KEY"] = key
+    return key
 
 
 def get_ollama_base_url() -> str:

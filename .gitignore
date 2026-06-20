@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RAG System runtime data
+data/chromadb/
+data/extracted_images/
+data/tmp/
+data/md5_hex_store/
+db/*.db
+logs/*.log
+models/*/

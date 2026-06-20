@@ -60,16 +60,16 @@ class _BackgroundInitManager:
 
     async def _initialize_all(self):
         start_time = time.time()
-        logger.info("🔄 开始后台初始化...")
+        logger.info("[INIT] 开始后台初始化...")
 
         try:
             await self._init_models()
             await self._init_chromadb()
             await self._init_reranker()
             elapsed = time.time() - start_time
-            logger.info(f"✅ 后台初始化完成，耗时 {elapsed:.1f} 秒")
+            logger.info(f"[OK]后台初始化完成，耗时 {elapsed:.1f} 秒")
         except Exception as e:
-            logger.error(f"❌ 后台初始化失败: {e}")
+            logger.error(f"[ERR]后台初始化失败: {e}")
 
     async def _init_models(self):
         """初始化 Chat / Embedding / Vision 模型。"""
@@ -77,21 +77,21 @@ class _BackgroundInitManager:
 
         try:
             self._chat_model = create_chat_model()
-            logger.info("✅ chat_model 初始化完成")
+            logger.info("[OK]chat_model 初始化完成")
         except Exception as e:
-            logger.warning(f"⚠️ chat_model 初始化失败: {e}")
+            logger.warning(f"[WARN]chat_model 初始化失败: {e}")
 
         try:
             self._embed_model = create_embedding_model()
-            logger.info("✅ embed_model 初始化完成")
+            logger.info("[OK]embed_model 初始化完成")
         except Exception as e:
-            logger.warning(f"⚠️ embed_model 初始化失败: {e}")
+            logger.warning(f"[WARN]embed_model 初始化失败: {e}")
 
         try:
             self._vision_model = create_vision_model()
-            logger.info("✅ vision_model 初始化完成")
+            logger.info("[OK]vision_model 初始化完成")
         except Exception as e:
-            logger.warning(f"⚠️ vision_model 初始化失败: {e}")
+            logger.warning(f"[WARN]vision_model 初始化失败: {e}")
 
         self._models_ready.set()
 
@@ -101,9 +101,9 @@ class _BackgroundInitManager:
         try:
             from app.rag.vector_store import VectorStoreService
             VectorStoreService()
-            logger.info("✅ ChromaDB 向量数据库初始化完成")
+            logger.info("[OK]ChromaDB 向量数据库初始化完成")
         except Exception as e:
-            logger.error(f"❌ ChromaDB 初始化失败: {e}")
+            logger.error(f"[ERR]ChromaDB 初始化失败: {e}")
         self._chromadb_ready.set()
 
     async def _init_reranker(self):
@@ -112,9 +112,9 @@ class _BackgroundInitManager:
         try:
             from app.rag.reorder_service import ReorderService
             ReorderService()
-            logger.info("✅ ReorderService 初始化完成")
+            logger.info("[OK]ReorderService 初始化完成")
         except Exception as e:
-            logger.warning(f"⚠️ ReorderService 初始化失败: {e}")
+            logger.warning(f"[WARN]ReorderService 初始化失败: {e}")
         self._reranker_ready.set()
 
 
