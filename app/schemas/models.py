@@ -86,3 +86,17 @@ class TaskStatusResponse(BaseModel):
     progress: Optional[TaskProgress] = None
     error_details: Optional[list[TaskErrorDetail]] = None
     message: Optional[str] = None
+
+
+# ============================================================
+# 文档处理统一结果 — 全局公共复用文档管道
+# ============================================================
+
+class FileProcessResult(BaseModel):
+    """单文件处理统一结果。两条上传链路（单文件/压缩包）均使用此结构。"""
+    status: str  # "done" | "duplicate" | "failed"
+    md5: str = ""
+    filename: str = ""
+    chunks: int = 0
+    error_type: str = ""  # duplicate | empty_content | size_exceeded | parse_failed
+    reason: str = ""
