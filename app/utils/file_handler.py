@@ -1,14 +1,20 @@
 """多格式文件加载器 — TXT/MD/DOCX/PPTX，含降级链。"""
 from pathlib import Path
+from app.config.loader import get_config
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
 
-ALLOW_FILE_TYPES = {"txt", "pdf", "md", "pptx", "docx"}
+
+def _get_allow_types() -> set[str]:
+    return set(get_config("allow_knowledge_file_types", ["txt", "pdf", "md", "pptx", "docx"]))
+
+
+def _get_encodings() -> list[str]:
+    return get_config("text_encodings", ["utf-8", "gbk", "gb2312", "latin-1"])
 
 
 def load_file(file_path: str | Path, extension: str) -> list:
-    """根据扩展名选择加载器并加载文档。"""
     file_path = Path(file_path)
     ext = extension.lower().lstrip(".")
 
@@ -25,10 +31,9 @@ def load_file(file_path: str | Path, extension: str) -> list:
 
 
 def txt_loader(file_path: Path) -> list:
-    """TXT 加载器 — utf-8 → gbk 编码回退。"""
     from langchain_community.document_loaders import TextLoader
 
-    for encoding in ["utf-8", "gbk", "gb2312", "latin-1"]:
+    for encoding in _get_encodings():
         try:
             loader = TextLoader(str(file_path), encoding=encoding)
             docs = loader.load()
@@ -38,12 +43,11 @@ def txt_loader(file_path: Path) -> list:
         except Exception as e:
             logger.debug(f"【文本文件加载】编码 {encoding} 加载失败: {e}")
 
-    logger.error(f"【文本文件加载】所有编码均失败")
+    logger.error("【文本文件加载】所有编码均失败")
     return []
 
 
 def markdown_loader(file_path: Path) -> list:
-    """Markdown 加载器 — UnstructuredMarkdownLoader → TextLoader 兜底。"""
     try:
         from langchain_community.document_loaders import UnstructuredMarkdownLoader
         loader = UnstructuredMarkdownLoader(str(file_path), mode="single")
@@ -68,7 +72,6 @@ def markdown_loader(file_path: Path) -> list:
 
 
 def docx_loader(file_path: Path) -> list:
-    """DOCX 加载器 — Docx2txtLoader → python-docx 兜底。"""
     try:
         from langchain_community.document_loaders import Docx2txtLoader
         loader = Docx2txtLoader(str(file_path))
@@ -94,7 +97,6 @@ def docx_loader(file_path: Path) -> list:
 
 
 def pptx_loader(file_path: Path) -> list:
-    """PPTX 加载器 — UnstructuredPowerPointLoader → python-pptx 兜底。"""
     try:
         from langchain_community.document_loaders import UnstructuredPowerPointLoader
         loader = UnstructuredPowerPointLoader(str(file_path), mode="single")

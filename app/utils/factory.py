@@ -1,7 +1,6 @@
 """模型工厂 — Chat / Embedding / Vision 模型统一创建与切换。"""
 import os
 import threading
-from typing import Optional
 
 
 def _get_llm_type() -> str:
@@ -16,16 +15,26 @@ def _get_vision_type() -> str:
     return os.getenv("VISION_MODEL_TYPE", "ALIYUN").upper()
 
 
+def _env(key: str, default: str = "") -> str:
+    return os.getenv(key, default)
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, ""))
+    except ValueError:
+        return default
+
+
 def get_api_key() -> str:
-    key = os.getenv("ALIYUN_ACCESS_KEY", "")
-    # ChatTongyi 要求 DASHSCOPE_API_KEY 环境变量
+    key = _env("ALIYUN_ACCESS_KEY")
     if key and not os.getenv("DASHSCOPE_API_KEY"):
         os.environ["DASHSCOPE_API_KEY"] = key
     return key
 
 
 def get_ollama_base_url() -> str:
-    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    return _env("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 # ============================================================
@@ -35,22 +44,30 @@ def get_ollama_base_url() -> str:
 def create_chat_model():
     """创建 Chat 模型，通过 LLM_TYPE 环境变量切换。"""
     llm_type = _get_llm_type()
-    api_key = get_api_key()
+    temperature = _env_float("LLM_TEMPERATURE", 0.7)
 
     if llm_type == "DEEPSEEK":
         from langchain_openai import ChatOpenAI
+        deepseek_key = _env("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            return ChatOpenAI(
+                model=_env("DEEPSEEK_MODEL", "deepseek-chat"),
+                openai_api_key=deepseek_key,
+                openai_api_base=_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+                temperature=temperature,
+            )
         return ChatOpenAI(
-            model="deepseek-v4-pro",
-            openai_api_key=api_key,
-            openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            temperature=0.7,
+            model=_env("DEEPSEEK_ALIYUN_MODEL", "deepseek-v4-pro"),
+            openai_api_key=get_api_key(),
+            openai_api_base=_env("ALIYUN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            temperature=temperature,
         )
     elif llm_type == "QWEN":
         from langchain_community.chat_models import ChatTongyi
         return ChatTongyi(
-            model_name="qwen3-max",
-            dashscope_api_key=api_key,
-            temperature=0.7,
+            model_name=_env("QWEN_MODEL_NAME", "qwen3-max"),
+            dashscope_api_key=get_api_key(),
+            temperature=temperature,
         )
     else:
         raise ValueError(f"不支持的 LLM_TYPE: {llm_type}，可选值: DEEPSEEK / QWEN")
@@ -85,18 +102,17 @@ class _LazyEmbedding:
 def _create_embedding():
     """创建 Embedding 模型，通过 EMBED_MODEL_TYPE 环境变量切换。"""
     embed_type = _get_embed_type()
-    api_key = get_api_key()
 
     if embed_type == "ALIYUN":
         from langchain_community.embeddings import DashScopeEmbeddings
         return DashScopeEmbeddings(
-            model="text-embedding-v4",
-            dashscope_api_key=api_key,
+            model=_env("ALIYUN_EMBED_MODEL", "text-embedding-v4"),
+            dashscope_api_key=get_api_key(),
         )
     elif embed_type == "OLLAMA":
         from langchain_community.embeddings import OllamaEmbeddings
         return OllamaEmbeddings(
-            model="qwen3-embedding:0.6b",
+            model=_env("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b"),
             base_url=get_ollama_base_url(),
         )
     else:
@@ -115,18 +131,17 @@ def create_embedding_model():
 def create_vision_model():
     """创建视觉模型，通过 VISION_MODEL_TYPE 环境变量切换。"""
     vision_type = _get_vision_type()
-    api_key = get_api_key()
 
     if vision_type == "ALIYUN":
         from langchain_community.chat_models import ChatTongyi
         return ChatTongyi(
-            model_name="qwen3.7-max-2026-06-08",
-            dashscope_api_key=api_key,
+            model_name=_env("ALIYUN_VISION_MODEL", "qwen3.7-max-2026-06-08"),
+            dashscope_api_key=get_api_key(),
         )
     elif vision_type == "OLLAMA":
         from langchain_community.chat_models import ChatOllama
         return ChatOllama(
-            model="qwen-vl:7b",
+            model=_env("OLLAMA_VISION_MODEL", "qwen-vl:7b"),
             base_url=get_ollama_base_url(),
         )
     else:

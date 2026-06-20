@@ -2,10 +2,17 @@
 import os
 import base64
 from app.utils.log_tool import get_logger
+from app.utils.prompt_loader import PromptLoader
 
 logger = get_logger(__name__)
 
-VISION_PROMPT = """请详细描述这张图片的内容。如果是图表，请提取其中的数据；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"""
+
+def _get_vision_prompt() -> str:
+    loader = PromptLoader()
+    prompt = loader.load("vision")
+    if prompt:
+        return prompt
+    return "请详细描述这张图片的内容。如果是图表，请提取其中的数据；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"
 
 
 class VisionService:
@@ -27,14 +34,6 @@ class VisionService:
         return self._model
 
     async def describe_image(self, image_path: str) -> str:
-        """对图片进行多模态描述。
-
-        Args:
-            image_path: 图片文件的绝对路径
-
-        Returns:
-            图片描述文本，失败时返回空字符串
-        """
         model = self._get_model()
         if model is None:
             return ""
@@ -49,30 +48,21 @@ class VisionService:
             mime_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}
             mime_type = f"image/{mime_map.get(ext, 'png')}"
 
-            message = HumanMessage(
-                content=[
-                    {"type": "text", "text": VISION_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}},
-                ]
-            )
+            message = HumanMessage(content=[
+                {"type": "text", "text": _get_vision_prompt()},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_data}"}},
+            ])
 
             response = await model.ainvoke([message])
             result = response.content if hasattr(response, "content") else str(response)
             logger.info(f"【视觉服务】图片描述成功: {image_path}")
             return result.strip()
-
         except Exception as e:
             logger.warning(f"【视觉服务】描述图片失败 ({image_path}): {e}")
             return ""
 
     async def describe_image_batch(self, image_paths: list[str], batch_size: int = 5) -> dict[str, str]:
-        """批量并发表述多张图片。
-
-        Returns:
-            {image_path: description} 字典
-        """
         import asyncio
-
         results = {}
         for i in range(0, len(image_paths), batch_size):
             batch = image_paths[i:i + batch_size]

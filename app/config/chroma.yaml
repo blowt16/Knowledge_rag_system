@@ -1,9 +1,66 @@
+# ============================================================
+# ChromaDB & RAG 系统配置
+# ============================================================
+
+# --- ChromaDB ---
 collection_name: rag_collection
 persist_directory: data/chromadb
-k: 3
-data_path: data
-md5_hex_store: data/md5_hex_store/md5_hex_store.txt
+hnsw_space: cosine
+chromadb_telemetry: false
+
+# --- 文件类型 ---
 allow_knowledge_file_types: ["txt", "pdf", "md", "pptx", "docx"]
+allowed_zip_extensions: [".zip", ".tar.gz", ".rar"]
+text_encodings: ["utf-8", "gbk", "gb2312", "latin-1"]
+mime_detect_buffer_size: 2048
+
+# --- MIME 类型映射 ---
+allowed_mime_types:
+  application/pdf: pdf
+  text/plain: txt
+  text/markdown: md
+  application/vnd.openxmlformats-officedocument.wordprocessingml.document: docx
+  application/vnd.ms-powerpoint: pptx
+
+# --- 魔数签名 (诊断兜底) ---
+magic_signatures:
+  "%PDF": ["corrupted", "PDF 文件已损坏，无法解析"]
+  "PK\x03\x04": ["corrupted", "ZIP 容器文件已损坏（内部结构异常）"]
+  "‰PNG": ["unsupported_format", "PNG 图片"]
+  "ÿØÿ": ["unsupported_format", "JPEG 图片"]
+  "GIF8": ["unsupported_format", "GIF 图片"]
+  "ÐÏà": ["unsupported_format", "旧版 Office 格式（.doc/.ppt），请转换为 docx/pptx"]
+
+# --- 检索 ---
+k: 3
+rrf_constant: 60
+vector_search_multiplier: 2
+
+# --- BM25 缓存 ---
+bm25_cache_size: 20
+
+# --- 文本切分 ---
 chunk_size: 500
 chunk_overlap: 50
 separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
+semantic_merge_threshold: 0.7
+
+# --- 查询改写 ---
+pure_keyword_max_length: 6
+short_query_max_length: 15
+hyde_min_length: 3
+history_max_chars: 200
+query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
+pronoun_words: ["它", "他", "她", "这个", "那个", "这些", "那些", "它的", "他的", "她的", "这", "那", "上面", "前面", "刚才"]
+
+# --- PDF 多模态 ---
+vision_min_text_length: 100
+dedup_hamming_distance: 10
+
+# --- RAG 摘要 ---
+summary_max_chars: 800
+fallback_max_chars: 500
+
+# --- 路径 ---
+data_path: data
+md5_hex_store: data/md5_hex_store/md5_hex_store.txt
