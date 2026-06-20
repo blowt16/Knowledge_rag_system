@@ -1,0 +1,6 @@
+templates:
+  system: app/config/prompts/system.txt
+  hyde: app/config/prompts/hyde.txt
+  agent: app/config/prompts/agent.txt
+  summary: app/config/prompts/summary.txt
+  rewrite: app/config/prompts/rewrite.txt
