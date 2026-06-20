@@ -48,26 +48,24 @@ def txt_loader(file_path: Path) -> list:
 
 
 def markdown_loader(file_path: Path) -> list:
-    try:
-        from langchain_community.document_loaders import UnstructuredMarkdownLoader
-        loader = UnstructuredMarkdownLoader(str(file_path), mode="single")
-        docs = loader.load()
-        if docs and docs[0].page_content.strip():
-            logger.debug("【Markdown文件加载】UnstructuredMarkdownLoader 成功加载")
-            return docs
-    except Exception as e:
-        logger.warning(f"【Markdown文件加载】UnstructuredMarkdownLoader 失败: {e}，尝试 TextLoader 兜底")
+    """Markdown 加载 — 直接用 TextLoader（md 本质是纯文本，无需 unstructured 重依赖）。
 
-    try:
-        from langchain_community.document_loaders import TextLoader
-        loader = TextLoader(str(file_path), encoding="utf-8")
-        docs = loader.load()
-        if docs and docs[0].page_content.strip():
-            logger.debug("【Markdown文件加载】TextLoader 兜底成功")
-            return docs
-    except Exception as e:
-        logger.error(f"【Markdown文件加载】TextLoader 兜底也失败: {e}")
+    原 UnstructuredMarkdownLoader 依赖链: unstructured → markdown → spaCy
+    → en_core_web_sm 模型(需联网下载)，Windows 极易失败。
+    """
+    from langchain_community.document_loaders import TextLoader
 
+    for encoding in _get_encodings():
+        try:
+            loader = TextLoader(str(file_path), encoding=encoding)
+            docs = loader.load()
+            if docs and docs[0].page_content.strip():
+                logger.debug(f"【Markdown文件加载】使用编码 {encoding} 成功加载")
+                return docs
+        except Exception as e:
+            logger.debug(f"【Markdown文件加载】编码 {encoding} 加载失败: {e}")
+
+    logger.error("【Markdown文件加载】所有编码均失败")
     return []
 
 
