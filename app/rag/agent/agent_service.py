@@ -31,11 +31,11 @@ class AgentService:
         rag_service = RAGService()
 
         @tool
-        async def knowledge_search(query: str) -> str:
+        def knowledge_search(query: str) -> str:
             """从用户知识库中检索相关文档（HyDE 改写 + 混合检索 + 重排序 + 摘要）。
             当需要查找用户上传的文档内容时使用此工具。
             """
-            result = await rag_service.search(query=query, user_id=user_id)
+            result = rag_service.search_sync(query=query, user_id=user_id)
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
             answer = result.get("answer", "")
@@ -54,7 +54,7 @@ class AgentService:
             return web_svc.search(query)
 
         @tool
-        async def summarize_document(content: str) -> str:
+        def summarize_document(content: str) -> str:
             """对长文档内容进行摘要。"""
             if len(content) < 200:
                 return content
@@ -62,7 +62,7 @@ class AgentService:
                 llm = self._get_llm()
                 loader = PromptLoader()
                 prompt = loader.load("summary", content=content)
-                response = await llm.ainvoke(prompt)
+                response = llm.invoke(prompt)
                 return response.content if hasattr(response, "content") else str(response)
             except Exception as e:
                 logger.error(f"摘要生成失败: {e}")

@@ -121,15 +121,6 @@ class RAGService:
 
     def search_sync(self, query: str, user_id: str = "",
                     chat_history: list = None) -> dict:
-        """同步版 RAG 检索（线程池内调用，安全处理事件循环）。"""
+        """同步版 RAG 检索（nest_asyncio 保证事件循环安全）。"""
         import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.search(query, user_id, chat_history))
-
-        # 已有事件循环运行中，用 nest_asyncio 或直接在线程中执行
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(asyncio.run, self.search(query, user_id, chat_history))
-            return future.result()
+        return asyncio.run(self.search(query, user_id, chat_history))

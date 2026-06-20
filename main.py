@@ -4,6 +4,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# 允许嵌套事件循环（Agent 工具在事件循环中调用 asyncio.run 时需要）
+import nest_asyncio
+nest_asyncio.apply()
+
 # 自动加载 .env 文件
 try:
     from dotenv import load_dotenv
