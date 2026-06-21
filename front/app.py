@@ -122,6 +122,7 @@ with st.sidebar:
         "🔍 检索模式",
         options=list(mode_options.keys()),
         index=list(mode_options.values()).index(st.session_state.mode),
+        key="mode_select",
     )
     st.session_state.mode = mode_options[mode_label]
 

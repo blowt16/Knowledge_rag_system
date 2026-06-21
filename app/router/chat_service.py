@@ -1,5 +1,6 @@
 """对话业务逻辑层 — 统一对话入口，支持 Agent / RAG 双模式。"""
 import json
+import time
 from typing import AsyncIterator
 from app.memory.memory_service import ConversationMemoryService
 from app.agent.agent_service import AgentService
@@ -33,11 +34,11 @@ class ChatService:
             logger.info(f"【对话】继续会话: session={session_id[:8]}..., mode={mode}, query_len={len(query)}")
 
         if mode == "rag":
-            # 直接 RAG 检索路径：不经过 Agent，效率更高
+            logger.info(f"【对话】路由 → RAG直通: session={session_id[:8]}...")
             async for sse in self._handle_rag_stream(query, user_id, session_id):
                 yield sse
         else:
-            # Agent 工具链路径（含 mode="agent" 和 mode="auto"）
+            logger.info(f"【对话】路由 → Agent工具链: session={session_id[:8]}...")
             async for sse in self._handle_agent_stream(query, session_id, user_id):
                 yield sse
 
@@ -46,6 +47,7 @@ class ChatService:
         """RAG 直通模式：检索 → LLM 生成 → 流式输出。"""
         from app.core.background_init import init_manager
         from langchain_core.output_parsers import StrOutputParser
+        t_start = time.time()
 
         # 加载历史上下文
         history = self._memory.load_context(session_id)
@@ -110,10 +112,12 @@ class ChatService:
                 logger.error(f"【RAG直通】消息保存失败: session={session_id}")
 
         yield f"data: {json.dumps({'event': 'done', 'data': ''})}\n\n"
+        logger.info(f"【RAG直通】本轮耗时: {time.time() - t_start:.1f}s")
 
     async def _handle_agent_stream(self, query: str, session_id: str,
                                    user_id: str) -> AsyncIterator[str]:
         """Agent 工具链模式。持久化由 AgentService.stream_chat 的 finally 块保证。"""
+        t_start = time.time()
         logger.info(f"【Agent】开始处理: session={session_id[:8]}..., query_len={len(query)}")
         try:
             async for event in self._agent_svc.stream_chat(
@@ -123,3 +127,5 @@ class ChatService:
         except Exception as e:
             logger.error(f"对话处理失败: {e}")
             yield f"data: {json.dumps({'event': 'error', 'data': str(e)})}\n\n"
+        finally:
+            logger.info(f"【Agent】本轮耗时: {time.time() - t_start:.1f}s")

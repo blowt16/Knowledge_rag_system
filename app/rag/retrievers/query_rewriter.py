@@ -36,21 +36,19 @@ def is_pure_keyword(query: str) -> bool:
 
 
 def need_rewrite(query: str, conversation_history: list = None) -> bool:
-    """判断是否需要调用 HyDE 改写。"""
+    """判断是否需要调用 HyDE 改写。
+
+    仅在查询包含疑问词或代词时才改写——这些词表明查询是自然语言问题，
+    需要 HyDE 扩展上下文。纯关键字查询不会被改写。
+    """
     if is_pure_keyword(query):
         return False
 
     cleaned = preprocess_query(query)
-    pro_words = _get_pro_words()
-    q_words = _get_q_words()
 
-    if any(w in cleaned for w in pro_words):
+    if any(w in cleaned for w in _get_pro_words()):
         return True
-    if any(w in cleaned for w in q_words):
-        return True
-
-    short_max = get_config("short_query_max_length", 15)
-    if conversation_history and len(cleaned) < short_max:
+    if any(w in cleaned for w in _get_q_words()):
         return True
 
     return False

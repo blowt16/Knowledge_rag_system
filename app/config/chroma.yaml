@@ -46,8 +46,7 @@ separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
 semantic_merge_threshold: 0.7
 
 # --- 查询改写 ---
-pure_keyword_max_length: 6
-short_query_max_length: 15
+pure_keyword_max_length: 10
 hyde_min_length: 3
 history_max_chars: 200
 query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
