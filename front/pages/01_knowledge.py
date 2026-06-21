@@ -5,8 +5,6 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import time
-
 import pandas as pd
 import streamlit as st
 
@@ -15,10 +13,9 @@ from api_client import (
     upload_document,
     list_documents,
     delete_document_by_md5,
-    delete_document_by_filename,
     clear_knowledge,
     upload_zip,
-    get_zip_task_status,
+    stream_zip_progress,
 )
 
 st.set_page_config(page_title="知识库管理", page_icon="📦", layout="wide")
@@ -42,6 +39,8 @@ if "docs" not in st.session_state:
     st.session_state.docs = []
 if "docs_loaded" not in st.session_state:
     st.session_state.docs_loaded = False
+if "show_clear_confirm" not in st.session_state:
+    st.session_state.show_clear_confirm = False
 
 st.title("📦 知识库管理")
 
@@ -71,6 +70,7 @@ if uploaded_file is not None:
                     st.success(f"✅ 上传成功: {uploaded_file.name}")
                     st.json(data)
                 refresh_docs()
+                st.rerun()
             except Exception as e:
                 st.error(f"上传失败: {e}")
 
@@ -83,6 +83,7 @@ st.subheader("📦 批量上传（压缩包）")
 zip_file = st.file_uploader(
     "选择压缩包（zip/tar.gz/rar，最大 50MB）",
     type=ALLOWED_ZIP,
+    accept_multiple_files=False,
     key="zip_uploader",
 )
 if zip_file is not None:
@@ -93,49 +94,81 @@ if zip_file is not None:
             try:
                 result = upload_zip(zip_file.getvalue(), zip_file.name, USER_ID)
                 task_id = result.get("data", {}).get("task_id", "")
-                if task_id:
+                if not task_id:
+                    st.error("创建任务失败")
+                else:
                     st.success("压缩包已接收，正在后台处理...")
-                    # 轮询进度
                     bar = st.progress(0, "等待处理...")
                     status_placeholder = st.empty()
-                    done = False
-                    while not done:
-                        time.sleep(2)
-                        try:
-                            ts = get_zip_task_status(task_id)
-                            task_data = ts.get("data", {})
-                            status = task_data.get("status", "")
-                            progress = task_data.get("progress", {})
-                            total = progress.get("total", 0)
-                            success = progress.get("success", 0)
-                            skipped = progress.get("skipped", 0)
-                            failed = progress.get("failed", 0)
-                            completed = success + skipped + failed
+                    file_log_placeholder = st.empty()
+                    docs_done = []
+                    total = 0
+                    success_count = 0
+                    skipped_count = 0
+                    failed_count = 0
+
+                    for event in stream_zip_progress(task_id):
+                        ev_type = event.get("event", "")
+
+                        if ev_type == "status":
+                            data = event.get("data", "")
+                            # 初始进度（可能在 event 顶层或 data 内）
+                            prog = event.get("progress", {})
+                            if not prog and isinstance(data, dict):
+                                prog = data.get("progress", {})
+                            if prog:
+                                total = prog.get("total", 0)
+                            if data == "extracting":
+                                status_placeholder.info("正在解压...")
+                            elif data == "processing":
+                                status_placeholder.info("正在处理文件...")
+                            elif data == "failed":
+                                st.error(event.get("error", "处理失败"))
+
+                        elif ev_type == "file_done":
+                            finfo = event.get("data", {})
+                            fname = finfo.get("filename", "?")
+                            fstatus = finfo.get("status", "failed")
+                            if fstatus == "done":
+                                success_count += 1
+                                docs_done.append(f"✅ {fname}")
+                            elif fstatus == "duplicate":
+                                skipped_count += 1
+                                docs_done.append(f"⏭️ {fname}")
+                            else:
+                                failed_count += 1
+                                docs_done.append(f"❌ {fname}")
+                            completed = success_count + skipped_count + failed_count
                             if total > 0:
-                                pct = completed / total
-                                bar.progress(pct, f"处理中: {completed}/{total}")
+                                bar.progress(completed / total, f"处理中: {completed}/{total}")
                             status_placeholder.info(
-                                f"状态: {status} | ✅ {success} | ⏭️ {skipped} | ❌ {failed} | ⏳ {progress.get('pending', 0)}"
+                                f"✅ {success_count} | ⏭️ {skipped_count} | ❌ {failed_count}"
                             )
-                            if status in ("completed", "failed"):
-                                done = True
-                                if status == "completed":
-                                    bar.progress(1.0, "处理完成")
-                                    st.success(f"压缩包处理完成！成功 {success}，跳过 {skipped}，失败 {failed}")
-                                else:
-                                    st.error("压缩包处理失败")
-                                # 显示错误详情
-                                error_details = task_data.get("error_details", [])
+                            # 显示最近处理记录
+                            file_log_placeholder.markdown("\n".join(docs_done[-10:]))
+
+                        elif ev_type == "done":
+                            ddata = event.get("data", {})
+                            if isinstance(ddata, dict) and "progress" in ddata:
+                                final_prog = ddata["progress"]
+                                success_count = final_prog.get("success", success_count)
+                                skipped_count = final_prog.get("skipped", skipped_count)
+                                failed_count = final_prog.get("failed", failed_count)
+                                bar.progress(1.0, "处理完成")
+                                st.success(f"压缩包处理完成！成功 {success_count}，跳过 {skipped_count}，失败 {failed_count}")
+                                error_details = ddata.get("error_details", [])
                                 if error_details:
-                                    st.subheader("错误详情")
-                                    for err in error_details:
-                                        st.warning(
-                                            f"**{err.get('file_path', '?')}**: [{err.get('error_type', '?')}] {err.get('reason', '?')}"
-                                        )
-                        except Exception as e:
-                            st.error(f"查询进度失败: {e}")
-                            done = True
+                                    with st.expander("查看错误详情"):
+                                        for err in error_details:
+                                            st.warning(
+                                                f"**{err.get('file_path', '?')}**: [{err.get('error_type', '?')}] {err.get('reason', '?')}"
+                                            )
+
+                        elif ev_type == "error":
+                            st.error(event.get("data", "未知错误"))
+
                     refresh_docs()
+                    st.rerun()
             except Exception as e:
                 st.error(f"上传压缩包失败: {e}")
 
@@ -150,9 +183,11 @@ with col1:
 with col2:
     if st.button("🔄 刷新", use_container_width=True):
         refresh_docs()
+        st.rerun()
 with col3:
     if st.button("🗑️ 清空全部", type="secondary", use_container_width=True):
-        st.warning("确定要清空知识库吗？此操作不可撤销！")
+        st.session_state.show_clear_confirm = True
+        st.rerun()
 
 if not st.session_state.docs_loaded:
     refresh_docs()
@@ -161,8 +196,8 @@ docs = st.session_state.docs
 if not docs:
     st.info("暂无文档，上传一个试试吧")
 else:
-    df = pd.DataFrame(docs)
-    df.columns = ["MD5", "文件名", "上传时间"]
+    rows = [{"MD5": d["md5"], "文件名": d["original_filename"], "上传时间": d["upload_time"]} for d in docs]
+    df = pd.DataFrame(rows)
     df["MD5"] = df["MD5"].apply(lambda x: x[:12] + "...")
 
     for i, row in df.iterrows():
@@ -181,10 +216,11 @@ else:
                     )
                     st.success(f"已删除: {docs[i]['original_filename']}")
                     refresh_docs()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"删除失败: {e}")
 
-# 清空确认
+
 @st.dialog("确认清空知识库")
 def confirm_clear():
     st.write("确定要清空知识库中的所有文档吗？此操作不可撤销！")
@@ -193,9 +229,10 @@ def confirm_clear():
             clear_knowledge(USER_ID)
             st.success("知识库已清空")
             refresh_docs()
+            st.session_state.show_clear_confirm = False
             st.rerun()
         except Exception as e:
             st.error(f"清空失败: {e}")
 
-if st.session_state.get("show_clear_confirm", False):
+if st.session_state.show_clear_confirm:
     confirm_clear()

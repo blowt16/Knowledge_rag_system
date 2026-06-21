@@ -107,15 +107,56 @@ class _BackgroundInitManager:
         self._chromadb_ready.set()
 
     async def _init_reranker(self):
-        """初始化重排序模型（异步下载 + 加载）。"""
+        """初始化重排序模型（启动时加载到内存）。"""
         await self._models_ready.wait()
         try:
             from app.rag.reorder_service import ReorderService
-            ReorderService()
-            logger.info("[OK]ReorderService 初始化完成")
+            svc = ReorderService()
+            await asyncio.to_thread(svc.warmup)
+            logger.info("[OK]ReorderService 模型已加载到内存")
         except Exception as e:
             logger.warning(f"[WARN]ReorderService 初始化失败: {e}")
         self._reranker_ready.set()
+
+    def shutdown(self):
+        """优雅关闭，释放所有模型和连接资源。"""
+        logger.info("[SHUTDOWN] 开始清理资源...")
+
+        # 1. 清理 ReorderService
+        try:
+            from app.rag.reorder_service import ReorderService
+            inst = ReorderService._instance
+            if inst is not None:
+                inst.close()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] ReorderService 清理失败: {e}")
+
+        # 2. 清理 VectorStoreService
+        try:
+            from app.rag.vector_store import VectorStoreService
+            inst = VectorStoreService._instance
+            if inst is not None:
+                inst.close()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] VectorStoreService 清理失败: {e}")
+
+        # 3. 清理 ChatOpenAI httpx 连接池（DEEPSEEK 模式下 primary 为 ChatOpenAI）
+        try:
+            if self._chat_model is not None:
+                bound = getattr(self._chat_model, "bound", None)
+                if bound is not None:
+                    if hasattr(bound, "root_client"):
+                        bound.root_client.close()
+                    if hasattr(bound, "root_async_client"):
+                        bound.root_async_client.close()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] ChatModel 清理失败: {e}")
+
+        # 4. 置空引用
+        self._chat_model = None
+        self._embed_model = None
+        self._vision_model = None
+        logger.info("[SHUTDOWN] 资源清理完成")
 
 
 # 全局单例

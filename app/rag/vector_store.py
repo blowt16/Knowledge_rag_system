@@ -38,11 +38,15 @@ class VectorStoreService:
     def get_store(self) -> Chroma:
         """获取或创建 Chroma 向量存储（懒加载）。"""
         if self._store is None:
-            from app.utils.factory import create_embedding_model
+            from app.core.background_init import init_manager
+            embed_fn = init_manager.embed_model
+            if embed_fn is None:
+                from app.utils.factory import create_embedding_model
+                embed_fn = create_embedding_model()
 
             self._store = Chroma(
                 collection_name=self.collection_name,
-                embedding_function=create_embedding_model(),
+                embedding_function=embed_fn,
                 persist_directory=self.persist_directory,
                 collection_metadata={"hnsw:space": get_config("hnsw_space", "cosine")},
             )
@@ -91,10 +95,24 @@ class VectorStoreService:
                 logger.error(f"【向量数据库】删除出错: {e}")
 
     def get_user_documents(self, user_id: str) -> list[dict]:
-        """获取用户所有文档的 metadata。"""
+        """获取用户所有文档的 metadata（仅拉取 metadata，避免传输 embeddings）。"""
         try:
-            results = self._get_collection().get(where={"user_id": user_id})
+            results = self._get_collection().get(
+                where={"user_id": user_id},
+                include=["metadatas"],
+            )
             return results.get("metadatas", []) if results else []
         except Exception as e:
             logger.error(f"【向量数据库】获取用户文档出错: {e}")
             return []
+
+    def close(self):
+        """关闭 ChromaDB 客户端，释放 SQLite 连接。"""
+        if self._store is not None:
+            try:
+                self._store._client.close()
+                logger.info("【向量数据库】ChromaDB 连接已关闭")
+            except Exception as e:
+                logger.error(f"【向量数据库】关闭连接失败: {e}")
+            self._store = None
+        VectorStoreService._instance = None

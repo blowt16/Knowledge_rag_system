@@ -15,11 +15,14 @@ class ConversationService:
         session_id = self._memory.create_conversation(user_id, title)
         return {"session_id": session_id, "user_id": user_id, "title": title}
 
-    def list_user_conversations(self, user_id: str) -> list[dict]:
-        return self._memory.get_user_conversations(user_id)
+    def list_user_conversations(self, user_id: str, offset: int = 0, limit: int = 20) -> list[dict]:
+        return self._memory.get_user_conversations(user_id, offset, limit)
 
     def get_messages(self, session_id: str) -> list[dict]:
         return self._memory.get_conversation_messages(session_id)
+
+    def toggle_pin(self, session_id: str, is_top: bool):
+        self._memory.toggle_pin(session_id, is_top)
 
     def delete(self, session_id: str):
         self._memory.delete_conversation(session_id)

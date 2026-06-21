@@ -26,49 +26,76 @@ class RAGService:
             logger.warning("【RAG】user_id 为空，不返回任何文档")
             return {"answer": "", "documents": [], "rewritten_query": ""}
 
+        # 步骤1: 策略判定
         try:
             strategy_info = get_retrieval_strategy(query, chat_history)
             need_rw = strategy_info["need_rewrite"]
             strategy = strategy_info["strategy"]
-            logger.debug(f"【HyDE】开始处理查询: {query}, 策略: {strategy}")
+        except Exception as e:
+            logger.error(f"【RAG】策略判定失败: {e}")
+            need_rw = False
+            strategy = "hybrid"
 
-            rewritten_query = None
-            if need_rw:
-                try:
-                    rewritten_query = await hyde_rewrite(query, chat_history)
-                except Exception as e:
-                    logger.error(f"【HyDE】HyDE 改写失败: {e}, 使用简化改写")
-                    rewritten_query = simple_rewrite(query, chat_history)
+        logger.info(f"【RAG】开始处理查询: {query}, 策略: {strategy}")
 
+        # 步骤2: HyDE 查询改写
+        rewritten_query = None
+        if need_rw:
+            try:
+                rewritten_query = await hyde_rewrite(query, chat_history)
+            except Exception as e:
+                logger.error(f"【HyDE】HyDE 改写失败: {e}, 使用简化改写")
+                rewritten_query = simple_rewrite(query, chat_history)
+
+        # 步骤3: 混合检索
+        try:
             merged_docs, raw = await self._hybrid_retriever.retrieve(
                 query=query, user_id=user_id,
                 rewritten_query=rewritten_query, strategy=strategy)
+        except Exception as e:
+            logger.error(f"【RAG】混合检索失败: {e}")
+            merged_docs = []
 
-            if not merged_docs:
-                logger.debug("【HyDE】未检索到知识库文档")
-                return {"answer": "", "documents": [], "rewritten_query": rewritten_query or query}
+        if not merged_docs:
+            logger.info("【RAG】未检索到知识库文档")
+            return {"answer": "", "documents": [], "rewritten_query": rewritten_query or query}
 
-            logger.debug(f"【HyDE】检索到 {len(merged_docs)} 个知识库文档")
+        logger.info(f"【RAG】检索到 {len(merged_docs)} 个文档")
 
-            try:
-                reranked = self._reorder_svc.rerank(
-                    rewritten_query or query, merged_docs, top_k)
-                logger.info(f"【RAG】文档重排序成功，返回 {len(reranked)} 个文档")
-            except Exception as e:
-                logger.error(f"【RAG】重排序失败: {e}")
-                reranked = merged_docs[:top_k]
+        # 步骤4: 重排序
+        try:
+            reranked = self._reorder_svc.rerank(
+                rewritten_query or query, merged_docs, top_k)
+            logger.info(f"【RAG】文档重排序成功，返回 {len(reranked)} 个文档")
+        except Exception as e:
+            logger.error(f"【RAG】重排序失败: {e}")
+            reranked = merged_docs[:top_k]
 
+        # 检索结果汇总（始终输出）
+        summary_lines = [
+            f"原始查询: {query}",
+            f"改写查询: {rewritten_query or '（未改写）'}",
+            f"检索策略: {strategy}",
+        ]
+        for i, doc in enumerate(reranked):
+            src = doc.metadata.get("original_filename", "未知")
+            content = doc.page_content[:120].replace("\n", " ")
+            summary_lines.append(f"  文档{i+1}[{src}]: {content}...")
+        logger.info("【RAG】检索结果汇总:\n" + "\n".join(summary_lines))
+
+        # 步骤5: LLM 摘要
+        try:
             answer = await self._generate_summary(
                 query=query, documents=reranked, chat_history=chat_history,
                 rewritten_query=rewritten_query)
-
-            return {
-                "answer": answer, "documents": reranked,
-                "rewritten_query": rewritten_query or query,
-            }
         except Exception as e:
-            logger.error(f"【RAG】检索失败: {e}")
-            return {"answer": "", "documents": [], "rewritten_query": ""}
+            logger.error(f"【RAG】生成摘要失败: {e}")
+            answer = self._format_docs(reranked)
+
+        return {
+            "answer": answer, "documents": reranked,
+            "rewritten_query": rewritten_query or query,
+        }
 
     async def _generate_summary(self, query: str, documents: list,
                                 chat_history: list = None,

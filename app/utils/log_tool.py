@@ -8,10 +8,15 @@ _log_level: str = os.getenv("LOG_LEVEL", "INFO")
 _setup_done: bool = False
 
 
-def setup_logger(level: str | None = None) -> None:
-    """初始化全局日志系统（仅 main.py 启动时调用一次）。"""
+def setup_logger(level: str | None = None, force: bool = False) -> None:
+    """初始化全局日志系统（仅 main.py 启动时调用一次）。
+
+    Args:
+        level: 日志级别，默认从 LOG_LEVEL 环境变量读取。
+        force: 强制重新初始化，清除已有 handler 后重建（用于子进程日志恢复）。
+    """
     global _log_level, _setup_done
-    if _setup_done:
+    if _setup_done and not force:
         return
     if level is not None:
         _log_level = level.upper()
@@ -19,6 +24,7 @@ def setup_logger(level: str | None = None) -> None:
         console_level=_log_level,
         file_level="DEBUG",
         log_dir=get_logs_path(),
+        force=force,
     )
     _setup_done = True
 

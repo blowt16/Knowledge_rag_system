@@ -88,7 +88,7 @@ async def hyde_rewrite(query: str, chat_history: list = None) -> str:
             logger.warning("【HyDE】生成结果过短，使用原始查询")
             return query
 
-        logger.debug(f"【HyDE】生成的假设性文档: {rewritten[:100]}...")
+        logger.info(f"【HyDE】查询改写完成:\n原始查询: {query}\n改写结果: {rewritten}")
         return rewritten
 
     except Exception as e:

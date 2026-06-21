@@ -62,9 +62,20 @@ app.include_router(zip_router)
 
 @app.on_event("startup")
 async def startup_event():
-    """FastAPI 启动事件：触发后台初始化。"""
+    """FastAPI 启动事件：重新初始化日志 + 触发后台初始化。
+
+    uvicorn --reload 模式下子进程会丢失父进程配置的 logging handler，
+    因此在 startup 阶段 force 重建 handler，确保日志正常输出。
+    """
+    setup_logger(force=True)
     logger.info("[START] 服务启动，开始后台初始化...")
     init_manager.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """FastAPI 关闭事件：清理资源。"""
+    init_manager.shutdown()
 
 
 @app.get("/")

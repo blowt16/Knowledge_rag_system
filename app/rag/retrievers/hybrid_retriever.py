@@ -108,7 +108,7 @@ class HybridRetriever:
                 _bm25_search(), _vector_search())
 
         merged = self._rrf_fusion(bm25_results, vector_results)
-        logger.debug(f"【混合检索】BM25: {len(bm25_results)} + 向量: {len(vector_results)} → RRF 融合: {len(merged)}")
+        logger.info(f"【混合检索】BM25: {len(bm25_results)} + 向量: {len(vector_results)} → RRF 融合: {len(merged)}")
         return merged, {"bm25": bm25_results, "vector": vector_results}
 
     def _rrf_fusion(self, bm25_docs: list, vector_docs: list, k: int = None) -> list:

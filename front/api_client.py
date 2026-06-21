@@ -27,10 +27,10 @@ def check_health() -> bool:
 
 
 def send_chat_stream(
-    query: str, session_id: str | None = None, user_id: str = USER_ID
+    query: str, session_id: str | None = None, user_id: str = USER_ID, mode: str = "agent"
 ) -> Generator[dict, None, None]:
     """流式发送聊天消息，逐行 yield SSE 事件字典。"""
-    body = {"query": query, "session_id": session_id, "user_id": user_id, "stream": True}
+    body = {"query": query, "session_id": session_id, "user_id": user_id, "stream": True, "mode": mode}
     resp = requests.post(
         f"{API_BASE_URL}/chat",
         json=body,
@@ -42,8 +42,6 @@ def send_chat_stream(
         if not line or not line.startswith("data: "):
             continue
         data_str = line.removeprefix("data: ")
-        if data_str.strip() == "[DONE]":
-            break
         try:
             yield json.loads(data_str)
         except json.JSONDecodeError:
@@ -123,10 +121,20 @@ def create_conversation(user_id: str = USER_ID, title: str = "") -> dict:
     return r.json()
 
 
-def list_conversations(user_id: str = USER_ID) -> dict:
+def list_conversations(user_id: str = USER_ID, offset: int = 0, limit: int = 20) -> dict:
     r = requests.get(
         f"{API_BASE_URL}/conversation/list",
-        params={"user_id": user_id},
+        params={"user_id": user_id, "offset": offset, "limit": limit},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def toggle_pin(session_id: str, is_top: bool) -> dict:
+    r = requests.post(
+        f"{API_BASE_URL}/conversation/{session_id}/pin",
+        params={"is_top": is_top},
         timeout=10,
     )
     r.raise_for_status()
@@ -172,7 +180,7 @@ def upload_zip(file_content: bytes, filename: str, user_id: str = USER_ID) -> di
         f"{API_BASE_URL}/api/knowledge/upload_zip",
         files=files,
         data=data,
-        timeout=30,
+        timeout=120,
     )
     r.raise_for_status()
     return r.json()
@@ -185,3 +193,21 @@ def get_zip_task_status(task_id: str) -> dict:
     )
     r.raise_for_status()
     return r.json()
+
+
+def stream_zip_progress(task_id: str) -> Generator[dict, None, None]:
+    """SSE 流式获取压缩包处理进度（实时推送每文件结果）。"""
+    resp = requests.get(
+        f"{API_BASE_URL}/api/knowledge/task/{task_id}/stream",
+        stream=True,
+        timeout=600,
+    )
+    resp.raise_for_status()
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line.removeprefix("data: ")
+        try:
+            yield json.loads(data_str)
+        except json.JSONDecodeError:
+            continue

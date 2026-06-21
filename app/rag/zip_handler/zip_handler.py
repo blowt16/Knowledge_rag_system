@@ -97,7 +97,10 @@ class ZipTaskManager:
                     "reason": f"解压后文件总大小 {total_size // 1048576}MB 超过限制 {max_total // 1048576}MB",
                 }]
                 self._push_event(task_id, {"event": "status", "data": "failed", "error": "size_exceeded"})
-                self._push_event(task_id, {"event": "done", "data": {"progress": self.tasks[task_id]["progress"]}})
+                self._push_event(task_id, {"event": "done", "data": {
+                    "progress": self.tasks[task_id]["progress"],
+                    "error_details": self.tasks[task_id]["error_details"],
+                }})
                 return
 
             progress = self.tasks[task_id]["progress"]
@@ -205,7 +208,10 @@ class ZipTaskManager:
             }]
             logger.error(f"【压缩包】处理失败: {task_id}, 原因: {e}")
             self._push_event(task_id, {"event": "status", "data": "failed", "error": str(e)})
-            self._push_event(task_id, {"event": "done", "data": {"progress": self.tasks[task_id]["progress"]}})
+            self._push_event(task_id, {"event": "done", "data": {
+                "progress": self.tasks[task_id]["progress"],
+                "error_details": self.tasks[task_id]["error_details"],
+            }})
 
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

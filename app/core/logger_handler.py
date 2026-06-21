@@ -18,9 +18,15 @@ class LogHandler:
         log_dir: Path | None = None,
         max_bytes: int = 10 * 1024 * 1024,
         backup_count: int = 5,
+        force: bool = False,
     ) -> None:
-        if cls._configured:
+        if cls._configured and not force:
             return
+
+        if force:
+            root = logging.getLogger()
+            root.handlers.clear()
+            cls._configured = False
 
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG)

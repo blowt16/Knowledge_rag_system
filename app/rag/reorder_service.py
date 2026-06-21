@@ -22,30 +22,49 @@ class ReorderService:
                     cls._instance._model = None
         return cls._instance
 
-    def _get_model(self):
-        if self._model is None:
-            model_path = os.getenv("RERANKER_MODEL_PATH", "models/bge-reranker-v2-m3")
-            model_dir = get_models_path(model_path)
-            max_length = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+    def warmup(self):
+        """预加载模型（启动时调用，避免首次检索卡顿）。"""
+        self._get_model()
 
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+
+        max_length = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
+        model_path = os.getenv("RERANKER_MODEL_PATH", "bge-reranker-v2-m3")
+        scope_name = os.getenv("RERANKER_MODELSCOPE_NAME", "BAAI/bge-reranker-v2-m3")
+
+        from sentence_transformers import CrossEncoder
+
+        def _try_load(path):
+            self._model = CrossEncoder(str(path), max_length=max_length)
+            device = "cuda" if self._model.model.device.type != "cpu" else "cpu"
+            logger.info(f"[OK] 加载重排序模型: {path}, 使用设备: {device}")
+            return self._model
+
+        # 1. 本地路径（环境变量指定或默认）
+        try:
+            return _try_load(get_models_path(model_path))
+        except Exception:
+            pass
+
+        # 2. ModelScope 缓存目录（snapshot_download 下载后存放的位置）
+        cache_dir = get_models_path(scope_name)
+        if cache_dir.exists():
             try:
-                from sentence_transformers import CrossEncoder
-                self._model = CrossEncoder(str(model_dir), max_length=max_length)
-                device = "cuda" if self._model.model.device.type != "cpu" else "cpu"
-                logger.info(f"[OK] 加载重排序模型: {model_dir}, 使用设备: {device}")
+                return _try_load(cache_dir)
             except Exception as e:
-                logger.error(f"[ERR] 模型检查失败: {e}")
-                try:
-                    from modelscope import snapshot_download
-                    scope_name = os.getenv("RERANKER_MODELSCOPE_NAME", "BAAI/bge-reranker-v2-m3")
-                    model_dir = snapshot_download(scope_name, cache_dir=str(get_models_path()))
-                    from sentence_transformers import CrossEncoder
-                    self._model = CrossEncoder(str(model_dir), max_length=max_length)
-                    logger.info("[OK] 从 ModelScope 下载并加载模型成功")
-                except Exception as e2:
-                    logger.error(f"[ERR] ModelScope 下载也失败: {e2}")
-                    self._model = None
-        return self._model
+                logger.error(f"[ERR] 从缓存目录加载失败: {e}")
+
+        # 3. ModelScope 下载
+        try:
+            from modelscope import snapshot_download
+            model_dir = snapshot_download(scope_name, cache_dir=str(get_models_path()))
+            return _try_load(model_dir)
+        except Exception as e:
+            logger.error(f"[ERR] ModelScope 下载失败: {e}")
+            self._model = None
+            return None
 
     def rerank(self, query: str, documents: list, top_k: int = None) -> list:
         if not documents:
@@ -76,3 +95,14 @@ class ReorderService:
         except Exception as e:
             logger.error(f"【重排序服务】重排序失败: {e}")
             return documents[:top_k]
+
+    def close(self):
+        """释放模型内存。"""
+        if self._model is not None:
+            self._model = None
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        ReorderService._instance = None
