@@ -76,39 +76,57 @@ class HybridRetriever:
         logger.debug(f"【混合检索】BM25 索引已构建: {len(documents)} 条文档, k={k}")
         return bm25
 
+    async def bm25_search(self, query: str, user_id: str) -> list:
+        """独立的 BM25 关键词检索（供上游并行调度）。"""
+        bm25_recall = get_config("bm25_recall_k", 10)
+        bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
+        if bm25 is None:
+            return []
+        return await bm25.ainvoke(query)
+
     async def retrieve(self, query: str, user_id: str,
                        rewritten_query: str = None,
-                       strategy: str = "hybrid") -> tuple[list, list]:
+                       strategy: str = "hybrid",
+                       bm25_results: list = None) -> tuple[list, list]:
         if not user_id:
             return [], []
 
         from app.rag.vector_store import VectorStoreService
         vs = VectorStoreService()
 
-        bm25_results = []
+        has_precomputed = bm25_results is not None
+        if bm25_results is None:
+            bm25_results = []
         vector_results = []
 
         if strategy == "bm25_only":
-            bm25_recall = get_config("bm25_recall_k", 10)
-            bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
-            if bm25 is not None:
-                bm25_results = await bm25.ainvoke(query)
+            if not has_precomputed:
+                bm25_recall = get_config("bm25_recall_k", 10)
+                bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
+                if bm25 is not None:
+                    bm25_results = await bm25.ainvoke(query)
         elif strategy in ("hybrid", "hybrid_rewritten"):
             vec_query = rewritten_query if rewritten_query and strategy == "hybrid_rewritten" else query
-            bm25_recall = get_config("bm25_recall_k", 10)
             vector_recall = get_config("vector_recall_k", 10)
-            bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
 
-            async def _bm25_search():
-                if bm25 is None:
-                    return []
-                return await bm25.ainvoke(query)
+            if has_precomputed:
+                # BM25 已在 rag_service 中预计算（与 HyDE 并行），只跑向量
+                vector_results = vs.similarity_search(vec_query, user_id, vector_recall)
+            else:
+                # 并行 BM25 + 向量
+                bm25_recall = get_config("bm25_recall_k", 10)
+                bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
 
-            async def _vector_search():
-                return vs.similarity_search(vec_query, user_id, vector_recall)
+                async def _bm25():
+                    if bm25 is None:
+                        return []
+                    return await bm25.ainvoke(query)
 
-            bm25_results, vector_results = await asyncio.gather(
-                _bm25_search(), _vector_search())
+                async def _vector():
+                    return vs.similarity_search(vec_query, user_id, vector_recall)
+
+                bm25_results, vector_results = await asyncio.gather(
+                    _bm25(), _vector())
 
         merged = self._rrf_fusion(bm25_results, vector_results)
         logger.info(f"【混合检索】BM25: {len(bm25_results)} + 向量: {len(vector_results)} → RRF 融合: {len(merged)}")

@@ -99,7 +99,7 @@ class ReorderService:
                 device_type = "unknown"
             max_len = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
             pairs = [(query, doc.page_content[:max_len]) for doc in documents]
-            batch_size = int(os.getenv("RERANKER_BATCH_SIZE", "1"))
+            batch_size = int(os.getenv("RERANKER_BATCH_SIZE", "10"))
             scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
 
             for doc, score in zip(documents, scores):

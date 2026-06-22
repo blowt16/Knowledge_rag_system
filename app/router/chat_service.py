@@ -45,8 +45,6 @@ class ChatService:
     async def _handle_rag_stream(self, query: str, user_id: str,
                                  session_id: str) -> AsyncIterator[str]:
         """RAG 直通模式：检索 → LLM 生成 → 流式输出。"""
-        from app.core.background_init import init_manager
-        from langchain_core.output_parsers import StrOutputParser
         t_start = time.time()
 
         # 加载历史上下文
@@ -72,52 +70,7 @@ class ChatService:
                     answer = "知识库中未找到相关内容。"
                     yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
                 elif answer:
-                    # 二次流式生成更自然的回答
-                    try:
-                        llm = init_manager.chat_model
-                        if llm:
-                            from app.config.loader import get_config
-                            # 构建带元数据的上下文
-                            context_parts = []
-                            for i, d in enumerate(documents):
-                                src = d.metadata.get("original_filename", "未知")
-                                page = d.metadata.get("page", "")
-                                header = f"[{i+1}] 来源: {src}"
-                                if page:
-                                    header += f", 第{page}页"
-                                stream_max = get_config("rag_stream_max_chars", 600)
-                                context_parts.append(f"{header}\n{d.page_content[:stream_max]}")
-                            context_text = "\n\n".join(context_parts)
-
-                            # 构建历史文本
-                            from app.config.loader import get_config
-                            max_turns = get_config("llm_history_turns", 5)
-                            max_chars = get_config("history_max_chars", 200)
-                            history_lines = []
-                            for msg in history[-(max_turns * 2):]:
-                                role = "用户" if getattr(msg, "type", "") == "human" else "助手"
-                                history_lines.append(f"{role}: {getattr(msg, 'content', str(msg))[:max_chars]}")
-                            history_text = "\n".join(history_lines) if history_lines else "无"
-
-                            from langchain_core.prompts import ChatPromptTemplate
-                            prompt = ChatPromptTemplate.from_messages([
-                                ("system", "你是一个知识库助手。基于检索结果和对话历史简洁回答用户问题。"),
-                                ("human", "对话历史：\n{history}\n\n用户当前问题：{query}\n\n参考资料：\n{context}"),
-                            ])
-                            chain = prompt | llm | StrOutputParser()
-                            regenerated = ""
-                            async for chunk in chain.astream({"query": query, "context": context_text, "history": history_text}):
-                                if chunk:
-                                    regenerated += chunk
-                                    yield f"data: {json.dumps({'event': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
-                            if regenerated:
-                                answer = regenerated
-                                logger.info(f"【RAG直通】LLM 二次生成完成: answer_len={len(regenerated)}")
-                        else:
-                            yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
-                    except Exception as e:
-                        logger.error(f"【RAG直通】流式生成失败: {e}")
-                        yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
                 else:
                     yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
         except Exception as e:

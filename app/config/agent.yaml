@@ -14,6 +14,3 @@ tool_call_limits:
 # --- 工具配置 ---
 knowledge_search_max_chars: 300      # knowledge_search 单文档截断字符数(rerank召回的每个chunk进行截取只保留设定的值)
 summarize_min_chars: 500             # summarize_document 触发摘要最小长度(召回的总chunk大小超过阈值进行摘要总结)
-
-# --- RAG 流式 ---
-rag_stream_max_chars: 600            # RAG 流式生成单文档最大字符数

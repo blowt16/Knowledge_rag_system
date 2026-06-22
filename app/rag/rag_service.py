@@ -38,7 +38,14 @@ class RAGService:
 
         logger.info(f"【RAG】开始处理查询: {query}, 策略: {strategy}")
 
-        # 步骤2: HyDE 查询改写
+        # 步骤2: BM25 (仅 hybrid_rewritten 时预计算, 与 HyDE 并行)
+        import asyncio
+        bm25_task = None
+        if strategy == "hybrid_rewritten":
+            bm25_task = asyncio.create_task(
+                self._hybrid_retriever.bm25_search(query, user_id))
+
+        # 步骤2b: HyDE 查询改写 (与 BM25 并行)
         rewritten_query = None
         if need_rw:
             try:
@@ -47,11 +54,15 @@ class RAGService:
                 logger.error(f"【HyDE】HyDE 改写失败: {e}, 使用简化改写")
                 rewritten_query = simple_rewrite(query, chat_history)
 
-        # 步骤3: 混合检索
+        # 等待 BM25 完成 (若 HyDE 耗时 > BM25 则早已完成无需等待)
+        bm25_results = await bm25_task if bm25_task else None
+
+        # 步骤3: 向量检索 + RRF 融合 (BM25 预计算结果传入)
         try:
             merged_docs, raw = await self._hybrid_retriever.retrieve(
                 query=query, user_id=user_id,
-                rewritten_query=rewritten_query, strategy=strategy)
+                rewritten_query=rewritten_query, strategy=strategy,
+                bm25_results=bm25_results)
         except Exception as e:
             logger.error(f"【RAG】混合检索失败: {e}")
             merged_docs = []
