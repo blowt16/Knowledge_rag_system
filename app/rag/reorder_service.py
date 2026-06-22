@@ -36,10 +36,24 @@ class ReorderService:
 
         from sentence_transformers import CrossEncoder
 
+        device = os.getenv("RERANKER_DEVICE", "cuda")
+
         def _try_load(path):
-            self._model = CrossEncoder(str(path), max_length=max_length)
-            device = "cuda" if self._model.model.device.type != "cpu" else "cpu"
-            logger.info(f"[OK] 加载重排序模型: {path}, 使用设备: {device}")
+            nonlocal device
+            try:
+                self._model = CrossEncoder(str(path), max_length=max_length, device=device)
+            except (RuntimeError, MemoryError) as e:
+                if device != "cpu":
+                    logger.warning(f"[WARN] GPU 加载失败({e})，回退到 CPU")
+                    device = "cpu"
+                    self._model = CrossEncoder(str(path), max_length=max_length, device="cpu")
+                else:
+                    raise
+            try:
+                actual_device = str(self._model.model.device)
+            except Exception:
+                actual_device = device
+            logger.info(f"[OK] 加载重排序模型: {path}, 设备: {actual_device}")
             return self._model
 
         # 1. 本地路径（环境变量指定或默认）
@@ -71,7 +85,7 @@ class ReorderService:
             return []
 
         if top_k is None:
-            top_k = get_config("k", 3)
+            top_k = get_config("k", 5)
 
         model = self._get_model()
         if model is None:
@@ -79,6 +93,10 @@ class ReorderService:
             return documents[:top_k]
 
         try:
+            try:
+                device_type = str(model.model.device)
+            except Exception:
+                device_type = "unknown"
             max_len = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
             pairs = [(query, doc.page_content[:max_len]) for doc in documents]
             batch_size = int(os.getenv("RERANKER_BATCH_SIZE", "1"))
@@ -90,7 +108,7 @@ class ReorderService:
 
             ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
             result = [doc for doc, _ in ranked[:top_k]]
-            logger.info(f"【重排序服务】文档重排序成功，返回 {len(result)} 个文档")
+            logger.info(f"【重排序服务】重排序完成 [{device_type}]: {len(documents)} → {len(result)} 文档")
             return result
         except Exception as e:
             logger.error(f"【重排序服务】重排序失败: {e}")

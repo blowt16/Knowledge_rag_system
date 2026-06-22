@@ -13,14 +13,14 @@ class RAGService:
     """RAG 核心服务：完整检索-摘要管线。"""
 
     def __init__(self):
-        k = get_config("k", 3)
+        k = get_config("k", 5)
         self._hybrid_retriever = HybridRetriever(k=k)
         self._reorder_svc = ReorderService()
 
     async def search(self, query: str, user_id: str = "",
                      chat_history: list = None, top_k: int = None) -> dict:
         if top_k is None:
-            top_k = get_config("k", 3)
+            top_k = get_config("k", 5)
 
         if not user_id:
             logger.warning("【RAG】user_id 为空，不返回任何文档")
@@ -125,16 +125,34 @@ class RAGService:
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 
+            history_text = self._format_history(chat_history)
+
             prompt = ChatPromptTemplate.from_messages([
                 ("system", "你是一个 RAG 知识库助手。基于以下检索结果回答问题。如果检索结果不足以回答问题，请说明。回答要简洁明了。"),
-                ("human", "用户问题：{query}\n\n知识库检索结果：\n{context}"),
+                ("human", "对话历史：\n{history}\n\n用户当前问题：{query}\n\n知识库检索结果：\n{context}"),
             ])
             chain = prompt | llm | StrOutputParser()
-            answer = await chain.ainvoke({"query": query, "context": context_text})
+            answer = await chain.ainvoke({
+                "query": query, "context": context_text, "history": history_text,
+            })
             return answer.strip()
         except Exception as e:
             logger.error(f"【RAG】生成摘要失败: {e}")
             return self._format_docs(documents)
+
+    @staticmethod
+    def _format_history(chat_history: list = None) -> str:
+        if not chat_history:
+            return "无"
+        max_chars = get_config("history_max_chars", 200)
+        max_turns = get_config("llm_history_turns", 5)
+        lines = []
+        for msg in chat_history[-(max_turns * 2):]:
+            role = getattr(msg, "type", "unknown")
+            content = getattr(msg, "content", str(msg))
+            prefix = "用户" if role == "human" else "助手" if role == "ai" else role
+            lines.append(f"{prefix}: {content[:max_chars]}")
+        return "\n".join(lines)
 
     def _format_docs(self, documents: list) -> str:
         if not documents:

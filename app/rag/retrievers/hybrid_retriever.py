@@ -48,9 +48,11 @@ class HybridRetriever:
     """混合检索：BM25（关键词）+ 向量（语义），RRF 融合。"""
 
     def __init__(self, k: int = None):
-        self._k = k if k is not None else get_config("k", 3)
+        self._k = k if k is not None else get_config("k", 5)
 
-    def _get_or_build_bm25(self, user_id: str):
+    def _get_or_build_bm25(self, user_id: str, k: int = None):
+        if k is None:
+            k = get_config("bm25_recall_k", 10)
         cached = _bm25_cache.get(user_id)
         if cached is not None:
             return cached
@@ -68,10 +70,10 @@ class HybridRetriever:
         from langchain_core.documents import Document
 
         docs = [Document(page_content=text) for text in documents]
-        bm25 = BM25Retriever.from_documents(docs, k=self._k)
+        bm25 = BM25Retriever.from_documents(docs, k=k)
 
         _bm25_cache.set(user_id, bm25)
-        logger.debug(f"【混合检索】BM25 索引已构建: {len(documents)} 条文档")
+        logger.debug(f"【混合检索】BM25 索引已构建: {len(documents)} 条文档, k={k}")
         return bm25
 
     async def retrieve(self, query: str, user_id: str,
@@ -86,15 +88,16 @@ class HybridRetriever:
         bm25_results = []
         vector_results = []
 
-        multiplier = get_config("vector_search_multiplier", 2)
-
         if strategy == "bm25_only":
-            bm25 = self._get_or_build_bm25(user_id)
+            bm25_recall = get_config("bm25_recall_k", 10)
+            bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
             if bm25 is not None:
                 bm25_results = await bm25.ainvoke(query)
         elif strategy in ("hybrid", "hybrid_rewritten"):
             vec_query = rewritten_query if rewritten_query and strategy == "hybrid_rewritten" else query
-            bm25 = self._get_or_build_bm25(user_id)
+            bm25_recall = get_config("bm25_recall_k", 10)
+            vector_recall = get_config("vector_recall_k", 10)
+            bm25 = self._get_or_build_bm25(user_id, k=bm25_recall)
 
             async def _bm25_search():
                 if bm25 is None:
@@ -102,7 +105,7 @@ class HybridRetriever:
                 return await bm25.ainvoke(query)
 
             async def _vector_search():
-                return vs.similarity_search(vec_query, user_id, self._k * multiplier)
+                return vs.similarity_search(vec_query, user_id, vector_recall)
 
             bm25_results, vector_results = await asyncio.gather(
                 _bm25_search(), _vector_search())

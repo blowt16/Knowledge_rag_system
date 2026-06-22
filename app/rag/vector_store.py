@@ -29,7 +29,7 @@ class VectorStoreService:
 
     @property
     def k(self) -> int:
-        return get_config("k", 3)
+        return get_config("k", 5)
 
     @property
     def persist_directory(self) -> str:
@@ -67,12 +67,26 @@ class VectorStoreService:
             logger.debug(f"【向量数据库】已入库 {len(documents)} 条文档")
 
     def similarity_search(self, query: str, user_id: str, k: int = None) -> list:
-        """向量相似度检索，按 user_id 隔离。"""
+        """向量相似度检索，按 user_id 隔离 + 低于阈值过滤。"""
         if k is None:
             k = self.k
-        return self.get_store().similarity_search(
+
+        threshold = get_config("vector_distance_threshold", 0.0)
+        results = self.get_store().similarity_search_with_score(
             query, k=k, filter={"user_id": user_id},
         )
+
+        docs = []
+        for doc, score in results:
+            if score > threshold > 0:
+                continue
+            doc.metadata["vector_score"] = float(score)
+            docs.append(doc)
+
+        filtered = len(results) - len(docs)
+        if filtered:
+            logger.debug(f"【向量数据库】距离阈值过滤: {filtered}/{len(results)} 条文档距离超过 {threshold}")
+        return docs
 
     def delete_by_md5(self, user_id: str, md5: str):
         """按 MD5 删除文档。"""

@@ -76,17 +76,37 @@ class ChatService:
                     try:
                         llm = init_manager.chat_model
                         if llm:
-                            context_text = "\n\n".join(
-                                f"[{i+1}] {d.page_content[:600]}" for i, d in enumerate(documents[:3])
-                            )
+                            from app.config.loader import get_config
+                            # 构建带元数据的上下文
+                            context_parts = []
+                            for i, d in enumerate(documents):
+                                src = d.metadata.get("original_filename", "未知")
+                                page = d.metadata.get("page", "")
+                                header = f"[{i+1}] 来源: {src}"
+                                if page:
+                                    header += f", 第{page}页"
+                                stream_max = get_config("rag_stream_max_chars", 600)
+                                context_parts.append(f"{header}\n{d.page_content[:stream_max]}")
+                            context_text = "\n\n".join(context_parts)
+
+                            # 构建历史文本
+                            from app.config.loader import get_config
+                            max_turns = get_config("llm_history_turns", 5)
+                            max_chars = get_config("history_max_chars", 200)
+                            history_lines = []
+                            for msg in history[-(max_turns * 2):]:
+                                role = "用户" if getattr(msg, "type", "") == "human" else "助手"
+                                history_lines.append(f"{role}: {getattr(msg, 'content', str(msg))[:max_chars]}")
+                            history_text = "\n".join(history_lines) if history_lines else "无"
+
                             from langchain_core.prompts import ChatPromptTemplate
                             prompt = ChatPromptTemplate.from_messages([
-                                ("system", "你是一个知识库助手。基于检索结果简洁回答用户问题。"),
-                                ("human", "问题：{query}\n\n参考资料：\n{context}"),
+                                ("system", "你是一个知识库助手。基于检索结果和对话历史简洁回答用户问题。"),
+                                ("human", "对话历史：\n{history}\n\n用户当前问题：{query}\n\n参考资料：\n{context}"),
                             ])
                             chain = prompt | llm | StrOutputParser()
                             regenerated = ""
-                            async for chunk in chain.astream({"query": query, "context": context_text}):
+                            async for chunk in chain.astream({"query": query, "context": context_text, "history": history_text}):
                                 if chunk:
                                     regenerated += chunk
                                     yield f"data: {json.dumps({'event': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"

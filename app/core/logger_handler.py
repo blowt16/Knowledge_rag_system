@@ -5,6 +5,18 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 
+class _EmbeddingsDebugFilter(logging.Filter):
+    """过滤 DEBUG 级别中包含 embedding 关键词的日志（dashscope 响应等）。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.DEBUG:
+            return True
+        msg = record.getMessage()
+        if isinstance(msg, str) and "embedding" in msg.lower():
+            return False
+        return True
+
+
 class LogHandler:
     """日志处理器管理：控制台 StreamHandler + 文件 RotatingFileHandler。"""
 
@@ -30,6 +42,7 @@ class LogHandler:
 
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG)
+        root_logger.addFilter(_EmbeddingsDebugFilter())
 
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -53,6 +66,7 @@ class LogHandler:
             )
             file_handler.setLevel(getattr(logging, file_level.upper(), logging.DEBUG))
             file_handler.setFormatter(formatter)
+            file_handler.addFilter(_EmbeddingsDebugFilter())
             root_logger.addHandler(file_handler)
 
         cls._configured = True

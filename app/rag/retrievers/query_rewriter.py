@@ -31,7 +31,7 @@ def is_pure_keyword(query: str) -> bool:
     if any(w in cleaned for w in q_words) or any(w in cleaned for w in pro_words):
         return False
 
-    max_len = get_config("pure_keyword_max_length", 6)
+    max_len = get_config("pure_keyword_max_length", 10)
     return len(cleaned) <= max_len
 
 

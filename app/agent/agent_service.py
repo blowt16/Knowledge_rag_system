@@ -1,5 +1,6 @@
 """Agent 编排服务 — LangChain Tool Calling Agent + 消息历史。"""
 from typing import AsyncIterator
+from app.config.loader import get_config
 from app.utils.log_tool import get_logger
 from app.utils.prompt_loader import PromptLoader
 
@@ -34,7 +35,8 @@ class AgentService:
             answer = result.get("answer", "")
             if not answer:
                 docs = result.get("documents", [])
-                lines = [f"[{i+1}] {doc.page_content[:300]}" for i, doc in enumerate(docs)]
+                max_chars = get_config("knowledge_search_max_chars", 300)
+                lines = [f"[{i+1}] {doc.page_content[:max_chars]}" for i, doc in enumerate(docs)]
                 answer = "\n\n".join(lines)
             return answer
 
@@ -49,7 +51,7 @@ class AgentService:
         @tool
         def summarize_document(content: str) -> str:
             """对长文档内容进行摘要。"""
-            if len(content) < 200:
+            if len(content) < get_config("summarize_min_chars", 500):
                 return content
             try:
                 llm = self._get_llm()
@@ -59,7 +61,8 @@ class AgentService:
                 return response.content if hasattr(response, "content") else str(response)
             except Exception as e:
                 logger.error(f"摘要生成失败: {e}")
-                return content[:300] + "..."
+                max_chars = get_config("knowledge_search_max_chars", 300)
+                return content[:max_chars] + "..."
 
         return [knowledge_search, web_search, summarize_document]
 
@@ -84,7 +87,8 @@ class AgentService:
         agent = create_tool_calling_agent(llm, tools, prompt)
         return AgentExecutor(
             agent=agent, tools=tools,
-            verbose=False, handle_parsing_errors=True, max_iterations=5,
+            verbose=False, handle_parsing_errors=True,
+            max_iterations=get_config("agent_max_iterations", 5),
         )
 
     async def stream_chat(self, query: str, session_id: str,
@@ -100,6 +104,8 @@ class AgentService:
 
         accumulated = ""
         done_sent = False
+        tool_call_counts: dict[str, int] = {}
+        tool_limits: dict = get_config("tool_call_limits", {})
 
         try:
             async for event in agent.astream_events(
@@ -112,6 +118,15 @@ class AgentService:
                 kind = event.get("event", "")
                 if kind == "on_tool_start":
                     tname = event.get("name", "")
+                    tool_call_counts[tname] = tool_call_counts.get(tname, 0) + 1
+                    limit = tool_limits.get(tname, 3)
+                    if tool_call_counts[tname] > limit:
+                        logger.warning(f"【Agent】工具 {tname} 重复调用 {tool_call_counts[tname]} 次，超过阈值 {limit}，终止本轮")
+                        yield {
+                            "event": "error",
+                            "data": f"工具 {tname} 重复调用超过 {limit} 次，已终止",
+                        }
+                        return
                     tinput = str(event.get("data", {}).get("input", ""))
                     logger.info(f"【Agent】调用工具: {tname}, 输入: {tinput[:200]}")
                     yield {

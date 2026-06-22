@@ -32,9 +32,11 @@ magic_signatures:
   "ÐÏà": ["unsupported_format", "旧版 Office 格式（.doc/.ppt），请转换为 docx/pptx"]
 
 # --- 检索 ---
-k: 5    # rerank召回数量
-rrf_constant: 60
-vector_search_multiplier: 2
+k: 5                        # 重排序后最终返回数量
+bm25_recall_k: 10            # BM25 关键词召回数量
+vector_recall_k: 10         # 向量相似度召回数量
+vector_distance_threshold: 0.45  # 向量距离阈值(余弦距离, 越小越相似, 超过此值的文档不召回, 0=不过滤)
+rrf_constant: 60            # RRF 融合常数
 
 # --- BM25 缓存 ---
 bm25_cache_size: 20
@@ -49,6 +51,7 @@ semantic_merge_threshold: 0.7
 pure_keyword_max_length: 10
 hyde_min_length: 3
 history_max_chars: 200
+llm_history_turns: 5           # 输入 LLM 的最近对话轮次
 query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
 pronoun_words: ["它", "他", "她", "这个", "那个", "这些", "那些", "它的", "他的", "她的", "这", "那", "上面", "前面", "刚才"]
 
