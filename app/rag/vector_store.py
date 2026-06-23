@@ -1,4 +1,4 @@
-"""ChromaDB 向量存储 — 基于 langchain_chroma.Chroma + 双重检查锁定单例。"""
+"""ChromaDB 向量存储 — 全局串行写入（threading.Lock），单进程单事件循环。"""
 import threading
 from langchain_chroma import Chroma
 from app.config.loader import get_config
@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 
 
 class VectorStoreService:
-    """ChromaDB 单例管理。"""
+    """ChromaDB 单例管理 — 所有写入操作全局串行，跨请求/跨用户均互斥。"""
 
     _instance = None
     _init_lock = threading.Lock()
@@ -58,11 +58,17 @@ class VectorStoreService:
         return self.get_store()._collection
 
     def add_documents(self, documents: list):
-        """批量添加文档（串行化写入，避免 SQLite 并发写冲突）。"""
+        """批量添加文档 — 全局串行，所有并发请求在此排队等待。"""
         if not documents:
             return
         with self._write_lock:
-            ids = [f"{doc.metadata.get('md5', 'unknown')}_{i}" for i, doc in enumerate(documents)]
+            ids = []
+            for i, doc in enumerate(documents):
+                cid = doc.metadata.get("chunk_id")
+                if cid:
+                    ids.append(cid)
+                else:
+                    ids.append(f"{doc.metadata.get('md5', 'unknown')}_{i}")
             self.get_store().add_documents(documents, ids=ids)
             logger.debug(f"【向量数据库】已入库 {len(documents)} 条文档")
 
@@ -89,24 +95,18 @@ class VectorStoreService:
         return docs
 
     def delete_by_md5(self, user_id: str, md5: str):
-        """按 MD5 删除文档。"""
+        """按 MD5 删除文档，异常透传给上层处理回滚。"""
         with self._write_lock:
-            try:
-                self._get_collection().delete(
-                    where={"$and": [{"user_id": user_id}, {"md5": md5}]}
-                )
-                logger.info(f"【向量数据库】已删除用户 {user_id} 中 md5={md5} 的文档")
-            except Exception as e:
-                logger.error(f"【向量数据库】删除出错: {e}")
+            self._get_collection().delete(
+                where={"$and": [{"user_id": user_id}, {"md5": md5}]}
+            )
+        logger.info(f"【向量数据库】已删除用户 {user_id} 中 md5={md5} 的文档")
 
     def delete_by_user(self, user_id: str):
-        """清空用户所有文档。"""
+        """清空用户所有文档，异常透传给上层处理回滚。"""
         with self._write_lock:
-            try:
-                self._get_collection().delete(where={"user_id": user_id})
-                logger.info(f"【向量数据库】已删除用户 {user_id} 的所有文档")
-            except Exception as e:
-                logger.error(f"【向量数据库】删除出错: {e}")
+            self._get_collection().delete(where={"user_id": user_id})
+        logger.info(f"【向量数据库】已删除用户 {user_id} 的所有文档")
 
     def get_user_documents(self, user_id: str) -> list[dict]:
         """获取用户所有文档的 metadata（仅拉取 metadata，避免传输 embeddings）。"""

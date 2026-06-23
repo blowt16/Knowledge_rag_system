@@ -60,16 +60,20 @@ class HybridRetriever:
         from app.rag.vector_store import VectorStoreService
         vs = VectorStoreService()
         collection = vs._get_collection()
-        results = collection.get(where={"user_id": user_id})
+        results = collection.get(where={"user_id": user_id}, include=["metadatas", "documents"])
 
         documents = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
         if not documents:
             return None
 
         from langchain_community.retrievers import BM25Retriever
         from langchain_core.documents import Document
 
-        docs = [Document(page_content=text) for text in documents]
+        docs = []
+        for i, text in enumerate(documents):
+            meta = metadatas[i] if i < len(metadatas) else {}
+            docs.append(Document(page_content=text, metadata=meta))
         bm25 = BM25Retriever.from_documents(docs, k=k)
 
         _bm25_cache.set(user_id, bm25)
@@ -138,10 +142,10 @@ class HybridRetriever:
 
         scores = {}
         for rank, doc in enumerate(bm25_docs, start=1):
-            doc_id = getattr(doc, "id", doc.page_content[:50])
+            doc_id = doc.metadata["chunk_id"]
             scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
         for rank, doc in enumerate(vector_docs, start=1):
-            doc_id = getattr(doc, "id", doc.page_content[:50])
+            doc_id = doc.metadata["chunk_id"]
             scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank)
 
         sorted_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -152,7 +156,7 @@ class HybridRetriever:
                 continue
             seen.add(doc_id)
             for doc in bm25_docs + vector_docs:
-                d_id = getattr(doc, "id", doc.page_content[:50])
+                d_id = doc.metadata["chunk_id"]
                 if d_id == doc_id and id(doc) not in seen:
                     doc.metadata["rrf_score"] = score
                     merged.append(doc)

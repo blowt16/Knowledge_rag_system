@@ -148,10 +148,10 @@ with st.sidebar:
     else:
         st.caption("尚未选择会话")
 
-    st.subheader("📋 历史会话")
-
-    # 首次加载强制刷新 + 手动刷新按钮
+    # 历史会话标题 + 刷新按钮同行
     col_title, col_refresh = st.columns([4, 1])
+    with col_title:
+        st.markdown("### 📋 历史会话")
     with col_refresh:
         if st.button("🔄", key="refresh_convs_btn", help="刷新列表"):
             _refresh_convs(reset=True)

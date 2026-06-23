@@ -4,7 +4,6 @@ import json
 import asyncio
 import shutil
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from app.config.loader import get_config
 from app.utils.path_tool import get_data_path
@@ -27,7 +26,6 @@ class ZipTaskManager:
     def __init__(self):
         self.tasks: dict[str, dict] = {}
         self._queues: dict[str, asyncio.Queue] = {}
-        self._executor = ThreadPoolExecutor(max_workers=_get_max_workers())
 
     def _push_event(self, task_id: str, event: dict):
         """线程安全推送 SSE 事件。"""
@@ -126,15 +124,13 @@ class ZipTaskManager:
                 progress["skipped"] += 1
 
             # 3. 并行走【全局公共复用文档管道】
-            loop = asyncio.get_running_loop()
-            tasks_coro = []
-            for f in valid_files:
-                async def process_one(fp=f):
-                    result = await loop.run_in_executor(
-                        self._executor, _process_file_through_shared_pipeline,
+            semaphore = asyncio.Semaphore(_get_max_workers())
+
+            async def process_one(fp: Path):
+                async with semaphore:
+                    result = await _process_file_through_shared_pipeline(
                         fp, user_id, tmp_dir,
                     )
-                    # 推送单文件进度事件
                     if isinstance(result, dict):
                         fname = Path(result.get("file_path", "")).name
                         self._push_event(task_id, {
@@ -146,8 +142,8 @@ class ZipTaskManager:
                             },
                         })
                     return result
-                tasks_coro.append(process_one())
 
+            tasks_coro = [process_one(f) for f in valid_files]
             results = await asyncio.gather(*tasks_coro, return_exceptions=True)
 
             # 4. 聚合结果
@@ -264,14 +260,12 @@ def _get_shared_processor():
     return _shared_processor
 
 
-def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path) -> dict:
-    import asyncio as _asyncio
-
+async def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path) -> dict:
     relative_path = str(file_path.relative_to(base_dir))
     processor = _get_shared_processor()
 
     try:
-        result = _asyncio.run(processor.process(str(file_path), user_id, file_path.name))
+        result = await processor.process(str(file_path), user_id, file_path.name)
         status = result.get("status", "failed")
         return {
             "status": status,

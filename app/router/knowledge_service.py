@@ -78,33 +78,22 @@ class KnowledgeService:
         return {"valid": False, "error": "文件类型校验失败"}
 
     def delete_by_md5(self, user_id: str, md5: str):
-        """原子化删除：先 MD5 → 后 ChromaDB，ChromaDB 失败则恢复 MD5。"""
+        """原子化删除：先 ChromaDB（易失败）→ 后 MD5，ChromaDB 失败则 MD5 不动。"""
         records = self._md5_store.get_all_md5(user_id)
         target = next((r for r in records if r.get("md5") == md5), None)
 
-        # 1. 先删 MD5 记录（失败则直接终止）
-        if not self._md5_store.delete_single_md5(user_id, md5):
-            return
+        # 1. 先删 ChromaDB（失败则抛异常，MD5 未动，上层返回 500）
+        self._vector_store.delete_by_md5(user_id, md5)
 
-        # 2. 再删 ChromaDB
-        try:
-            self._vector_store.delete_by_md5(user_id, md5)
-        except Exception as e:
-            # 回滚：恢复 MD5 记录
-            if target:
-                self._md5_store.save_md5_hex(
-                    user_id, md5,
-                    target.get("original_filename", "unknown"),
-                    target.get("filename", ""),
-                )
-            logger.error(f"【原子性】ChromaDB 删除失败，已恢复 MD5: {e}")
-            return
+        # 2. 再删 MD5 记录（ChromaDB 已成功，JSONL 几乎不会失败）
+        self._md5_store.delete_single_md5(user_id, md5)
 
         # 3. 清理图片（尽力而为）
         self._delete_image_directory(user_id, md5)
         HybridRetriever.invalidate_cache(user_id)
 
     def clear_user(self, user_id: str):
+        """原子化清空：先 ChromaDB → 后 MD5，ChromaDB 失败则 MD5 不动。"""
         self._vector_store.delete_by_user(user_id)
         self._md5_store.clear_user(user_id)
         self._delete_user_images(user_id)

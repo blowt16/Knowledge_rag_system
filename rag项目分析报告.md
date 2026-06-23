@@ -155,9 +155,9 @@ MIME类型双重校验（MIME类型 + 扩展名，二者之一匹配即可）
         ├── 成功 → 跳至「文本清洗」
         │
         └── 失败 → 降级尝试
-            │   ├── .md: UnstructuredMarkdownLoader → TextLoader 兜底
+            │   ├── .md: mistune v3 AST 解析 → 正则剥离 → TextLoader 兜底
             │   ├── .docx: Docx2txtLoader → python-docx 兜底
-            │   └── .pptx: UnstructuredPowerPointLoader → python-pptx 兜底
+            │   └── .pptx: python-pptx 原生解析（无降级，失败直接报错）
             │
             ├── 降级成功 → 跳至「文本清洗」
             │
@@ -279,7 +279,7 @@ MIME类型双重校验（MIME类型 + 扩展名，二者之一匹配即可）
 ### 3.0.0 压缩包上传流程
 
 ```
-压缩包上传 (.zip / .tar.gz / .rar)
+压缩包上传 (.zip / .tar.gz)
     │
     ▼
 ┌─ Zip压缩包上传（独有外层逻辑）──────────────┐
@@ -468,9 +468,9 @@ Top-N 结果 (默认 3 条)
 │  pdf_multimodal_loader.py (多模态PDF)                     │
 │  file_handler.py (TXT/MD/PPTX/DOCX)                       │
 ├──────────────────────────────────────────────────────────┤
-│                     向量存储层                            │
-│  vector_store.py (ChromaDB 单例)                          │
-│  md5_store.py (MD5去重存储)                               │
+│                     向量存储层（全局串行）                 │
+│  vector_store.py (ChromaDB 单例, threading.Lock 全局串行) │
+│  md5_store.py (MD5去重存储, threading.Lock 全局串行)      │
 │  image_extractor.py (PDF图片提取)                         │
 ├──────────────────────────────────────────────────────────┤
 │                     检索层                                │
@@ -717,7 +717,7 @@ Reranker 模型下载 ──→ ReorderService
 | .pdf | application/pdf |
 | .txt | text/plain |
 | .md | text/markdown |
-| .pptx | application/vnd.ms-powerpoint |
+| .pptx | application/vnd.openxmlformats-officedocument.presentationml.presentation |
 | .docx | application/vnd.openxmlformats-officedocument.wordprocessingml.document |
 
 双重校验的原因：`python-magic` 通过分析文件头魔数检测真实类型，防止攻击者将 `.exe` 改名为 `.pdf` 绕过纯扩展名校验；同时保留扩展名匹配作为容错。
@@ -729,8 +729,8 @@ Reranker 模型下载 ──→ ReorderService
 | 扩展名 | Loader | mode | 关键特性 | 存在问题 |
 |--------|--------|------|----------|----------|
 | .txt | TextLoader | 默认 | utf-8 → gbk 编码回退 | — |
-| .md | UnstructuredMarkdownLoader | single | 整个文件合并 | — |
-| .pptx | UnstructuredPowerPointLoader | single | 所有幻灯片合并 | — |
+| .md | mistune v3 AST 解析 | TOC/表格/列表插件 | 提取完整章节层级，剥离 MD 标记 | 见下方说明 |
+| .pptx | python-pptx 原生 | — | 提取所有文本框内容，无降级 | 解析失败直接报错 |
 | .docx | Docx2txtLoader | 默认 | 提取段落文本，保留自然换行 | — |
 | .pdf | 多模态 / 纯文本双路径 | — | 见 5.4 节 | — |
 
@@ -738,7 +738,9 @@ Reranker 模型下载 ──→ ReorderService
 
 **TXT 编码双回退**：中文 Windows 系统导出的 `.txt` 文件默认编码是 GBK，非 UTF-8。双编码回退避免加载失败。
 
-**Markdown/PPTX 的 mode="single"**：让后续统一的 `RecursiveCharacterTextSplitter` 控制切分，保证所有格式的 chunk 策略一致（chunk_size=500, overlap=50），而非依赖各 Loader 特定行为。
+**MD 使用 mistune v3 AST 解析**：启用 table / task_lists / strikethrough / footnotes 插件，提取完整章节层级 (TOC)、表格、列表等结构化信息，剥离内联格式化标记（加粗、斜体、链接等），失败时降级为自定义正则剥离 MD 标记 → TextLoader 兜底。主路径输出携带 TOC 元数据供检索溯源。
+
+**PPTX 仅使用 python-pptx 原生解析**：遍历 slides → shapes → text_frame → paragraphs 提取所有文本框内容，不再使用 UnstructuredPowerPointLoader。解析失败直接抛出异常（无降级），由上层 `DocumentProcessor` 统一捕获并记录日志。
 
 **DOCX 使用 Docx2txtLoader**：`TextLoader` 将 DOCX 的 ZIP 二进制字节流当作文本读取，无法正确提取内容。改为 `Docx2txtLoader` 基于 python-docx 正确提取段落文本，保留自然换行结构，无需额外预处理即可投入切分流水线。
 
@@ -1375,6 +1377,10 @@ def __new__(cls):
 
 **为什么是单例？** ChromaDB 0.5.x+ 的 `SharedSystemClient` 维护全局 `_instance` 缓存，多个实例会导致已销毁 client 的 KeyError。每次初始化前主动调用 `SharedSystemClient.clear_system_cache()`。
 
+#### 全局串行写入
+
+所有写入操作（`add_documents`、`delete_by_md5`、`delete_by_user`）受 `_write_lock`（`threading.Lock`）保护，**全局串行化**：无论来自单文件上传、ZIP 内并发处理、还是不同用户请求，同一时刻仅一个协程可执行写入，其余全部排队等待。`threading.Lock` 会直接阻塞事件循环线程，被阻塞的协程无法让步给其他任务。
+
 #### Metadata 策略
 
 每个 chunk 携带的 metadata 及用途：
@@ -1437,6 +1443,10 @@ data/md5_hex_store/
 - 独立文件可保留完整历史
 - JSON Lines：逐行追加/读取，内存友好
 - 按用户隔离：用户间互不影响
+
+#### 全局串行操作
+
+`MD5Store` 的所有读写操作（`check_md5_exists`、`save_md5_hex`、`delete_single_md5`、`clear_user`）受 `_lock`（`threading.Lock`）保护，**全局串行化**。`check_md5_exists()` 在锁定期间扫描完整 JSONL 文件，单次操作阻塞所有并发的 MD5 查询和记录写入。这与 `VectorStoreService._write_lock` 共同构成系统的两个全局串行瓶颈。
 
 #### 为什么 MD5 就够了？
 
@@ -2229,7 +2239,7 @@ async def chat(request: ChatRequest):
 import json
 import uuid
 from app.memory.memory_service import ConversationMemoryService
-from app.rag.agent_service import AgentService
+from app.agent.agent_service import AgentService
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
@@ -2588,7 +2598,7 @@ chromadb_telemetry: false
 
 # --- 文件类型 ---
 allow_knowledge_file_types: ["txt", "pdf", "md", "pptx", "docx"]
-allowed_zip_extensions: [".zip", ".tar.gz", ".rar"]
+allowed_zip_extensions: [".zip", ".tar.gz"]
 text_encodings: ["utf-8", "gbk", "gb2312", "latin-1"]
 mime_detect_buffer_size: 2048
 allowed_mime_types: {application/pdf: pdf, text/plain: txt, ...}
@@ -2851,7 +2861,7 @@ log_tool.py                     ← 统一入口（各模块调用）
 
 | 模块 | 日志器名称 | 日志文件 |
 |------|-----------|---------|
-| Agent 服务 | `app.rag.agent` | `logs/agent_YYYYMMDD.log` |
+| Agent 服务 | `app.agent` | `logs/agent_YYYYMMDD.log` |
 | RAG 检索 | `app.rag.rag_service` | `logs/rag_YYYYMMDD.log` |
 | 文档处理 | `app.rag.document_handler` | `logs/rag_YYYYMMDD.log` |
 | 知识库路由 | `app.router.knowledge` | `logs/agent_YYYYMMDD.log` |
@@ -3006,7 +3016,7 @@ templates:
 | app/rag/retrievers/query_rewriter.py | 两层分类器+HyDE改写（配置驱动） | get_retrieval_strategy(), hyde_rewrite() |
 | app/rag/reorder_service.py | CrossEncoder 重排序（配置驱动） | ReorderService |
 | app/rag/rag_service.py | RAG 核心（LCEL 摘要管线） | RAGService |
-| app/rag/agent/agent_service.py | langchain_classic Agent 编排 | AgentService |
+| app/agent/agent_service.py | langchain_classic Agent 编排 | AgentService |
 | app/rag/md5_manager/md5_store.py | MD5 JSON Lines 去重存储 | MD5Store |
 | app/rag/zip_handler/zip_handler.py | 压缩包解压+并行解析+错误收集 | ZipTaskManager |
 | app/memory/memory_service.py | SQLChatMessageHistory + SQLite | ConversationMemoryService |

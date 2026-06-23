@@ -193,9 +193,3 @@ class RAGService:
                 header += f", 第{page}页"
             lines.append(f"{header}\n{doc.page_content[:max_chars]}")
         return "\n\n---\n\n".join(lines)
-
-    def search_sync(self, query: str, user_id: str = "",
-                    chat_history: list = None) -> dict:
-        """同步版 RAG 检索（nest_asyncio 保证事件循环安全）。"""
-        import asyncio
-        return asyncio.run(self.search(query, user_id, chat_history))

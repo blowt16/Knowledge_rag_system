@@ -1,12 +1,9 @@
 """知识库 RAG 系统 — FastAPI 主入口。"""
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-# 允许嵌套事件循环（Agent 工具在事件循环中调用 asyncio.run 时需要）
-import nest_asyncio
-nest_asyncio.apply()
 
 # 自动加载 .env 文件
 try:
@@ -27,11 +24,27 @@ from app.core.failed_response import (
 setup_logger()
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI 生命周期管理。
+
+    uvicorn --reload 模式下子进程会丢失父进程配置的 logging handler，
+    因此在 startup 阶段 force 重建 handler，确保日志正常输出。
+    """
+    setup_logger(force=True)
+    logger.info("[START] 服务启动，开始后台初始化...")
+    init_manager.start()
+    yield
+    init_manager.shutdown()
+
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="知识库 RAG 系统",
     description="本地知识库 RAG 检索系统 — FastAPI + LangChain + ChromaDB",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS 中间件
@@ -58,24 +71,6 @@ app.include_router(chat_router)
 app.include_router(knowledge_router)
 app.include_router(conversation_router)
 app.include_router(zip_router)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """FastAPI 启动事件：重新初始化日志 + 触发后台初始化。
-
-    uvicorn --reload 模式下子进程会丢失父进程配置的 logging handler，
-    因此在 startup 阶段 force 重建 handler，确保日志正常输出。
-    """
-    setup_logger(force=True)
-    logger.info("[START] 服务启动，开始后台初始化...")
-    init_manager.start()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """FastAPI 关闭事件：清理资源。"""
-    init_manager.shutdown()
 
 
 @app.get("/")

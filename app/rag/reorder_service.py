@@ -1,4 +1,5 @@
 """重排序服务 — CrossEncoder BGE-Reranker-v2-m3。"""
+import gc
 import os
 import threading
 from pathlib import Path
@@ -132,12 +133,18 @@ class ReorderService:
             return documents[:top_k]
 
     def close(self):
-        """释放模型内存。"""
+        """释放模型内存 — 先移到 CPU 再删除，确保 GPU 显存彻底释放。"""
         if self._model is not None:
+            try:
+                self._model.model.to("cpu")
+            except Exception:
+                pass
+            del self._model
             self._model = None
             try:
                 import torch
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+            gc.collect()
         ReorderService._instance = None

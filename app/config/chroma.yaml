@@ -10,7 +10,7 @@ chromadb_telemetry: false
 
 # --- 文件类型 ---
 allow_knowledge_file_types: ["txt", "pdf", "md", "pptx", "docx"]
-allowed_zip_extensions: [".zip", ".tar.gz", ".rar"]
+allowed_zip_extensions: [".zip", ".tar.gz"]
 text_encodings: ["utf-8", "gbk", "gb2312", "latin-1"]
 mime_detect_buffer_size: 2048
 
@@ -20,12 +20,12 @@ allowed_mime_types:
   text/plain: txt
   text/markdown: md
   application/vnd.openxmlformats-officedocument.wordprocessingml.document: docx
-  application/vnd.ms-powerpoint: pptx
+  application/vnd.openxmlformats-officedocument.presentationml.presentation: pptx
 
 # --- 魔数签名 (诊断兜底) ---
 magic_signatures:
   "%PDF": ["corrupted", "PDF 文件已损坏，无法解析"]
-  "PK\x03\x04": ["corrupted", "ZIP 容器文件已损坏（内部结构异常）"]
+  # "PK\x03\x04" removed: DOCX/PPTX are ZIP-based, this signature caused misdiagnosis
   "‰PNG": ["unsupported_format", "PNG 图片"]
   "ÿØÿ": ["unsupported_format", "JPEG 图片"]
   "GIF8": ["unsupported_format", "GIF 图片"]
@@ -45,7 +45,9 @@ bm25_cache_size: 20
 chunk_size: 500
 chunk_overlap: 50
 separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
-semantic_merge_threshold: 0.7
+enable_semantic_merge: false # 文本分块后是否进行语义合并
+semantic_merge_threshold: 0.7 # 进行语义合并的相似度阈值(到达该阈值进行合并)
+max_merge_len: 1500 # 语义合并后单个 chunk 最大长度（字符），超过强制分拆
 
 # --- 查询改写 ---
 pure_keyword_max_length: 10

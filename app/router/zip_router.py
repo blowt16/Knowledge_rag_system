@@ -19,7 +19,7 @@ _task_manager = ZipTaskManager()
 
 
 def _get_zip_extensions() -> set[str]:
-    return set(get_config("allowed_zip_extensions", [".zip", ".tar.gz", ".rar"]))
+    return set(get_config("allowed_zip_extensions", [".zip", ".tar.gz"]))
 
 
 def _get_max_zip_size() -> int:

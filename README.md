@@ -7,7 +7,7 @@
 - **双模式对话**：直接 RAG 检索（关键词 / 混合检索）和 Agent 工具链（knowledge_search + web_search + summarize）
 - **混合检索**：BM25 关键词 + 向量相似度 + RRF 融合 + BGE-Reranker-v2-m3 重排序
 - **HyDE 改写**：对自然语言问题生成假设性文档，增强向量检索匹配
-- **文档管理**：支持 txt / pdf / md / pptx / docx 单文件上传及 zip / tar.gz / rar 批量上传
+- **文档管理**：支持 txt / pdf / md / pptx / docx 单文件上传及 zip / tar.gz 批量上传
 - **多模态 PDF**：扫描版 PDF 自动 OCR 提取，图文混排 PDF 视觉模型理解
 - **会话管理**：多轮对话持久化，置顶、分页、历史回溯
 - **Streamlit 前端**：对话主页 + 知识库管理页 + 会话管理页

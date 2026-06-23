@@ -162,7 +162,7 @@ class DocumentProcessor:
                     "filename": original_filename, "md5": md5_hex}
 
         # 5. 切分
-        documents = self._splitter.split_documents(documents)
+        documents = await self._splitter.async_split_documents(documents)
         if not documents:
             logger.debug(f"【向量数据库】文件 {original_filename} 切分内容为空，跳过")
             return {"status": "failed", "reason": "empty_content",
@@ -170,6 +170,10 @@ class DocumentProcessor:
 
         # 6. 元数据
         for doc in documents:
+            chunk_idx = doc.metadata.get("chunk_index", 0)
+            doc.metadata["kb_id"] = user_id
+            doc.metadata["chunk_index"] = chunk_idx
+            doc.metadata["chunk_id"] = f"{user_id}_{md5_hex}_{chunk_idx:04d}"
             doc.metadata["user_id"] = user_id
             doc.metadata["md5"] = md5_hex
             doc.metadata["original_filename"] = original_filename
@@ -188,7 +192,10 @@ class DocumentProcessor:
             self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, str(file_path))
         except Exception as e:
             logger.error(f"【MD5】保存失败，回滚向量数据: {e}")
-            self._vector_store.delete_by_md5(user_id, md5_hex)
+            try:
+                self._vector_store.delete_by_md5(user_id, md5_hex)
+            except Exception as re:
+                logger.error(f"【MD5】回滚 ChromaDB 也失败: {re}")
             return {"status": "failed", "reason": f"MD5 保存失败: {e}", "filename": original_filename, "md5": md5_hex}
 
         return {

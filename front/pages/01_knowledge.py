@@ -21,7 +21,7 @@ from api_client import (
 st.set_page_config(page_title="知识库管理", page_icon="📦", layout="wide")
 
 ALLOWED_SINGLE = ["txt", "pdf", "md", "pptx", "docx"]
-ALLOWED_ZIP = ["zip", "tar", "gz", "rar"]
+ALLOWED_ZIP = ["zip", "tar", "gz"]
 
 
 def refresh_docs():
@@ -41,6 +41,13 @@ if "docs_loaded" not in st.session_state:
     st.session_state.docs_loaded = False
 if "show_clear_confirm" not in st.session_state:
     st.session_state.show_clear_confirm = False
+if "toast_message" not in st.session_state:
+    st.session_state.toast_message = None
+
+# 在顶层渲染 toast（不依赖 button 回调时机）
+if st.session_state.toast_message:
+    st.toast(st.session_state.toast_message, icon="⚠️")
+    st.session_state.toast_message = None
 
 st.title("📦 知识库管理")
 
@@ -65,12 +72,13 @@ if uploaded_file is not None:
                 data = result.get("data", {})
                 status = data.get("status", "")
                 if status == "duplicate":
-                    st.warning(f"⚠️ 文件已存在: {data.get('message', '')}")
+                    st.session_state.toast_message = f"{result.get('message', '文件已存在，不能重复上传')}（{uploaded_file.name}）"
+                    st.rerun()
                 else:
                     st.success(f"✅ 上传成功: {uploaded_file.name}")
                     st.json(data)
-                refresh_docs()
-                st.rerun()
+                    refresh_docs()
+                    st.rerun()
             except Exception as e:
                 st.error(f"上传失败: {e}")
 
@@ -81,7 +89,7 @@ st.divider()
 # ============================================================
 st.subheader("📦 批量上传（压缩包）")
 zip_file = st.file_uploader(
-    "选择压缩包（zip/tar.gz/rar，最大 50MB）",
+    "选择压缩包（zip/tar.gz，最大 50MB）",
     type=ALLOWED_ZIP,
     accept_multiple_files=False,
     key="zip_uploader",
@@ -155,7 +163,10 @@ if zip_file is not None:
                                 skipped_count = final_prog.get("skipped", skipped_count)
                                 failed_count = final_prog.get("failed", failed_count)
                                 bar.progress(1.0, "处理完成")
-                                st.success(f"压缩包处理完成！成功 {success_count}，跳过 {skipped_count}，失败 {failed_count}")
+                                if success_count == 0 and skipped_count > 0:
+                                    st.warning(f"⚠️ 压缩包内所有文件均已存在，跳过 {skipped_count} 个文件，无新增")
+                                else:
+                                    st.success(f"压缩包处理完成！成功 {success_count}，跳过 {skipped_count}，失败 {failed_count}")
                                 error_details = ddata.get("error_details", [])
                                 if error_details:
                                     with st.expander("查看错误详情"):

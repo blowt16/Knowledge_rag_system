@@ -1,4 +1,4 @@
-"""MD5 去重存储 — JSON Lines 格式，按用户隔离。"""
+"""MD5 去重存储 — JSON Lines 格式，全局串行（threading.Lock），按用户隔离。"""
 import json
 import os
 import threading
@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 
 
 class MD5Store:
-    """MD5 文件级去重存储，线程安全。"""
+    """MD5 文件级去重存储 — 全局串行，所有并发请求在此排队等待。"""
 
     _lock = threading.Lock()
 
