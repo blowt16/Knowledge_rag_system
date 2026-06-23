@@ -18,7 +18,9 @@ class RAGService:
         self._reorder_svc = ReorderService()
 
     async def search(self, query: str, user_id: str = "",
-                     chat_history: list = None, top_k: int = None) -> dict:
+                     chat_history: list = None, top_k: int = None,
+                     on_chunk=None) -> dict:
+        """RAG 检索。若 on_chunk 回调传入则流式推送 token。"""
         if top_k is None:
             top_k = get_config("k", 5)
 
@@ -94,25 +96,29 @@ class RAGService:
             summary_lines.append(f"  文档{i+1}[{src}]: {content}...")
         logger.info("【RAG】检索结果汇总:\n" + "\n".join(summary_lines))
 
-        # 步骤5: LLM 摘要
+        # 步骤5: LLM 摘要 (on_chunk 回调支持流式推送)
         try:
-            answer = await self._generate_summary(
+            answer, chunks = await self._generate_summary(
                 query=query, documents=reranked, chat_history=chat_history,
-                rewritten_query=rewritten_query)
+                rewritten_query=rewritten_query, on_chunk=on_chunk)
         except Exception as e:
             logger.error(f"【RAG】生成摘要失败: {e}")
             answer = self._format_docs(reranked)
+            chunks = [answer]
 
         return {
             "answer": answer, "documents": reranked,
             "rewritten_query": rewritten_query or query,
+            "chunks": chunks,
         }
 
     async def _generate_summary(self, query: str, documents: list,
                                 chat_history: list = None,
-                                rewritten_query: str = None) -> str:
+                                rewritten_query: str = None,
+                                on_chunk=None) -> tuple[str, list[str]]:
+        """返回 (完整回答, token_chunks)。有 on_chunk 回调时流式推送。"""
         if not documents:
-            return ""
+            return "", []
 
         try:
             from app.core.background_init import init_manager
@@ -121,7 +127,8 @@ class RAGService:
 
             llm = init_manager.chat_model
             if llm is None:
-                return self._format_docs(documents)
+                fallback = self._format_docs(documents)
+                return fallback, [fallback]
 
             max_chars = get_config("summary_max_chars", 800)
             contexts = []
@@ -138,18 +145,26 @@ class RAGService:
 
             history_text = self._format_history(chat_history)
 
+            from app.utils.prompt_loader import PromptLoader
+            prompt_text = PromptLoader().load(
+                "rag_answer", query=query, history=history_text, context=context_text)
             prompt = ChatPromptTemplate.from_messages([
-                ("system", "你是一个 RAG 知识库助手。基于以下检索结果回答问题。如果检索结果不足以回答问题，请说明。回答要简洁明了。"),
-                ("human", "对话历史：\n{history}\n\n用户当前问题：{query}\n\n知识库检索结果：\n{context}"),
+                ("human", "{input}"),
             ])
             chain = prompt | llm | StrOutputParser()
-            answer = await chain.ainvoke({
-                "query": query, "context": context_text, "history": history_text,
-            })
-            return answer.strip()
+            answer = ""
+            chunks = []
+            async for chunk in chain.astream({"input": prompt_text}):
+                if chunk:
+                    answer += chunk
+                    chunks.append(chunk)
+                    if on_chunk:
+                        await on_chunk(chunk)
+            return answer.strip(), chunks
         except Exception as e:
             logger.error(f"【RAG】生成摘要失败: {e}")
-            return self._format_docs(documents)
+            fallback = self._format_docs(documents)
+            return fallback, [fallback]
 
     @staticmethod
     def _format_history(chat_history: list = None) -> str:
@@ -172,7 +187,11 @@ class RAGService:
         lines = []
         for i, doc in enumerate(documents):
             source = doc.metadata.get("original_filename", "未知")
-            lines.append(f"[{i+1}] 来源: {source}\n{doc.page_content[:max_chars]}")
+            page = doc.metadata.get("page", "")
+            header = f"[{i+1}] 来源: {source}"
+            if page:
+                header += f", 第{page}页"
+            lines.append(f"{header}\n{doc.page_content[:max_chars]}")
         return "\n\n---\n\n".join(lines)
 
     def search_sync(self, query: str, user_id: str = "",

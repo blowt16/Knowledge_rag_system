@@ -52,10 +52,27 @@ class ChatService:
         answer = ""
 
         try:
-            # RAG 检索
+            # RAG 检索 (流式: 边生成摘要边推送 token)
             try:
                 logger.info(f"【RAG直通】开始检索: query_len={len(query)}, history_turns={len(history)//2}")
-                result = await self._rag_svc.search(query, user_id, history)
+                import asyncio as _asyncio
+                token_queue: _asyncio.Queue = _asyncio.Queue()
+
+                async def _push_token(chunk: str):
+                    await token_queue.put(chunk)
+
+                search_task = _asyncio.create_task(
+                    self._rag_svc.search(query, user_id, history, on_chunk=_push_token))
+
+                # 检索 + 重排序期间 token_queue 为空, search_task 完成后 tokens 才开始到达
+                while not search_task.done() or not token_queue.empty():
+                    try:
+                        chunk = await _asyncio.wait_for(token_queue.get(), timeout=0.1)
+                        yield f"data: {json.dumps({'event': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
+                    except _asyncio.TimeoutError:
+                        pass
+
+                result = await search_task
             except Exception as e:
                 logger.error(f"【RAG直通】检索失败: {e}")
                 answer = f"检索失败: {str(e)}"
@@ -69,10 +86,21 @@ class ChatService:
                     logger.info("【RAG直通】知识库中未找到相关内容")
                     answer = "知识库中未找到相关内容。"
                     yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
-                elif answer:
-                    yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
                 else:
-                    yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
+                    if not answer:
+                        yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
+                    # 参考资料来源
+                    sources = []
+                    for d in documents:
+                        src = d.metadata.get("original_filename", "未知")
+                        page = d.metadata.get("page", "")
+                        label = src
+                        if page:
+                            label += f" (第{page}页)"
+                        if label not in sources:
+                            sources.append(label)
+                    logger.info(f"【RAG直通】参考来源: {sources}")
+                    yield f"data: {json.dumps({'event': 'references', 'data': sources}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error(f"【RAG直通】未预期异常: {e}")
             answer = answer or f"处理失败: {str(e)}"

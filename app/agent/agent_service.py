@@ -18,7 +18,7 @@ class AgentService:
             llm = create_chat_model()
         return llm
 
-    def _get_tools(self, user_id: str, chat_history: list = None):
+    def _get_tools(self, user_id: str, chat_history: list = None, refs_list: list = None):
         from langchain_core.tools import tool
         from app.rag.rag_service import RAGService
 
@@ -33,11 +33,36 @@ class AgentService:
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
             answer = result.get("answer", "")
+            docs = result.get("documents", [])
+            max_chars = get_config("knowledge_search_max_chars", 300)
+            # 收集文档来源供 references 事件使用
+            if refs_list is not None:
+                for d in docs:
+                    src = d.metadata.get("original_filename", "未知")
+                    page = d.metadata.get("page", "")
+                    label = src
+                    if page:
+                        label += f" (第{page}页)"
+                    if label not in refs_list:
+                        refs_list.append(label)
             if not answer:
-                docs = result.get("documents", [])
-                max_chars = get_config("knowledge_search_max_chars", 300)
-                lines = [f"[{i+1}] {doc.page_content[:max_chars]}" for i, doc in enumerate(docs)]
+                lines = []
+                for i, doc in enumerate(docs):
+                    src = doc.metadata.get("original_filename", "未知")
+                    page = doc.metadata.get("page", "")
+                    header = f"[文档{i+1}] 来源: {src}"
+                    if page:
+                        header += f", 第{page}页"
+                    lines.append(f"{header}\n{doc.page_content[:max_chars]}")
                 answer = "\n\n".join(lines)
+            else:
+                sources = []
+                for i, doc in enumerate(docs):
+                    src = doc.metadata.get("original_filename", "未知")
+                    if src not in sources:
+                        sources.append(src)
+                if sources:
+                    answer += f"\n\n📚 参考来源: {', '.join(sources)}"
             return answer
 
         from app.rag.web_search_service import WebSearchService
@@ -66,16 +91,16 @@ class AgentService:
 
         return [knowledge_search, web_search, summarize_document]
 
-    def _create_executor(self, user_id: str, chat_history: list = None):
+    def _create_executor(self, user_id: str, chat_history: list = None, refs_list: list = None):
         """创建 AgentExecutor（不含 RunnableWithMessageHistory，手动管理历史）。"""
         from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
         llm = self._get_llm()
-        tools = self._get_tools(user_id, chat_history)
+        tools = self._get_tools(user_id, chat_history, refs_list)
 
         loader = PromptLoader()
-        system_prompt = loader.load("agent") or loader.load("system")
+        system_prompt = loader.load("agent")
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
@@ -100,12 +125,13 @@ class AgentService:
         # 手动加载历史消息
         chat_history = memory_svc.load_context(session_id)
 
-        agent = self._create_executor(user_id, chat_history)
-
         accumulated = ""
         done_sent = False
         tool_call_counts: dict[str, int] = {}
         tool_limits: dict = get_config("tool_call_limits", {})
+        agent_references: list[str] = []
+
+        agent = self._create_executor(user_id, chat_history, agent_references)
 
         try:
             async for event in agent.astream_events(
@@ -162,6 +188,9 @@ class AgentService:
                     logger.info(f"[Agent] done via on_agent_finish, answer length={len(answer)}")
                     accumulated = answer
                     done_sent = True
+                    if agent_references:
+                        logger.info(f"【Agent】参考来源: {agent_references}")
+                        yield {"event": "references", "data": agent_references}
                     yield {
                         "event": "done",
                         "data": answer,
@@ -179,6 +208,9 @@ class AgentService:
                         logger.info(f"[Agent] done via on_chain_end, answer length={len(answer)}")
                         accumulated = answer
                         done_sent = True
+                        if agent_references:
+                            logger.info(f"【Agent】参考来源: {agent_references}")
+                            yield {"event": "references", "data": agent_references}
                         yield {
                             "event": "done",
                             "data": answer,
@@ -186,6 +218,9 @@ class AgentService:
 
             # 兜底（仅在没有 on_agent_finish / on_chain_end 时触发）
             if not done_sent and accumulated:
+                if agent_references:
+                    logger.info(f"【Agent】参考来源: {agent_references}")
+                    yield {"event": "references", "data": agent_references}
                 yield {
                     "event": "done",
                     "data": accumulated,

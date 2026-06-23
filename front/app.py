@@ -217,8 +217,9 @@ if prompt := st.chat_input(
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
+        placeholder.markdown("🔍 检索中...")
         full_response = ""
-        tool_logs = []
+        references = []
 
         try:
             for event in send_chat_stream(prompt, st.session_state.main_session_id, USER_ID, st.session_state.mode):
@@ -229,10 +230,7 @@ if prompt := st.chat_input(
 
                 elif ev_type == "token":
                     full_response += event.get("data", "")
-                    display = full_response
-                    if tool_logs:
-                        display += "\n\n---\n**🔧 工具调用记录：**\n" + "\n".join(f"- {t}" for t in tool_logs)
-                    placeholder.markdown(display)
+                    placeholder.markdown(full_response)
 
                 elif ev_type == "done":
                     data = event.get("data", "")
@@ -240,23 +238,18 @@ if prompt := st.chat_input(
                     if final:
                         full_response = final
 
-                elif ev_type == "tool_start":
-                    tname = event.get("tool", "unknown")
-                    tdata = event.get("data", "")
-                    tool_logs.append(f"🔍 **{tname}**: {tdata}")
-
-                elif ev_type == "tool_end":
-                    tname = event.get("tool", "unknown")
-                    tdata = event.get("data", "")
-                    tool_logs.append(f"✅ **{tname}** 完成")
+                elif ev_type == "references":
+                    references = event.get("data", [])
 
                 elif ev_type == "error":
                     full_response = event.get("data", "发生未知错误")
-                    st.error(full_response)
+                    placeholder.markdown(f"❌ {full_response}")
 
             display = full_response
-            if tool_logs:
-                display += "\n\n---\n**🔧 工具调用记录：**\n" + "\n".join(f"- {t}" for t in tool_logs)
+            if references:
+                ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {s}" for s in references)
+                display += ref_text
+                full_response += ref_text
             placeholder.markdown(display)
 
         except Exception as e:

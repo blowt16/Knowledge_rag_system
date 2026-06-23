@@ -1,6 +1,7 @@
 """重排序服务 — CrossEncoder BGE-Reranker-v2-m3。"""
 import os
 import threading
+from pathlib import Path
 from app.config.loader import get_config
 from app.utils.path_tool import get_models_path
 from app.utils.log_tool import get_logger
@@ -31,15 +32,17 @@ class ReorderService:
             return self._model
 
         max_length = int(os.getenv("RERANKER_MAX_LENGTH", "512"))
-        model_path = os.getenv("RERANKER_MODEL_PATH", "bge-reranker-v2-m3")
+        model_path = os.getenv("RERANKER_MODEL_PATH", "models/BAAI/bge-reranker-v2-m3")
         scope_name = os.getenv("RERANKER_MODELSCOPE_NAME", "BAAI/bge-reranker-v2-m3")
 
         from sentence_transformers import CrossEncoder
 
         device = os.getenv("RERANKER_DEVICE", "cuda")
 
+        loaded_path = None
+
         def _try_load(path):
-            nonlocal device
+            nonlocal device, loaded_path
             try:
                 self._model = CrossEncoder(str(path), max_length=max_length, device=device)
             except (RuntimeError, MemoryError) as e:
@@ -54,31 +57,45 @@ class ReorderService:
             except Exception:
                 actual_device = device
             logger.info(f"[OK] 加载重排序模型: {path}, 设备: {actual_device}")
+            loaded_path = str(path)
             return self._model
 
         # 1. 本地路径（环境变量指定或默认）
-        try:
-            return _try_load(get_models_path(model_path))
-        except Exception:
-            pass
+        if self._model is None:
+            try:
+                _try_load(get_models_path(model_path))
+            except Exception:
+                pass
 
         # 2. ModelScope 缓存目录（snapshot_download 下载后存放的位置）
-        cache_dir = get_models_path(scope_name)
-        if cache_dir.exists():
-            try:
-                return _try_load(cache_dir)
-            except Exception as e:
-                logger.error(f"[ERR] 从缓存目录加载失败: {e}")
+        if self._model is None:
+            cache_dir = get_models_path(scope_name)
+            if cache_dir.exists():
+                try:
+                    _try_load(cache_dir)
+                except Exception as e:
+                    logger.error(f"[ERR] 从缓存目录加载失败: {e}")
 
         # 3. ModelScope 下载
-        try:
-            from modelscope import snapshot_download
-            model_dir = snapshot_download(scope_name, cache_dir=str(get_models_path()))
-            return _try_load(model_dir)
-        except Exception as e:
-            logger.error(f"[ERR] ModelScope 下载失败: {e}")
-            self._model = None
-            return None
+        if self._model is None:
+            try:
+                from modelscope import snapshot_download
+                model_dir = snapshot_download(scope_name, cache_dir=str(get_models_path()))
+                _try_load(model_dir)
+            except Exception as e:
+                logger.error(f"[ERR] ModelScope 下载失败: {e}")
+
+        # 首次加载后保存 modules.json（消除后续启动的 No modules.json 日志）
+        if self._model is not None and loaded_path:
+            modules_file = Path(loaded_path) / "modules.json"
+            if not modules_file.exists():
+                try:
+                    self._model.save(str(loaded_path))
+                    logger.info(f"[OK] 已保存 modules.json 到 {loaded_path}")
+                except Exception as e:
+                    logger.debug(f"保存 modules.json 失败(可忽略): {e}")
+
+        return self._model
 
     def rerank(self, query: str, documents: list, top_k: int = None) -> list:
         if not documents:
