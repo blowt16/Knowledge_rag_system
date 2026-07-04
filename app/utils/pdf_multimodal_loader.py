@@ -191,22 +191,27 @@ def _process_text_pdf(pdf_path: str, file_path: str,
         import pdfplumber
         import fitz
         doc_fitz = fitz.open(pdf_path)
-        with pdfplumber.open(pdf_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
-                if page_filter is not None and page_num not in page_filter:
-                    continue
-                try:
-                    text = page.extract_text()
-                except Exception:
-                    logger.warning(
-                        f"【text_pdf】第{page_num}页 pdfplumber 失败，"
-                        f"尝试 PyMuPDF 兜底"
-                    )
-                    text = doc_fitz[page_num - 1].get_text()
-                if not text or not text.strip():
-                    continue
-                doc = Document(
-                    page_content=text.strip(),
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    if page_filter is not None and page_num not in page_filter:
+                        continue
+                    try:
+                        text = page.extract_text()
+                    except Exception:
+                        logger.warning(
+                            f"【text_pdf】第{page_num}页 pdfplumber 失败，"
+                            f"尝试 PyMuPDF 兜底"
+                        )
+                        text = doc_fitz[page_num - 1].get_text()
+                    if not text or not text.strip():
+                        raise ValueError(
+                            f"【text_pdf】第{page_num}页文本提取失败"
+                            f"（pdfplumber + PyMuPDF 均无法提取），"
+                            f"请检查文件后重新上传: {Path(pdf_path).name}"
+                        )
+                    doc = Document(
+                        page_content=text.strip(),
                     metadata={
                         "source": file_path,
                         "page": page_num,
@@ -216,7 +221,8 @@ def _process_text_pdf(pdf_path: str, file_path: str,
                     },
                 )
                 documents.append(doc)
-        doc_fitz.close()
+        finally:
+            doc_fitz.close()
     except ImportError:
         raise ImportError("pdfplumber 未安装，无法解析纯文本 PDF")
     except Exception as e:
@@ -290,6 +296,10 @@ async def _process_text_mix_pdf(
                             f"尝试 PyMuPDF 兜底"
                         )
                         text = doc_fitz[page_num - 1].get_text()
+                    if not text or not text.strip():
+                        raise RuntimeError(
+                            f"TEXT_FAIL:第{page_num}页"
+                        )
                     try:
                         tables = plumber_page.extract_tables() or []
                     except Exception:
@@ -327,10 +337,17 @@ async def _process_text_mix_pdf(
             *[_process_one_page(pn, pp) for pn, pp in page_list],
             return_exceptions=True,
         )
-        # 记录逐页异常但不中断整批
+        # 文本提取失败 → 立即终止，不允许缺失文本页入库
         for (pn, _), r in zip(page_list, results):
             if isinstance(r, BaseException):
-                logger.warning(f"【text_mix_pdf】第{pn}页采集异常: {r}")
+                err_msg = str(r)
+                executor.shutdown(wait=True)
+                doc_fitz.close()
+                raise ValueError(
+                    f"【text_mix_pdf】第{pn}页采集异常: {err_msg}. "
+                    f"文本提取失败（pdfplumber + PyMuPDF 均无法提取），"
+                    f"请检查文件后重新上传: {Path(pdf_path).name}"
+                ) from r
     executor.shutdown(wait=True)
     doc_fitz.close()
 
