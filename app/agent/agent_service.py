@@ -145,7 +145,7 @@ class AgentService:
                 if kind == "on_tool_start":
                     tname = event.get("name", "")
                     tool_call_counts[tname] = tool_call_counts.get(tname, 0) + 1
-                    limit = tool_limits.get(tname, 3)
+                    limit = tool_limits.get(tname, int(get_config("tool_call_limit_default", 3)))
                     if tool_call_counts[tname] > limit:
                         logger.warning(f"【Agent】工具 {tname} 重复调用 {tool_call_counts[tname]} 次，超过阈值 {limit}，终止本轮")
                         yield {
@@ -154,7 +154,7 @@ class AgentService:
                         }
                         return
                     tinput = str(event.get("data", {}).get("input", ""))
-                    logger.info(f"【Agent】调用工具: {tname}, 输入: {tinput[:200]}")
+                    logger.info(f"【Agent】调用工具: {tname}, 输入: {tinput[:int(get_config('agent_log_truncate_input', 200))]}")
                     yield {
                         "event": "tool_start",
                         "tool": tname,
@@ -167,7 +167,7 @@ class AgentService:
                     yield {
                         "event": "tool_end",
                         "tool": tname,
-                        "data": toutput[:500],
+                        "data": toutput[:int(get_config("agent_log_truncate_output", 500))],
                     }
                 elif kind == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk", None)

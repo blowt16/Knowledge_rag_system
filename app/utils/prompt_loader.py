@@ -1,6 +1,7 @@
 """Prompt 模板加载器 — 统一加载和管理 Prompt 模板。"""
 import yaml
 from pathlib import Path
+from app.config.loader import get_config
 from app.utils.path_tool import resolve_path
 from app.utils.log_tool import get_logger
 
@@ -10,8 +11,10 @@ logger = get_logger(__name__)
 class PromptLoader:
     """Prompt 模板加载器：从 YAML 配置读取模板路径，按需加载 Prompt 内容。"""
 
-    def __init__(self, config_path: str = "app/config/prompt.yaml"):
-        self._config_path = resolve_path(config_path)
+    def __init__(self, config_path: str | None = None):
+        self._config_path = resolve_path(
+            config_path or get_config("prompt_config_path", "app/config/prompt.yaml")
+        )
         self._config = self._load_config(self._config_path)
         self._cache: dict[str, str] = {}
 

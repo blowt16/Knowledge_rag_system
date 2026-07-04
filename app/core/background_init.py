@@ -20,7 +20,6 @@ class _BackgroundInitManager:
             cls._instance._reranker_ready = asyncio.Event()
             cls._instance._chat_model = None
             cls._instance._embed_model = None
-            cls._instance._vision_model = None
         return cls._instance
 
     @property
@@ -30,10 +29,6 @@ class _BackgroundInitManager:
     @property
     def embed_model(self):
         return self._embed_model
-
-    @property
-    def vision_model(self):
-        return self._vision_model
 
     @property
     def models_ready(self) -> asyncio.Event:
@@ -72,8 +67,8 @@ class _BackgroundInitManager:
             logger.error(f"[ERR]后台初始化失败: {e}")
 
     async def _init_models(self):
-        """初始化 Chat / Embedding / Vision 模型。"""
-        from app.utils.factory import create_chat_model, create_embedding_model, create_vision_model
+        """初始化 Chat / Embedding 模型（Vision 由 VisionService 延迟加载）。"""
+        from app.utils.factory import create_chat_model, create_embedding_model
 
         try:
             self._chat_model = create_chat_model()
@@ -86,12 +81,6 @@ class _BackgroundInitManager:
             logger.info("[OK]embed_model 初始化完成")
         except Exception as e:
             logger.warning(f"[WARN]embed_model 初始化失败: {e}")
-
-        try:
-            self._vision_model = create_vision_model()
-            logger.info("[OK]vision_model 初始化完成")
-        except Exception as e:
-            logger.warning(f"[WARN]vision_model 初始化失败: {e}")
 
         self._models_ready.set()
 
@@ -155,7 +144,6 @@ class _BackgroundInitManager:
         # 4. 置空引用
         self._chat_model = None
         self._embed_model = None
-        self._vision_model = None
         logger.info("[SHUTDOWN] 资源清理完成")
 
 

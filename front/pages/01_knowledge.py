@@ -5,7 +5,6 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pandas as pd
 import streamlit as st
 
 from config import USER_ID, ALLOWED_SINGLE, ALLOWED_ZIP, MAX_SINGLE_SIZE, MAX_ZIP_SIZE
@@ -41,6 +40,8 @@ if "show_clear_confirm" not in st.session_state:
     st.session_state.show_clear_confirm = False
 if "toast_message" not in st.session_state:
     st.session_state.toast_message = None
+if "delete_confirm" not in st.session_state:
+    st.session_state.delete_confirm = None
 
 # 在顶层渲染 toast（不依赖 button 回调时机）
 if st.session_state.toast_message:
@@ -206,8 +207,10 @@ if zip_file is not None:
                                 failed_count = final_prog.get("failed", failed_count)
                                 bar.progress(1.0, "处理完成")
                                 if success_count == 0 and skipped_count > 0:
-                                    st.warning(f"⚠️ 压缩包内所有文件均已存在，跳过 {skipped_count} 个文件，无新增")
+                                    st.warning(f"压缩包内所有文件均已存在，跳过 {skipped_count} 个文件，无新增")
                                 else:
+                                    if skipped_count > 0:
+                                        st.toast(f"文件已存在，跳过 {skipped_count} 个重复文件", icon="⚠️")
                                     st.success(f"压缩包处理完成！成功 {success_count}，跳过 {skipped_count}，失败 {failed_count}")
                                 error_details = ddata.get("error_details", [])
                                 if error_details:
@@ -249,29 +252,16 @@ docs = st.session_state.docs
 if not docs:
     st.info("暂无文档，上传一个试试吧")
 else:
-    rows = [{"MD5": d["md5"], "文件名": d["original_filename"], "上传时间": d["upload_time"]} for d in docs]
-    df = pd.DataFrame(rows)
-    df["MD5"] = df["MD5"].apply(lambda x: x[:12] + "...")
-
-    for i, row in df.iterrows():
-        c1, c2, c3, c4 = st.columns([2, 5, 3, 2])
+    for i, d in enumerate(docs):
+        c1, c2, c3 = st.columns([6, 3, 2])
         with c1:
-            st.code(row["MD5"])
+            st.text(d["original_filename"])
         with c2:
-            st.text(row["文件名"])
+            st.text(d["upload_time"])
         with c3:
-            st.text(row["上传时间"])
-        with c4:
             if st.button("🗑️", key=f"del_{i}"):
-                try:
-                    delete_document_by_md5(
-                        docs[i]["md5"], USER_ID
-                    )
-                    st.success(f"已删除: {docs[i]['original_filename']}")
-                    refresh_docs()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"删除失败: {e}")
+                st.session_state.delete_confirm = i
+                st.rerun()
 
 
 @st.dialog("确认清空知识库")
@@ -289,3 +279,26 @@ def confirm_clear():
 
 if st.session_state.show_clear_confirm:
     confirm_clear()
+
+
+@st.dialog("确认删除文档")
+def confirm_delete():
+    i = st.session_state.delete_confirm
+    if i is None or i >= len(docs):
+        st.session_state.delete_confirm = None
+        return
+    doc = docs[i]
+    st.write(f"确定要删除文档 **{doc['original_filename']}** 吗？")
+    if st.button("确认删除", type="primary"):
+        try:
+            delete_document_by_md5(doc["md5"], USER_ID)
+            st.success(f"已删除: {doc['original_filename']}")
+            refresh_docs()
+            st.session_state.delete_confirm = None
+            st.rerun()
+        except Exception as e:
+            st.error(f"删除失败: {e}")
+
+
+if st.session_state.delete_confirm is not None:
+    confirm_delete()

@@ -78,7 +78,7 @@ class RAGService:
         # 步骤4: 重排序
         try:
             reranked = self._reorder_svc.rerank(
-                rewritten_query or query, merged_docs, top_k)
+                query, merged_docs, top_k)
             logger.info(f"【RAG】文档重排序成功，返回 {len(reranked)} 个文档")
         except Exception as e:
             logger.error(f"【RAG】重排序失败: {e}")

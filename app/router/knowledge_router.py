@@ -1,6 +1,12 @@
 """知识库 REST API 路由。"""
+import json
+import asyncio
+
 from fastapi import APIRouter, UploadFile, File, Form, Query
+from fastapi.responses import StreamingResponse
+from app.config.loader import get_config
 from app.router.knowledge_service import KnowledgeService
+from app.rag.single_upload_tracker import get_single_upload_tracker
 from app.core.success_response import success_response
 from app.core.failed_response import AppException
 
@@ -75,3 +81,61 @@ async def delete_by_filename(filename: str, user_id: str = Query("default_user")
     if deleted == 0:
         raise AppException(message=f"未找到文件: {filename}", code=404)
     return success_response({"deleted": deleted}, f"已删除 {deleted} 个文档")
+
+
+# ============================================================
+# 单文件上传（SSE 流式进度）
+# ============================================================
+_tracker = get_single_upload_tracker()
+
+
+@knowledge_router.post("/single/upload")
+async def upload_single_stream(
+    file: UploadFile = File(...),
+    user_id: str = Form("default_user"),
+):
+    """上传单个文档（异步后台处理 + SSE 进度），立即返回 task_id。"""
+    file_bytes = await file.read()
+    filename = file.filename or "unknown"
+
+    validation = _svc.validate_file(file_bytes, filename)
+    if not validation["valid"]:
+        raise AppException(message=validation["error"], code=400)
+
+    task_id = _tracker.create_task(file_bytes, filename, user_id)
+    return success_response({
+        "task_id": task_id,
+        "status": "pending",
+        "message": "文件已接收，正在后台处理",
+    })
+
+
+@knowledge_router.get("/single/task/{task_id}/stream")
+async def stream_single_progress(task_id: str):
+    """SSE 流式推送单文件处理进度。"""
+    q = _tracker.get_stream(task_id)
+    if q is None:
+        raise AppException(message="任务不存在或已过期", code=404)
+
+    async def event_generator():
+        try:
+            while True:
+                timeout = int(get_config("sse_stream_timeout", 600))
+                event = await asyncio.wait_for(q.get(), timeout=timeout)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("event") in ("done",):
+                    break
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'event': 'error', 'data': '任务超时'})}\n\n"
+        finally:
+            _tracker.cleanup(task_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

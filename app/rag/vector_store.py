@@ -2,7 +2,7 @@
 import threading
 from langchain_chroma import Chroma
 from app.config.loader import get_config
-from app.utils.path_tool import get_data_path
+from app.utils.path_tool import resolve_path
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
@@ -33,7 +33,8 @@ class VectorStoreService:
 
     @property
     def persist_directory(self) -> str:
-        return str(get_data_path("chromadb"))
+        pd = get_config("persist_directory", "data/chromadb")
+        return str(resolve_path(pd))
 
     def get_store(self) -> Chroma:
         """获取或创建 Chroma 向量存储（懒加载）。"""
@@ -77,7 +78,7 @@ class VectorStoreService:
         if k is None:
             k = self.k
 
-        threshold = get_config("vector_distance_threshold", 0.0)
+        threshold = get_config("vector_distance_threshold", 0.45)
         results = self.get_store().similarity_search_with_score(
             query, k=k, filter={"user_id": user_id},
         )

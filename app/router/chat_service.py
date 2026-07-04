@@ -5,9 +5,13 @@ from typing import AsyncIterator
 from app.memory.memory_service import ConversationMemoryService
 from app.agent.agent_service import AgentService
 from app.rag.rag_service import RAGService
+from app.config.loader import get_config
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
+
+# 标题截断长度（与 memory_service 一致）
+_TITLE_TRUNCATE = int(get_config("session_title_max_length", 20))
 
 
 class ChatService:
@@ -27,7 +31,7 @@ class ChatService:
         """
         # 1. 会话管理
         if not session_id:
-            session_id = self._memory.create_conversation(user_id, query[:30])
+            session_id = self._memory.create_conversation(user_id, query[:_TITLE_TRUNCATE])
             logger.info(f"【对话】新建会话: session={session_id[:8]}..., mode={mode}, query_len={len(query)}")
             yield f"data: {json.dumps({'event': 'session_created', 'session_id': session_id})}\n\n"
         else:
@@ -67,7 +71,8 @@ class ChatService:
                 # 检索 + 重排序期间 token_queue 为空, search_task 完成后 tokens 才开始到达
                 while not search_task.done() or not token_queue.empty():
                     try:
-                        chunk = await _asyncio.wait_for(token_queue.get(), timeout=0.1)
+                        poll_timeout = float(get_config("token_queue_poll_timeout", 0.1))
+                        chunk = await _asyncio.wait_for(token_queue.get(), timeout=poll_timeout)
                         yield f"data: {json.dumps({'event': 'token', 'data': chunk}, ensure_ascii=False)}\n\n"
                     except _asyncio.TimeoutError:
                         pass

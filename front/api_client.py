@@ -62,8 +62,50 @@ def upload_document(file_content: bytes, filename: str, user_id: str = USER_ID) 
         data=data,
         timeout=300,
     )
-    r.raise_for_status()
+    if not r.ok:
+        try:
+            detail = r.json().get("message", r.text)
+        except Exception:
+            detail = r.text
+        raise requests.HTTPError(f"{r.status_code} {detail}", response=r)
     return r.json()
+
+
+def upload_document_stream(file_content: bytes, filename: str, user_id: str = USER_ID) -> str:
+    """上传单文件到后台任务，返回 task_id。"""
+    files = {"file": (filename, file_content)}
+    data = {"user_id": user_id}
+    r = requests.post(
+        f"{API_BASE_URL}/knowledge/single/upload",
+        files=files,
+        data=data,
+        timeout=60,
+    )
+    if not r.ok:
+        try:
+            detail = r.json().get("message", r.text)
+        except Exception:
+            detail = r.text
+        raise requests.HTTPError(f"{r.status_code} {detail}", response=r)
+    return r.json()["data"]["task_id"]
+
+
+def stream_single_progress(task_id: str) -> Generator[dict, None, None]:
+    """SSE 流式获取单文件处理进度。"""
+    resp = requests.get(
+        f"{API_BASE_URL}/knowledge/single/task/{task_id}/stream",
+        stream=True,
+        timeout=600,
+    )
+    resp.raise_for_status()
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line.removeprefix("data: ")
+        try:
+            yield json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
 
 
 def list_documents(user_id: str = USER_ID) -> dict:

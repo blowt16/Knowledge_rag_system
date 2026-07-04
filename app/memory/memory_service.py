@@ -4,19 +4,23 @@ import os
 import sqlite3
 import uuid
 from datetime import datetime
+from app.config.loader import get_config
 from app.utils.path_tool import get_db_path
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
 
-_TITLE_MAX_LEN = 20
+
+def _title_max_len() -> int:
+    return int(get_config("session_title_max_length", 20))
 
 
 def _truncate_title(text: str) -> str:
     """截断标题到固定长度。"""
-    if len(text) <= _TITLE_MAX_LEN:
+    ml = _title_max_len()
+    if len(text) <= ml:
         return text
-    return text[:_TITLE_MAX_LEN] + "..."
+    return text[:ml] + "..."
 
 
 class ConversationMemoryService:
@@ -209,7 +213,9 @@ class ConversationMemoryService:
             conn.close()
         return session_id
 
-    def get_user_conversations(self, user_id: str, offset: int = 0, limit: int = 20) -> list[dict]:
+    def get_user_conversations(self, user_id: str, offset: int = 0, limit: int | None = None) -> list[dict]:
+        if limit is None:
+            limit = int(get_config("pagination_default_limit", 20))
         """分页获取用户会话列表（过滤已删除，置顶优先 + 最近聊天靠前）。"""
         conn = sqlite3.connect(self._db_path)
         try:

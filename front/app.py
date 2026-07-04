@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from config import API_BASE_URL, USER_ID
+from config import API_BASE_URL, USER_ID, PAGE_SIZE, DEFAULT_CHAT_MODE
 from api_client import (
     check_health,
     send_chat_stream,
@@ -12,8 +12,6 @@ from api_client import (
     delete_conversation,
     toggle_pin,
 )
-
-PAGE_SIZE = 20
 
 st.set_page_config(page_title="知识库 RAG 系统", page_icon="📚", layout="wide")
 
@@ -24,7 +22,7 @@ if "main_messages" not in st.session_state:
 if "backend_online" not in st.session_state:
     st.session_state.backend_online = False
 if "mode" not in st.session_state:
-    st.session_state.mode = "agent"
+    st.session_state.mode = DEFAULT_CHAT_MODE
 if "main_confirm_delete_cid" not in st.session_state:
     st.session_state.main_confirm_delete_cid = None
 if "main_convs" not in st.session_state:

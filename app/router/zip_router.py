@@ -23,7 +23,7 @@ def _get_zip_extensions() -> set[str]:
 
 
 def _get_max_zip_size() -> int:
-    return int(os.getenv("MAX_ZIP_SIZE", "524288000"))
+    return int(os.getenv("MAX_ZIP_SIZE", "52428800"))
 
 
 @zip_router.post("/upload_zip")
@@ -73,7 +73,8 @@ async def stream_task_progress(task_id: str):
     async def event_generator():
         try:
             while True:
-                event = await asyncio.wait_for(q.get(), timeout=600)
+                timeout = int(get_config("sse_stream_timeout", 600))
+                event = await asyncio.wait_for(q.get(), timeout=timeout)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event.get("event") == "done":
                     break

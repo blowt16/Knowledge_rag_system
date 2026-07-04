@@ -1,5 +1,6 @@
 """会话记忆 REST API 路由。"""
 from fastapi import APIRouter, Query
+from app.config.loader import get_config
 from app.router.conversation_service import ConversationService
 from app.core.success_response import success_response
 from app.core.failed_response import AppException
@@ -18,7 +19,7 @@ async def create_conversation(user_id: str = Query(...), title: str = Query(""))
 async def list_conversations(
     user_id: str = Query(...),
     offset: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(get_config("pagination_default_limit", 20), ge=1, le=100),
 ):
     """分页获取用户会话列表（过滤已删除，置顶优先 + 最近聊天靠前）。"""
     conversations = _svc.list_user_conversations(user_id, offset, limit)

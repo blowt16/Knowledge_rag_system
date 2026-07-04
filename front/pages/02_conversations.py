@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import streamlit as st
 
-from config import USER_ID
+from config import USER_ID, PAGE_SIZE
 from api_client import (
     list_conversations,
     get_messages,
@@ -15,8 +15,6 @@ from api_client import (
     clear_conversations,
     toggle_pin,
 )
-
-PAGE_SIZE = 20
 
 st.set_page_config(page_title="会话管理", page_icon="💬", layout="wide")
 

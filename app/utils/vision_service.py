@@ -102,7 +102,20 @@ class VisionService:
         ext = os.path.splitext(image_path)[1].lower().lstrip(".")
         compressed = False
 
-        if orig_size > _MAX_IMAGE_KB * 1024:
+        # 压缩判定：文件大小 或 像素维度 任一超阈值
+        need_check = orig_size > _MAX_IMAGE_KB * 1024
+        if not need_check:
+            try:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(raw))
+                w, h = img.size
+                if max(w, h) > _MAX_IMAGE_DIM:
+                    need_check = True  # 像素超大但文件小（如高效压缩的 PNG）
+            except Exception:
+                pass
+
+        if need_check:
             try:
                 from PIL import Image
                 import io
@@ -115,9 +128,11 @@ class VisionService:
                 img.convert("RGB").save(buf, format="JPEG", quality=85)
                 raw = buf.getvalue()
                 compressed = True
+                reduction = (1 - len(raw) / orig_size) * 100 if orig_size > 0 else 0
                 logger.info(
-                    f"【视觉服务】图片压缩: {orig_size/1024:.0f}KB → "
-                    f"{len(raw)/1024:.0f}KB ({os.path.basename(image_path)})"
+                    f"【视觉服务】图片压缩: {orig_size/1024:.0f}KB({w}×{h}) → "
+                    f"{len(raw)/1024:.0f}KB, base64后约{len(raw)*1.33/1024:.0f}KB "
+                    f"({os.path.basename(image_path)})"
                 )
             except Exception:
                 pass

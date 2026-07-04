@@ -24,12 +24,16 @@ _phase1_cfg = int(os.getenv("PHASE1_MAX_WORKERS",
     str(get_config("phase1_max_workers", 0))))
 PHASE1_MAX_WORKERS = _phase1_cfg if _phase1_cfg > 0 else (os.cpu_count() or 4) * 2
 DEDUP_HAMMING = get_config("dedup_hamming_distance", 10)
+VL_INCLUDE_EMBEDDED = get_config("vl_include_embedded_images", True)
 CHART_AREA_THRESHOLD = get_config("chart_area_threshold", 5000)
 CHART_MAX_CROPS = get_config("chart_max_crops_per_page", 5)
 CONTOUR_MIN_AREA = get_config("contour_min_area", 500)
 CONTOUR_IMAGE_THRESHOLD = get_config("contour_image_threshold", 5000)
 CONTOUR_IMAGE_MIN_W = get_config("contour_image_min_w", 50)
 CONTOUR_IMAGE_MIN_H = get_config("contour_image_min_h", 50)
+# 图层判定: 忽略小于此尺寸的图片（logo/占位符/追踪像素）
+CLASSIFY_IMAGE_MIN_W = get_config("classify_image_min_w", 30)
+CLASSIFY_IMAGE_MIN_H = get_config("classify_image_min_h", 30)
 RENDER_RESOLUTION = get_config("render_resolution", 2)
 # OpenCV 预处理
 OCR_MORPH_KW = get_config("ocr_morph_kernel_width", 5)
@@ -66,7 +70,18 @@ def judge_pdf_type(pdf_path: str) -> dict:
         for page_num in range(1, total_page + 1):
             page = doc[page_num - 1]
             has_text = len(page.get_text().strip()) > 0
-            has_image = len(page.get_images()) > 0
+            # 过滤微小图片（logo/占位符/追踪像素，不改变页面类型判定）
+            significant_images = 0
+            for img in page.get_images():
+                try:
+                    xref = img[0]
+                    info = doc.extract_image(xref)
+                    w, h = info.get("width", 0), info.get("height", 0)
+                    if w > CLASSIFY_IMAGE_MIN_W and h > CLASSIFY_IMAGE_MIN_H:
+                        significant_images += 1
+                except Exception:
+                    significant_images += 1  # 无法获取尺寸假设为有效图片
+            has_image = significant_images > 0
 
             if has_text and has_image:
                 page_types.append("text_mix_pdf")
@@ -187,6 +202,8 @@ def _process_text_pdf(pdf_path: str, file_path: str,
     page_filter: 仅处理指定页码集合，None 表示全部页面。
     """
     documents = []
+    pdfplumber_ok = 0
+    fallback_pymupdf = 0
     try:
         import pdfplumber
         import fitz
@@ -196,14 +213,16 @@ def _process_text_pdf(pdf_path: str, file_path: str,
                 for page_num, page in enumerate(pdf.pages, start=1):
                     if page_filter is not None and page_num not in page_filter:
                         continue
+                    pdf_ok = True
                     try:
                         text = page.extract_text()
                     except Exception:
-                        logger.warning(
-                            f"【text_pdf】第{page_num}页 pdfplumber 失败，"
-                            f"尝试 PyMuPDF 兜底"
-                        )
+                        pdf_ok = False
                         text = doc_fitz[page_num - 1].get_text()
+                    if pdf_ok:
+                        pdfplumber_ok += 1
+                    else:
+                        fallback_pymupdf += 1
                     if not text or not text.strip():
                         raise ValueError(
                             f"【text_pdf】第{page_num}页文本提取失败"
@@ -212,15 +231,15 @@ def _process_text_pdf(pdf_path: str, file_path: str,
                         )
                     doc = Document(
                         page_content=text.strip(),
-                    metadata={
-                        "source": file_path,
-                        "page": page_num,
-                        "has_images": False,
-                        "toc": "[]",
-                        "chapter_count": 0,
-                    },
-                )
-                documents.append(doc)
+                        metadata={
+                            "source": file_path,
+                            "page": page_num,
+                            "has_images": False,
+                            "toc": "[]",
+                            "chapter_count": 0,
+                        },
+                    )
+                    documents.append(doc)
         finally:
             doc_fitz.close()
     except ImportError:
@@ -232,7 +251,11 @@ def _process_text_pdf(pdf_path: str, file_path: str,
     if not documents:
         raise ValueError(f"PDF 文本提取结果为空: {Path(pdf_path).name}")
 
-    logger.info(f"【text_pdf】完成: {len(documents)} 页 (pdfplumber)")
+    total = len(documents)  # 成功页数（失败由异常提前终止）
+    logger.info(
+        f"【text_pdf-阶段1】完成: {total} 页, 失败 0 | "
+        f"文本: pdfplumber={pdfplumber_ok}, 降级PyMuPDF={fallback_pymupdf}"
+    )
     return documents, {}
 
 
@@ -248,7 +271,7 @@ async def _process_text_mix_pdf(
     md5_hex: str = "",
     progress_callback=None,
     page_filter: set | None = None,
-) -> list[Document]:
+) -> tuple[list[Document], dict]:
     """pdfplumber 文本+表格+bbox → PyMuPDF 裁切矢量图 → 多模态 VL 解读。
 
     page_filter: 仅处理指定页码集合，None 表示全部页面。
@@ -271,9 +294,17 @@ async def _process_text_mix_pdf(
     crop_dirs: set[Path] = set()
 
     # === 阶段1: 并发逐页采集（文字/表格/图片裁切），不做 VL 调用 ===
+    # pdfplumber 不是线程安全：多个线程同时操作同一个 PDF 会话的不同 page 对象
+    # 会导致底层 pdfminer.six 解析器状态冲突 → 约 25% 提取失败。
+    # plumber_lock 串行化所有 pdfplumber 操作，PyMuPDF 裁切在锁外执行。
     pages_data: list[dict] = []
     all_candidates: list[tuple[str, str]] = []
-    _lock = threading.Lock()
+    _phase1_stats = {
+        "pages_ok": 0, "pages_pdfplumber_ok": 0, "pages_fallback": 0,
+        "persisted_images": 0, "crop_images": 0,
+    }
+    data_lock = threading.Lock()
+    plumber_lock = threading.Lock()
     sem = asyncio.Semaphore(PHASE1_MAX_WORKERS)
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=PHASE1_MAX_WORKERS)
@@ -288,49 +319,70 @@ async def _process_text_mix_pdf(
         async def _process_one_page(page_num: int, plumber_page) -> str:
             async with sem:
                 def _work():
-                    try:
-                        text = plumber_page.extract_text() or ""
-                    except Exception:
-                        logger.warning(
-                            f"【text_mix_pdf】第{page_num}页 pdfplumber 提取失败，"
-                            f"尝试 PyMuPDF 兜底"
-                        )
-                        text = doc_fitz[page_num - 1].get_text()
-                    if not text or not text.strip():
-                        raise RuntimeError(
-                            f"TEXT_FAIL:第{page_num}页"
-                        )
-                    try:
-                        tables = plumber_page.extract_tables() or []
-                    except Exception:
-                        tables = []
-                    persisted_images = page_image_map.get(page_num, [])
+                    # ---- pdfplumber 操作（串行化，避免 pdfminer 状态冲突） ----
+                    pdfplumber_ok = True
+                    with plumber_lock:
+                        try:
+                            text = plumber_page.extract_text() or ""
+                        except Exception:
+                            pdfplumber_ok = False
+                            text = doc_fitz[page_num - 1].get_text()
+                        if not text or not text.strip():
+                            raise RuntimeError(f"TEXT_FAIL:第{page_num}页")
+                        try:
+                            tables = plumber_page.extract_tables() or []
+                        except Exception:
+                            tables = []
+                        # rects 也在锁内提取（底层同样走 pdfminer 解析器）
+                        try:
+                            rects = plumber_page.rects or []
+                        except Exception:
+                            rects = []
 
+                    # ---- PyMuPDF 操作（线程安全，在锁外执行以保持并发） ----
+                    persisted_images = page_image_map.get(page_num, [])
                     table_texts = []
                     for table in tables:
                         rows = [" | ".join(str(c or "") for c in row) for row in table]
                         table_texts.append("\n".join(rows))
+                    crop_images = _crop_chart_regions_from_rects(
+                        doc_fitz, rects, page_num, pdf_path
+                    )
+                    vl_sources = crop_images + persisted_images if VL_INCLUDE_EMBEDDED else crop_images
+                    page_candidates = [
+                        (p, Path(p).parent.name + "/" + Path(p).name)
+                        for p in vl_sources
+                    ]
+                    return (text, table_texts, crop_images, page_candidates,
+                            persisted_images, pdfplumber_ok, len(persisted_images), len(crop_images))
 
-                    crop_images = _crop_chart_regions(doc_fitz, plumber_page, page_num, pdf_path)
-                    page_candidates = [(p, Path(p).parent.name + "/" + Path(p).name) for p in crop_images + persisted_images]
-                    return text, table_texts, crop_images, page_candidates, persisted_images
-
-                text, table_texts, crop_images, page_candidates, persisted_images = \
+                (text, table_texts, crop_images, page_candidates,
+                 persisted_images, pdfplumber_ok, n_persisted, n_crops) = \
                     await loop.run_in_executor(executor, _work)
 
-                with _lock:
+                with data_lock:
                     if crop_images:
                         crop_dirs.add(Path(crop_images[0]).parent)
                     pages_data.append({
                         "page_num": page_num, "text": text,
                         "table_texts": table_texts, "persisted_images": persisted_images,
                         "vl_candidates": page_candidates,
+                        "pdfplumber_ok": pdfplumber_ok,
                     })
                     all_candidates.extend(page_candidates)
+                    # 阶段1 统计
+                    _stats = _phase1_stats  # mutable dict from closure
+                    _stats["pages_ok"] += 1
+                    _stats["pages_pdfplumber_ok"] += 1 if pdfplumber_ok else 0
+                    _stats["pages_fallback"] += 0 if pdfplumber_ok else 1
+                    _stats["persisted_images"] += n_persisted
+                    _stats["crop_images"] += n_crops
 
                 if progress_callback:
+                    done = len(pages_data)
+                    total_pages = len(pdf.pages)  # PDF 总页数
                     await progress_callback("loading",
-                        f"图文采集 ({page_num}/{len(page_list)})...")
+                        f"图文采集 ({done}/{total_pages})...")
                 return text
 
         results = await asyncio.gather(
@@ -350,6 +402,16 @@ async def _process_text_mix_pdf(
                 ) from r
     executor.shutdown(wait=True)
     doc_fitz.close()
+
+    # 阶段1 统计日志
+    failed = sum(1 for r in results if isinstance(r, BaseException))
+    st = _phase1_stats
+    logger.info(
+        f"【text_mix_pdf-阶段1】完成: {st['pages_ok']}/{len(page_list)} 页, "
+        f"失败 {failed} 页 | "
+        f"文本: pdfplumber={st['pages_pdfplumber_ok']}, 降级PyMuPDF={st['pages_fallback']} | "
+        f"图片: 嵌入={st['persisted_images']}, 裁切={st['crop_images']}"
+    )
 
     # 恢复页码排序
     pages_data.sort(key=lambda d: d["page_num"])
@@ -520,13 +582,12 @@ def _save_pixmap_via_pil(pix, save_path: Path) -> None:
         raise
 
 
-def _crop_chart_regions(
-    doc_fitz, plumber_page, page_num: int, pdf_path: str
+def _crop_chart_regions_from_rects(
+    doc_fitz, rects: list[dict], page_num: int, pdf_path: str
 ) -> list[str]:
-    """从页面裁切图表/矢量图区域，保存为临时图片。失败时抛异常触发解析失败流程。"""
+    """从预提取的 rects 裁切图表区域，保存为临时图片（纯 PyMuPDF 操作，线程安全）。"""
     crops = []
     fitz_page = doc_fitz[page_num - 1]
-    rects = plumber_page.rects or []
     chart_rects = [r for r in rects if (r["x1"] - r["x0"]) * (r["y1"] - r["y0"]) > CHART_AREA_THRESHOLD]
     for i, rect in enumerate(chart_rects[:CHART_MAX_CROPS]):
         try:
@@ -544,6 +605,14 @@ def _crop_chart_regions(
         except Exception:
             continue
     return crops
+
+
+def _crop_chart_regions(
+    doc_fitz, plumber_page, page_num: int, pdf_path: str
+) -> list[str]:
+    """从页面裁切图表/矢量图区域，保存为临时图片。失败时抛异常触发解析失败流程。"""
+    rects = plumber_page.rects or []
+    return _crop_chart_regions_from_rects(doc_fitz, rects, page_num, pdf_path)
 
 
 # ============================================================
@@ -618,7 +687,7 @@ async def _process_scan_pdf(
     md5_hex: str = "",
     progress_callback=None,
     page_filter: set | None = None,
-) -> list[Document]:
+) -> tuple[list[Document], dict]:
     """OpenCV 轮廓分割 → 双支路分流。
 
     page_filter: 仅处理指定页码集合，None 表示全部页面。
@@ -766,8 +835,9 @@ async def _process_scan_pdf(
                             crop_dirs.add(parent)
 
             if progress_callback:
+                done = len(text_only_docs) + len(image_pages)
                 await progress_callback("loading",
-                    f"扫描采集 ({page_num}/{len(page_nums)})...")
+                    f"扫描采集 ({done}/{total_pages})...")
 
     results = await asyncio.gather(
         *[_process_one_scan_page(pn) for pn in page_nums],
@@ -779,10 +849,19 @@ async def _process_scan_pdf(
             logger.warning(f"【scan_pdf】第{pn}页采集异常: {r}")
 
     text_only_count_val = text_only_count[0]
+    failed_scan = sum(1 for r in results if isinstance(r, BaseException))
     executor.shutdown(wait=True)
     doc.close()
 
     image_page_count = len(image_pages)
+    scan_persisted = sum(len(p["images_on_page"]) for p in image_pages)
+    scan_crops = sum(len(p["crop_paths"]) for p in image_pages)
+    logger.info(
+        f"【scan_pdf-阶段1】完成: {text_only_count_val + image_page_count} 页, "
+        f"失败 {failed_scan} 页 | "
+        f"支路1纯文字={text_only_count_val}, 支路2含图片={image_page_count} | "
+        f"图片: 嵌入={scan_persisted}, 裁切={scan_crops}"
+    )
 
     # === 阶段2: 全局 pHash 去重 + 查缓存 + 一次并发 VL 调用 ===
     vl_cache = _load_vl_cache(cache_dir) if cache_dir else {}
@@ -1054,10 +1133,10 @@ async def load_pdf_async(
     else:
         raise ValueError(f"未知 PDF 类型: {pdf_type}")
 
-    if degradation:
-        total_degraded = sum(degradation.values())
-        logger.warning(
-            f"【PDF解析】{Path(file_path).name} 存在降级: "
-            + ", ".join(f"{k}={v}" for k, v in degradation.items())
-        )
+    logger.info(
+        f"【PDF解析】{original_filename or Path(file_path).name}: "
+        f"成功 {len(documents)} 页/{total_page} 页, "
+        f"降级 {sum(degradation.values()) if degradation else 0} 处, "
+        f"类型 {pdf_type}"
+    )
     return documents, degradation

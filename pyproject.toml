@@ -39,6 +39,9 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "torch>=2.5.0",
     "mistune>=3.3.2",
+    # PaddleOCR — 扫描件 PDF 文字提取（CPU 版，GPU 版需手动安装 paddlepaddle-gpu）
+    "paddlepaddle==3.0.0",
+    "paddleocr>=2.10.0",
 ]
 
 [[tool.uv.index]]

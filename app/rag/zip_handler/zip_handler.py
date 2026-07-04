@@ -279,18 +279,23 @@ def _get_shared_processor():
     return _shared_processor
 
 
-async def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path, buffer=None) -> dict:
+async def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path,
+                                                  buffer=None, progress_callback=None) -> dict:
     """处理单个文件：切分 → 输出 chunks 到批量缓冲池（不嵌入）。
 
     buffer 为 ChunkBatchBuffer 实例，若提供则走批量嵌入管线；
     若为 None 则走旧管线（内联嵌入），保持向后兼容。
+    progress_callback: 可选的 async callable(stage, text)，用于推送阶段进度。
     """
     relative_path = str(file_path.relative_to(base_dir))
     processor = _get_shared_processor()
 
     try:
         if buffer is not None:
-            result = await processor.process_to_chunks(str(file_path), user_id, file_path.name)
+            result = await processor.process_to_chunks(
+                str(file_path), user_id, file_path.name,
+                progress_callback=progress_callback,
+            )
         else:
             result = await processor.process(str(file_path), user_id, file_path.name)
 

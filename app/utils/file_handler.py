@@ -14,7 +14,8 @@ def _get_encodings() -> list[str]:
     return get_config("text_encodings", ["utf-8", "gbk", "gb2312", "latin-1"])
 
 
-def load_file(file_path: str | Path, extension: str) -> list:
+def load_file(file_path: str | Path, extension: str,
+              user_id: str = "", md5_hex: str = "") -> list:
     file_path = Path(file_path)
     ext = extension.lower().lstrip(".")
 
@@ -23,7 +24,7 @@ def load_file(file_path: str | Path, extension: str) -> list:
     elif ext == "md":
         return markdown_loader(file_path)
     elif ext == "docx":
-        return docx_loader(file_path)
+        return docx_loader(file_path, user_id=user_id, md5_hex=md5_hex)
     elif ext == "pptx":
         return pptx_loader(file_path)
     else:
@@ -79,12 +80,16 @@ def markdown_loader(file_path: Path) -> list:
             from langchain_core.documents import Document as LCDoc
             import json
             logger.debug(f"【Markdown文件加载】mistune v3 解析成功 (编码: {used_encoding}, TOC: {len(toc)} 条)")
+            current_chapter = toc[0]["text"] if toc else ""
+            chapter_level = toc[0]["level"] if toc else 0
             return [LCDoc(
                 page_content=structured_text,
                 metadata={
                     "source": source,
                     "toc": json.dumps(toc, ensure_ascii=False),
                     "chapter_count": len(toc),
+                    "current_chapter": current_chapter,
+                    "chapter_level": chapter_level,
                 },
             )]
     except Exception as e:
@@ -123,25 +128,138 @@ def markdown_loader(file_path: Path) -> list:
     return []
 
 
-def docx_loader(file_path: Path) -> list:
+def _extract_docx_chapter(file_path: Path) -> tuple[str, int]:
+    """从 DOCX 段落样式中提取第一个 Heading 作为章节信息。"""
+    try:
+        from docx import Document
+        doc = Document(str(file_path))
+        for p in doc.paragraphs:
+            style = p.style.name if p.style else ""
+            if style.startswith("Heading"):
+                text = p.text.strip()
+                if text:
+                    try:
+                        level = int(style.split()[-1])
+                    except (ValueError, IndexError):
+                        level = 0
+                    return text, level
+    except Exception:
+        pass
+    return "", 0
+
+
+def _extract_docx_toc(file_path: Path) -> tuple[list[dict], int]:
+    """从 DOCX 提取所有 Heading 作为 TOC 结构，返回 (toc_list, chapter_count)。"""
+    toc = []
+    chapter_path = []
+    try:
+        from docx import Document
+        doc = Document(str(file_path))
+        for p in doc.paragraphs:
+            style = p.style.name if p.style else ""
+            if style.startswith("Heading"):
+                text = p.text.strip()
+                if not text:
+                    continue
+                try:
+                    level = int(style.split()[-1])
+                except (ValueError, IndexError):
+                    level = 0
+                while len(chapter_path) >= level:
+                    chapter_path.pop()
+                chapter_path.append(text)
+                toc.append({
+                    "level": level,
+                    "text": text,
+                    "path": " > ".join(chapter_path),
+                })
+    except Exception:
+        pass
+    return toc, len(toc)
+
+
+def _extract_docx_images(file_path: Path, user_id: str, md5: str) -> list[str]:
+    """从 DOCX 提取内嵌图片，持久化到 extracted_images/，返回相对路径列表。"""
+    image_paths = []
+    try:
+        from docx import Document
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        from app.utils.path_tool import get_data_path
+
+        doc = Document(str(file_path))
+        output_dir = get_data_path(f"extracted_images/{user_id}/{md5}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for i, rel in enumerate(doc.part.rels.values()):
+            if "image" not in rel.reltype:
+                continue
+            try:
+                image_bytes = rel.target_part.blob
+                ext = rel.target_part.partname.split(".")[-1] if "." in rel.target_part.partname else "png"
+                img_filename = f"docx_i{i}.{ext}"
+                img_path = output_dir / img_filename
+                img_path.write_bytes(image_bytes)
+                relative_path = str(img_path.relative_to(get_data_path()))
+                image_paths.append(relative_path)
+            except Exception:
+                continue
+        if image_paths:
+            logger.info(f"【DOCX图片提取】共提取 {len(image_paths)} 张图片")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"【DOCX图片提取】失败: {e}")
+    return image_paths
+
+
+def docx_loader(file_path: Path, user_id: str = "", md5_hex: str = "") -> list:
+    import json
+    current_chapter, chapter_level = "", 0
+    toc_list, chapter_count = [], 0
+    image_paths = []
+
+    try:
+        current_chapter, chapter_level = _extract_docx_chapter(file_path)
+        toc_list, chapter_count = _extract_docx_toc(file_path)
+        if user_id and md5_hex:
+            image_paths = _extract_docx_images(file_path, user_id, md5_hex)
+    except Exception:
+        pass
+
+    has_images = len(image_paths) > 0
+    base_meta = {
+        "page": 1,
+        "has_images": has_images,
+        "toc": json.dumps(toc_list, ensure_ascii=False),
+        "chapter_count": chapter_count,
+        "current_chapter": current_chapter,
+        "chapter_level": chapter_level,
+    }
+    if image_paths:
+        base_meta["image_paths"] = image_paths
+
+    # 主路径：Docx2txtLoader
     try:
         from langchain_community.document_loaders import Docx2txtLoader
         loader = Docx2txtLoader(str(file_path))
         docs = loader.load()
         if docs and docs[0].page_content.strip():
-            logger.debug("【WORD文件加载】Docx2txtLoader 成功加载")
+            docs[0].metadata.update(base_meta)
+            docs[0].metadata["source"] = str(file_path)
+            logger.debug(f"【WORD文件加载】Docx2txtLoader 成功 (TOC: {chapter_count}, 图片: {len(image_paths)})")
             return docs
     except Exception as e:
         logger.warning(f"【WORD文件加载】Docx2txtLoader 失败: {e}，尝试 python-docx 兜底")
 
+    # 降级路径：python-docx
     try:
         from docx import Document
+        from langchain_core.documents import Document as LCDoc
         doc = Document(str(file_path))
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
         if text.strip():
-            from langchain_core.documents import Document as LCDoc
             logger.debug("【WORD文件加载】python-docx 兜底成功")
-            return [LCDoc(page_content=text, metadata={"source": str(file_path)})]
+            return [LCDoc(page_content=text, metadata={**base_meta, "source": str(file_path)})]
     except Exception as e:
         logger.error(f"【WORD文件加载】python-docx 兜底也失败: {e}")
 

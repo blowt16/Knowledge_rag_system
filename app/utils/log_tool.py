@@ -1,6 +1,7 @@
 """日志统一管理 — 所有模块通过此模块获取日志器。"""
 import logging
 import os
+from app.config.loader import get_config
 from app.utils.path_tool import get_logs_path
 from app.core.logger_handler import LogHandler
 
@@ -22,8 +23,11 @@ def setup_logger(level: str | None = None, force: bool = False) -> None:
         _log_level = level.upper()
     LogHandler.setup(
         console_level=_log_level,
-        file_level="DEBUG",
+        file_level=get_config("log_file_level", "DEBUG"),
         log_dir=get_logs_path(),
+        log_filename=get_config("log_filename", "app.log"),
+        max_bytes=int(get_config("log_max_bytes", 10 * 1024 * 1024)),
+        backup_count=int(get_config("log_backup_count", 5)),
         force=force,
     )
     _setup_done = True

@@ -139,20 +139,27 @@ def create_embedding_model():
 # ============================================================
 
 def create_vision_model():
-    """创建视觉模型，通过 VISION_MODEL_TYPE 环境变量切换。"""
+    """创建视觉模型 — 仅支持阿里云百炼多模态。
+
+    使用 ChatOpenAI + DashScope 兼容模式端点，而非 ChatTongyi。
+    原因：DashScope 原生多模态 API 不支持 data:image/xxx;base64 格式，
+    仅接受 HTTP URL 或本地文件路径。兼容模式端点原生支持 OpenAI 格式的
+    base64 data URL，与 HumanMessage 中 image_url 的标准用法一致。
+    """
     vision_type = _get_vision_type()
 
-    if vision_type == "ALIYUN":
-        from langchain_community.chat_models import ChatTongyi
-        return ChatTongyi(
-            model_name=_env("ALIYUN_VISION_MODEL", "qwen3.7-max-2026-06-08"),
-            dashscope_api_key=get_api_key(),
+    if vision_type != "ALIYUN":
+        raise ValueError(
+            f"不支持的 VISION_MODEL_TYPE: {vision_type}，仅支持 ALIYUN。"
+            f"Ollama 视觉模型已移除，请使用阿里云百炼多模态。"
         )
-    elif vision_type == "OLLAMA":
-        from langchain_community.chat_models import ChatOllama
-        return ChatOllama(
-            model=_env("OLLAMA_VISION_MODEL", "qwen-vl:7b"),
-            base_url=get_ollama_base_url(),
-        )
-    else:
-        raise ValueError(f"不支持的 VISION_MODEL_TYPE: {vision_type}，可选值: ALIYUN / OLLAMA")
+
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=_env("ALIYUN_VISION_MODEL", "qwen3.7-max-2026-06-08"),
+        openai_api_key=get_api_key(),
+        openai_api_base=_env(
+            "ALIYUN_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+    )
