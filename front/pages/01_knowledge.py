@@ -8,9 +8,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import streamlit as st
 
-from config import USER_ID
+from config import USER_ID, ALLOWED_SINGLE, ALLOWED_ZIP, MAX_SINGLE_SIZE, MAX_ZIP_SIZE
 from api_client import (
-    upload_document,
+    upload_document_stream,
+    stream_single_progress,
     list_documents,
     delete_document_by_md5,
     clear_knowledge,
@@ -19,9 +20,6 @@ from api_client import (
 )
 
 st.set_page_config(page_title="知识库管理", page_icon="📦", layout="wide")
-
-ALLOWED_SINGLE = ["txt", "pdf", "md", "pptx", "docx"]
-ALLOWED_ZIP = ["zip", "tar", "gz"]
 
 
 def refresh_docs():
@@ -56,31 +54,68 @@ st.title("📦 知识库管理")
 # ============================================================
 st.subheader("📄 上传文档")
 uploaded_file = st.file_uploader(
-    "选择文件（txt/pdf/md/pptx/docx，最大 30MB）",
+    "选择文件（txt/pdf/md/pptx/docx，最大 100MB）",
     type=ALLOWED_SINGLE,
     key="single_uploader",
 )
 if uploaded_file is not None:
-    file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+    file_bytes = uploaded_file.getvalue()
+    file_size_mb = len(file_bytes) / (1024 * 1024)
     st.caption(f"文件大小: {file_size_mb:.1f} MB")
+    if len(file_bytes) > MAX_SINGLE_SIZE:
+        st.error(f"文件大小 {file_size_mb:.1f} MB 超过限制（最大 100MB），请压缩后重新上传")
+        st.stop()
     if st.button("🚀 上传到知识库", key="btn_upload_single"):
-        with st.spinner("正在处理文档..."):
-            try:
-                result = upload_document(
-                    uploaded_file.getvalue(), uploaded_file.name, USER_ID
-                )
-                data = result.get("data", {})
-                status = data.get("status", "")
-                if status == "duplicate":
-                    st.session_state.toast_message = f"{result.get('message', '文件已存在，不能重复上传')}（{uploaded_file.name}）"
-                    st.rerun()
-                else:
-                    st.success(f"✅ 上传成功: {uploaded_file.name}")
-                    st.json(data)
-                    refresh_docs()
-                    st.rerun()
-            except Exception as e:
-                st.error(f"上传失败: {e}")
+        try:
+            task_id = upload_document_stream(file_bytes, uploaded_file.name, USER_ID)
+            bar = st.progress(0, "准备处理…")
+            stage_placeholder = st.empty()
+
+            for event in stream_single_progress(task_id):
+                ev_type = event.get("event", "")
+
+                if ev_type == "stage":
+                    stage_placeholder.info(event.get("data", "处理中…"))
+                    stage_map = {
+                        "hashing": 0.02, "checking": 0.05, "extracting": 0.08,
+                        "classifying": 0.12, "loading": 0.15, "cleaning": 0.45,
+                        "splitting": 0.55, "embedding": 0.70,
+                    }
+                    pct = stage_map.get(event.get("stage", ""), 0.3)
+                    bar.progress(pct, event.get("data", ""))
+
+                elif ev_type == "error":
+                    st.error(event.get("data", "处理失败"))
+                    bar.empty()
+                    stage_placeholder.empty()
+                    break
+
+                elif ev_type == "done":
+                    ddata = event.get("data", {})
+                    status = ddata.get("status", "")
+                    if status == "duplicate":
+                        bar.empty()
+                        stage_placeholder.empty()
+                        st.session_state.toast_message = f"文件已存在，不能重复上传（{uploaded_file.name}）"
+                        st.rerun()
+                    elif status in ("done", "degraded"):
+                        bar.progress(1.0, "完成！")
+                        if status == "degraded":
+                            deg = ddata.get("degradation", {})
+                            stage_placeholder.warning(
+                                f"上传成功（部分内容降级）: {uploaded_file.name} ({ddata.get('chunks', 0)} chunks)\n\n"
+                                f"图片描述部分失败: {deg}，文本内容正常入库。可删除后重新上传以修复。"
+                            )
+                        else:
+                            stage_placeholder.success(f"上传成功: {uploaded_file.name} ({ddata.get('chunks', 0)} chunks)")
+                        refresh_docs()
+                        st.rerun()
+                    else:
+                        bar.empty()
+                        stage_placeholder.error(f"处理失败: {ddata.get('reason', ddata.get('detail', '未知错误'))}")
+
+        except Exception as e:
+            st.error(f"上传失败: {e}")
 
 st.divider()
 
@@ -95,8 +130,12 @@ zip_file = st.file_uploader(
     key="zip_uploader",
 )
 if zip_file is not None:
-    file_size_mb = len(zip_file.getvalue()) / (1024 * 1024)
+    zip_bytes = zip_file.getvalue()
+    file_size_mb = len(zip_bytes) / (1024 * 1024)
     st.caption(f"文件大小: {file_size_mb:.1f} MB")
+    if len(zip_bytes) > MAX_ZIP_SIZE:
+        st.error(f"压缩包大小 {file_size_mb:.1f} MB 超过限制（最大 50MB），请分包后重新上传")
+        st.stop()
     if st.button("🚀 上传压缩包", key="btn_upload_zip"):
         with st.spinner("正在提交压缩包..."):
             try:
@@ -137,9 +176,12 @@ if zip_file is not None:
                             finfo = event.get("data", {})
                             fname = finfo.get("filename", "?")
                             fstatus = finfo.get("status", "failed")
-                            if fstatus == "done":
+                            if fstatus in ("done", "ok"):
                                 success_count += 1
                                 docs_done.append(f"✅ {fname}")
+                            elif fstatus == "degraded":
+                                success_count += 1
+                                docs_done.append(f"⚠️ {fname}")
                             elif fstatus == "duplicate":
                                 skipped_count += 1
                                 docs_done.append(f"⏭️ {fname}")

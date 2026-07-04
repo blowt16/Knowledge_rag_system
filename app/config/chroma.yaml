@@ -6,7 +6,7 @@
 collection_name: rag_collection
 persist_directory: data/chromadb
 hnsw_space: cosine
-chromadb_telemetry: false
+
 
 # --- 文件类型 ---
 allow_knowledge_file_types: ["txt", "pdf", "md", "pptx", "docx"]
@@ -24,7 +24,7 @@ allowed_mime_types:
 
 # --- 魔数签名 (诊断兜底) ---
 magic_signatures:
-  "%PDF": ["corrupted", "PDF 文件已损坏，无法解析"]
+  "%PDF": ["parse_error", "PDF 解析失败，可能含特殊编码字符或损坏"]
   # "PK\x03\x04" removed: DOCX/PPTX are ZIP-based, this signature caused misdiagnosis
   "‰PNG": ["unsupported_format", "PNG 图片"]
   "ÿØÿ": ["unsupported_format", "JPEG 图片"]
@@ -49,6 +49,13 @@ enable_semantic_merge: false # 文本分块后是否进行语义合并
 semantic_merge_threshold: 0.7 # 进行语义合并的相似度阈值(到达该阈值进行合并)
 max_merge_len: 1500 # 语义合并后单个 chunk 最大长度（字符），超过强制分拆
 
+# --- 批量调用嵌入模型配置 ---
+batch_max_count: 50       # 单批最大 chunk 数量，达到立即刷批
+batch_max_chars: 18000    # 单批总字符上限，达到立即刷批
+batch_sleep_ms: 100       # 批次间隔休眠（ms），API 限流保护
+batch_max_retries: 3      # 单批失败最大重试次数
+batch_retry_backoff: [1, 2, 4]  # 重试退避间隔（秒）
+
 # --- 查询改写 ---
 pure_keyword_max_length: 10
 hyde_min_length: 3
@@ -57,9 +64,42 @@ llm_history_turns: 5           # 输入 LLM 的最近对话轮次
 query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
 pronoun_words: ["它", "他", "她", "这个", "那个", "这些", "那些", "它的", "他的", "她的", "这", "那", "上面", "前面", "刚才"]
 
-# --- PDF 多模态 ---
-vision_min_text_length: 100
-dedup_hamming_distance: 10
+# --- PDF 多模态三分支解析 ---
+# 图片持久化: 所有内嵌图片提取到 data/extracted_images/{user_id}/{md5}/
+# 分支1 text_pdf: pdfplumber 直接提取（零视觉/GPU）
+# 分支2 text_mix_pdf: pdfplumber + PyMuPDF 裁切 + 多模态 VL（三阶段流水线）
+# 分支3 scan_pdf: OpenCV 轮廓 + PaddleOCR(GPU) + 多模态 VL（三阶段流水线）
+dedup_hamming_distance: 10                  # 感知哈希去重阈值（跨页全局去重，pH 汉明距离）
+chart_area_threshold: 5000                  # 裁切图表区域最小面积
+chart_max_crops_per_page: 5                 # 每页最大裁切数
+contour_min_area: 500                       # 轮廓最小面积（过滤噪点）
+contour_image_threshold: 5000               # 图片区域判定面积阈值
+contour_image_min_w: 50                     # 图片区域最小宽度
+contour_image_min_h: 50                     # 图片区域最小高度
+render_resolution: 2                        # 页面渲染倍率 Matrix(N,N)
+sse_queue_maxsize: 64                       # SSE 事件队列最大容量
+
+# --- PDF 多模态 — OpenCV 预处理 ---
+ocr_morph_kernel_width: 5                   # 形态学闭运算核宽度
+ocr_morph_kernel_height: 5                  # 形态学闭运算核高度
+ocr_adaptive_block_size: 11                 # 自适应二值化块大小（奇数）
+ocr_adaptive_c: 2                           # 自适应二值化常数
+ocr_denoise_h: 10                           # 降噪强度
+
+# --- PDF 多模态 — PaddleOCR ---
+paddleocr_lang: ch                          # OCR 语言模型
+paddleocr_use_angle_cls: true               # 文字方向分类
+paddleocr_show_log: false                   # PaddleOCR 调试日志
+
+# --- 视觉服务 ---
+vision_default_prompt: "请详细描述这张图片的内容。如果是图表，请提取其中的数据和趋势；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"
+vision_max_concurrent: 3                     # VL 并发调用上限（Semaphore 限流），避免 API 被限频
+vision_image_timeout: 30                     # 单张图片 VL 调用超时（秒）
+vision_max_image_kb: 300                     # 图片压缩阈值（KB），超过此大小自动缩放+转 JPEG，减少 API 传输和模型解码耗时
+vision_max_image_dim: 2048                   # 压缩后最大边长（像素）
+
+# --- PDF 阶段1 并发 ---
+phase1_max_workers: 0                        # 阶段1 并发页面采集线程数，0=自动（CPU核心数×2）
 
 # --- RAG 摘要 ---
 summary_max_chars: 800
@@ -67,4 +107,38 @@ fallback_max_chars: 500
 
 # --- 路径 ---
 data_path: data
-md5_hex_store: data/md5_hex_store/md5_hex_store.txt
+temp_upload_dir: tmp/uploads                 # 单文件上传临时目录
+
+# --- 路径 ---
+db_path: db
+logs_path: logs
+models_path: models
+
+# --- 日志 ---
+log_file_level: DEBUG                        # 文件日志级别
+log_max_bytes: 10485760                      # 单个日志文件最大字节数 (10MB)
+log_backup_count: 5                          # 日志文件保留数量
+log_filename: app.log                        # 日志文件名
+noisy_logger_prefixes: ["pdfminer", "watchfiles", "urllib3", "httpcore", "httpx", "PIL"]  # 抑制 DEBUG 的第三方库
+
+# --- SSE 流 ---
+sse_stream_timeout: 600                      # SSE 事件流超时（秒）
+zip_sse_queue_maxsize: 256                   # 压缩包 SSE 队列容量
+token_queue_poll_timeout: 0.1                # Token 队列轮询间隔（秒）
+
+# --- 分页 ---
+pagination_default_limit: 20                 # 列表分页默认条数
+
+# --- 会话 ---
+session_title_max_length: 20                 # 会话标题最大长度
+
+# --- Agent ---
+tool_call_limit_default: 3                   # Agent 工具调用默认限制
+agent_log_truncate_input: 200                # Agent 日志工具输入截断长度
+agent_log_truncate_output: 500               # Agent 日志工具输出截断长度
+
+# --- Chunk ID ---
+chunk_id_digits: 4                           # chunk_id 零填充宽度
+
+# --- Prompt 模板 ---
+prompt_config_path: app/config/prompt.yaml   # Prompt 配置文件路径

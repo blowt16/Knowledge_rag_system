@@ -23,7 +23,7 @@ def _get_mime_types() -> dict[str, str]:
 
 
 def _get_max_file_size() -> int:
-    return int(os.getenv("MAX_FILE_SIZE", "31457280"))
+    return int(os.getenv("MAX_FILE_SIZE", "104857600"))
 
 
 class KnowledgeService:
@@ -41,10 +41,20 @@ class KnowledgeService:
             tmp_path = tmp.name
 
         try:
-            result = await self._processor.process(
+            from app.rag.chunk_batch_buffer import ChunkBatchBuffer
+            buffer = ChunkBatchBuffer(user_id)
+            result = await self._processor.process_to_chunks(
                 file_path=tmp_path, user_id=user_id, original_filename=filename)
-            if result.get("status") == "done":
+
+            status = result.get("status", "failed")
+            if status in ("ok", "degraded"):
+                buffer.add(result["chunks"], result["md5"], result["filename"], result.get("file_path", ""))
+                buffer.final_flush()
                 HybridRetriever.invalidate_cache(user_id)
+                resp = {"status": status, "md5": result["md5"], "filename": filename, "chunks": len(result["chunks"])}
+                if status == "degraded":
+                    resp["degradation"] = result.get("degradation", {})
+                return resp
             return result
         finally:
             try:

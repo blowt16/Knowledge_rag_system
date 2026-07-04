@@ -54,7 +54,8 @@ class ZipTaskManager:
             "progress": {"total": 0, "success": 0, "skipped": 0, "failed": 0, "pending": 0},
             "error_details": [],
         }
-        self._queues[task_id] = asyncio.Queue(maxsize=256)
+        self._queues[task_id] = asyncio.Queue(
+            maxsize=int(get_config("zip_sse_queue_maxsize", 256)))
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._process(task_id, file_path, user_id))
@@ -67,6 +68,8 @@ class ZipTaskManager:
         return self._queues.get(task_id)
 
     async def _process(self, task_id: str, file_path: Path, user_id: str):
+        import time
+        _start_time = time.time()
         tmp_dir = get_data_path(f"tmp/{task_id}")
         tmp_dir.mkdir(parents=True, exist_ok=True)
         error_details = []
@@ -123,13 +126,15 @@ class ZipTaskManager:
                 })
                 progress["skipped"] += 1
 
-            # 3. 并行走【全局公共复用文档管道】
+            # 3. 批量嵌入缓冲池（所有文件 chunk 统一缓冲 → 批量刷批）
+            from app.rag.chunk_batch_buffer import ChunkBatchBuffer
+            buffer = ChunkBatchBuffer(user_id)
             semaphore = asyncio.Semaphore(_get_max_workers())
 
             async def process_one(fp: Path):
                 async with semaphore:
                     result = await _process_file_through_shared_pipeline(
-                        fp, user_id, tmp_dir,
+                        fp, user_id, tmp_dir, buffer,
                     )
                     if isinstance(result, dict):
                         fname = Path(result.get("file_path", "")).name
@@ -146,6 +151,14 @@ class ZipTaskManager:
             tasks_coro = [process_one(f) for f in valid_files]
             results = await asyncio.gather(*tasks_coro, return_exceptions=True)
 
+            # 3.5 强制刷出尾批
+            buffer.final_flush()
+            logger.info(
+                f"【压缩包】批量嵌入完成: {task_id} | "
+                f"累计 {buffer.total_flushed} chunks"
+                + (f", {buffer.failed_batches} 批失败" if buffer.failed_batches else "")
+            )
+
             # 4. 聚合结果
             for result in results:
                 if isinstance(result, Exception):
@@ -155,9 +168,13 @@ class ZipTaskManager:
                     })
                 elif isinstance(result, dict):
                     status = result.get("status", "failed")
-                    if status == "done":
+                    if status in ("done", "ok"):
                         progress["success"] += 1
                         any_success = True
+                    elif status == "degraded":
+                        progress["success"] += 1
+                        any_success = True
+                        progress["degraded_files"] = progress.get("degraded_files", 0) + 1
                     elif status == "duplicate":
                         progress["skipped"] += 1
                         error_details.append({
@@ -189,11 +206,13 @@ class ZipTaskManager:
                     "error_details": error_details,
                 },
             })
+            _elapsed = time.time() - _start_time
             logger.info(
                 f"【压缩包】处理完成: {task_id} | "
                 f"成功 {progress['success']}/{len(valid_files)} 个文件"
                 + (f", 跳过 {progress['skipped']} 个" if progress['skipped'] else "")
                 + (f", 失败 {progress['failed']} 个" if progress['failed'] else "")
+                + f" | 耗时 {_elapsed:.1f} 秒"
             )
 
         except Exception as e:
@@ -260,19 +279,38 @@ def _get_shared_processor():
     return _shared_processor
 
 
-async def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path) -> dict:
+async def _process_file_through_shared_pipeline(file_path: Path, user_id: str, base_dir: Path, buffer=None) -> dict:
+    """处理单个文件：切分 → 输出 chunks 到批量缓冲池（不嵌入）。
+
+    buffer 为 ChunkBatchBuffer 实例，若提供则走批量嵌入管线；
+    若为 None 则走旧管线（内联嵌入），保持向后兼容。
+    """
     relative_path = str(file_path.relative_to(base_dir))
     processor = _get_shared_processor()
 
     try:
-        result = await processor.process(str(file_path), user_id, file_path.name)
+        if buffer is not None:
+            result = await processor.process_to_chunks(str(file_path), user_id, file_path.name)
+        else:
+            result = await processor.process(str(file_path), user_id, file_path.name)
+
         status = result.get("status", "failed")
+
+        if buffer is not None and status in ("ok", "degraded"):
+            buffer.add(result["chunks"], result["md5"], result["filename"], result.get("file_path", ""))
+            return {
+                "status": status, "md5": result["md5"], "file_path": relative_path,
+                "chunks": len(result["chunks"]),
+                "error_type": "", "reason": "",
+                **({"degradation": result.get("degradation", {})} if status == "degraded" else {}),
+            }
+
         return {
             "status": status,
             "md5": result.get("md5", ""),
             "file_path": relative_path,
             "chunks": result.get("chunks", 0),
-            "error_type": "" if status == "done" else _classify_error(status, result.get("reason", "")),
+            "error_type": "" if status in ("done", "ok", "degraded") else _classify_error(status, result.get("reason", "")),
             "reason": result.get("reason", ""),
         }
     except Exception as e:
