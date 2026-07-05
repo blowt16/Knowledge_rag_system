@@ -104,7 +104,7 @@ vision_max_image_dim: 2048                   # 压缩后最大边长（像素）
 phase1_max_workers: 0                        # 阶段1 并发页面采集线程数，0=自动（CPU核心数×2）
 
 # --- RAG 摘要 ---
-skip_summary: true                           # 是否跳过 LLM 摘要：true=返回原始文档，false=LLM 生成摘要
+skip_summary: true                           # Agent 模式默认跳过 LLM 摘要（RAG 直通模式始终启用摘要，不受此配置影响）
 # 传入 LLM 的文本截断统一使用上方 chunk_size，不再独立配置
 
 # --- 路径 ---
