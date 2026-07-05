@@ -24,7 +24,7 @@ _phase1_cfg = int(os.getenv("PHASE1_MAX_WORKERS",
     str(get_config("phase1_max_workers", 0))))
 PHASE1_MAX_WORKERS = _phase1_cfg if _phase1_cfg > 0 else (os.cpu_count() or 4) * 2
 DEDUP_HAMMING = get_config("dedup_hamming_distance", 10)
-VL_INCLUDE_EMBEDDED = get_config("vl_include_embedded_images", True)
+VL_INCLUDE_EMBEDDED = get_config("vl_include_embedded_images", False)
 CHART_AREA_THRESHOLD = get_config("chart_area_threshold", 5000)
 CHART_MAX_CROPS = get_config("chart_max_crops_per_page", 5)
 CONTOUR_MIN_AREA = get_config("contour_min_area", 500)

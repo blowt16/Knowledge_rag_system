@@ -10,13 +10,13 @@ logger = get_logger(__name__)
 
 # 并发控制：chroma.yaml → vision_max_concurrent，环境变量 VISION_MAX_CONCURRENT 可覆盖
 _MAX_CONCURRENT = int(os.getenv("VISION_MAX_CONCURRENT",
-    str(get_config("vision_max_concurrent", 5))))
+    str(get_config("vision_max_concurrent", 3))))
 # 单张图片超时（秒），chroma.yaml → vision_image_timeout，环境变量 VISION_IMAGE_TIMEOUT 可覆盖
 _IMAGE_TIMEOUT = int(os.getenv("VISION_IMAGE_TIMEOUT",
     str(get_config("vision_image_timeout", 30))))
 # 大图压缩阈值（KB），超过此大小的图片（无论格式）自动缩放 + 转 JPEG 发送
 _MAX_IMAGE_KB = int(os.getenv("VISION_MAX_IMAGE_KB",
-    str(get_config("vision_max_image_kb", 300))))
+    str(get_config("vision_max_image_kb", 250))))
 # 压缩后最大尺寸（像素）
 _MAX_IMAGE_DIM = int(os.getenv("VISION_MAX_IMAGE_DIM",
     str(get_config("vision_max_image_dim", 2048))))

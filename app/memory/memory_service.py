@@ -1,6 +1,5 @@
 """会话记忆服务 — LangChain SQLChatMessageHistory + SQLite 持久化。"""
 import json
-import os
 import sqlite3
 import uuid
 from datetime import datetime
@@ -129,7 +128,8 @@ class ConversationMemoryService:
 
     def load_context(self, session_id: str, max_turns: int = None) -> list:
         if max_turns is None:
-            max_turns = int(os.getenv("MAX_MEMORY_TURNS", "10"))
+            from app.config.loader import get_config
+            max_turns = int(get_config("llm_history_turns", 5))
         rows = self._read_messages(session_id)
         messages = []
         from langchain_core.messages import HumanMessage, AIMessage

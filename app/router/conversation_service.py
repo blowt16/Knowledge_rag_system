@@ -33,7 +33,7 @@ class ConversationService:
     def clear_user(self, user_id: str):
         self._memory.clear_user(user_id)
 
-    def load_context(self, session_id: str, max_turns: int = 10) -> list:
+    def load_context(self, session_id: str, max_turns: int = None) -> list:
         return self._memory.load_context(session_id, max_turns)
 
     def append(self, session_id: str, human_msg: str, ai_msg: str):
