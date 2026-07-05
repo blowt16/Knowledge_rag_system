@@ -199,7 +199,7 @@ def _extract_docx_images(file_path: Path, user_id: str, md5: str) -> list[str]:
                 img_filename = f"docx_i{i}.{ext}"
                 img_path = output_dir / img_filename
                 img_path.write_bytes(image_bytes)
-                relative_path = str(img_path.relative_to(get_data_path()))
+                relative_path = img_path.relative_to(get_data_path()).as_posix()
                 image_paths.append(relative_path)
             except Exception:
                 continue

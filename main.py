@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # 自动加载 .env 文件
 try:
@@ -61,6 +62,12 @@ app.add_middleware(
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(DocumentLoadException, app_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
+
+# 挂载静态文件 — 提取的图片通过 /images/ 访问
+_data_dir = Path(__file__).parent / "data" / "extracted_images"
+_data_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/images", StaticFiles(directory=str(_data_dir)), name="images")
+
 
 # 注册路由
 from app.router.chat_router import chat_router

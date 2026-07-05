@@ -112,6 +112,26 @@ class RAGService:
             "chunks": chunks,
         }
 
+    @staticmethod
+    def _build_image_markdown(documents: list) -> list[str]:
+        """从文档元数据中提取图片路径，构建 Markdown 图片链接。"""
+        import os
+        base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+        img_lines = []
+        seen = set()
+        for doc in documents:
+            label = doc.metadata.get("original_filename", "未知")
+            for img_path in doc.metadata.get("image_paths", []):
+                # 统一为前向斜杠，去掉 extracted_images/ 前缀
+                relative = img_path.replace("\\", "/")
+                prefix = "extracted_images/"
+                if relative.startswith(prefix):
+                    relative = relative[len(prefix):]
+                if relative not in seen:
+                    seen.add(relative)
+                    img_lines.append(f"![{label}]({base_url}/images/{relative})")
+        return img_lines
+
     async def _generate_summary(self, query: str, documents: list,
                                 chat_history: list = None,
                                 rewritten_query: str = None,
@@ -136,10 +156,19 @@ class RAGService:
                 meta = doc.metadata
                 source = meta.get("original_filename", "未知")
                 page = meta.get("page", "")
-                ctx = f"[文档{i+1}] 来源: {source}"
+                chapter = meta.get("current_chapter", "")
+                image_paths = meta.get("image_paths", [])
+                ctx = f"[来源: {source}"
                 if page:
                     ctx += f", 第{page}页"
-                ctx += f"\n{doc.page_content[:max_chars]}"
+                if chapter:
+                    ctx += f", {chapter}"
+                ctx += f"]\n{doc.page_content[:max_chars]}"
+                # 将图片 URL 注入上下文，让 LLM 知道有可用图片
+                if image_paths:
+                    img_md = self._build_image_markdown([doc])
+                    if img_md:
+                        ctx += "\n\n--- 可用的相关图片 ---\n" + "\n".join(img_md)
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 
@@ -160,6 +189,17 @@ class RAGService:
                     chunks.append(chunk)
                     if on_chunk:
                         await on_chunk(chunk)
+
+            # LLM 回答后追加图片 Markdown，确保图片始终展示
+            img_md_lines = self._build_image_markdown(documents)
+            if img_md_lines:
+                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
+                answer += img_block
+                chunks.append(img_block)
+                if on_chunk:
+                    await on_chunk(img_block)
+                logger.info(f"【RAG】图片注入: {len(img_md_lines)} 张\n  " + "\n  ".join(img_md_lines))
+
             return answer.strip(), chunks
         except Exception as e:
             logger.error(f"【RAG】生成摘要失败: {e}")
@@ -170,12 +210,15 @@ class RAGService:
     def _format_history(chat_history: list = None) -> str:
         if not chat_history:
             return "无"
+        import re
         max_chars = get_config("history_max_chars", 200)
         max_turns = get_config("llm_history_turns", 5)
         lines = []
         for msg in chat_history[-(max_turns * 2):]:
             role = getattr(msg, "type", "unknown")
             content = getattr(msg, "content", str(msg))
+            # 移除旧格式 [文档N] 引用，避免多轮对话中跨轮次幻觉
+            content = re.sub(r'\[文档\d+\]', '', content)
             prefix = "用户" if role == "human" else "助手" if role == "ai" else role
             lines.append(f"{prefix}: {content[:max_chars]}")
         return "\n".join(lines)
@@ -188,8 +231,12 @@ class RAGService:
         for i, doc in enumerate(documents):
             source = doc.metadata.get("original_filename", "未知")
             page = doc.metadata.get("page", "")
-            header = f"[{i+1}] 来源: {source}"
+            chapter = doc.metadata.get("current_chapter", "")
+            header = f"[来源: {source}"
             if page:
                 header += f", 第{page}页"
+            if chapter:
+                header += f", {chapter}"
+            header += "]"
             lines.append(f"{header}\n{doc.page_content[:max_chars]}")
         return "\n\n---\n\n".join(lines)

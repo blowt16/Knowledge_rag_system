@@ -50,7 +50,7 @@ def extract_images_from_pdf(pdf_path: str, user_id: str, pdf_md5: str) -> dict[i
                 img_path = output_dir / img_filename
                 img_path.write_bytes(image_bytes)
 
-                relative_path = str(img_path.relative_to(get_data_path()))
+                relative_path = img_path.relative_to(get_data_path()).as_posix()
                 page_image_map.setdefault(page_num, []).append(relative_path)
             except Exception as e:
                 logger.warning(f"【图片提取】第{page_num}页图片{img_idx}提取失败: {e}")

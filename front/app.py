@@ -245,9 +245,15 @@ if prompt := st.chat_input(
 
             display = full_response
             if references:
-                ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {s}" for s in references)
-                display += ref_text
-                full_response += ref_text
+                ref_lines = ["\n\n---\n**📚 参考来源：**"]
+                for ref in references:
+                    if isinstance(ref, str):
+                        ref_lines.append(f"- {ref}")
+                    else:
+                        label = ref.get("label", "未知")
+                        ref_lines.append(f"- {label}")
+                display += "\n".join(ref_lines)
+                full_response += "\n".join(ref_lines)
             placeholder.markdown(display)
 
         except Exception as e:

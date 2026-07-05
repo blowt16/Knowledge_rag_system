@@ -94,17 +94,42 @@ class ChatService:
                 else:
                     if not answer:
                         yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
-                    # 参考资料来源
+                    # 参考资料来源（章节溯源，图片已通过 LLM 回答展示）
                     sources = []
+                    seen = set()
+                    img_refs = []
+                    img_seen = set()
+                    import os as _os
+                    _base_url = _os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
                     for d in documents:
                         src = d.metadata.get("original_filename", "未知")
                         page = d.metadata.get("page", "")
+                        chapter = d.metadata.get("current_chapter", "")
                         label = src
                         if page:
                             label += f" (第{page}页)"
-                        if label not in sources:
-                            sources.append(label)
-                    logger.info(f"【RAG直通】参考来源: {sources}")
+                        if chapter:
+                            label += f" [{chapter}]"
+                        if label not in seen:
+                            seen.add(label)
+                            sources.append({
+                                "label": label,
+                                "source": src,
+                                "page": str(page) if page else "",
+                                "chapter": chapter or "",
+                            })
+                        for img_path in d.metadata.get("image_paths", []):
+                            relative = img_path.replace("\\", "/")
+                            prefix = "extracted_images/"
+                            if relative.startswith(prefix):
+                                relative = relative[len(prefix):]
+                            if relative not in img_seen:
+                                img_seen.add(relative)
+                                img_refs.append(f"{src} → {_base_url}/images/{relative}")
+                    if sources:
+                        logger.info(f"【RAG直通】文本参考来源:\n  - " + "\n  - ".join(s["label"] for s in sources))
+                    if img_refs:
+                        logger.info(f"【RAG直通】图片参考来源:\n  - " + "\n  - ".join(img_refs))
                     yield f"data: {json.dumps({'event': 'references', 'data': sources}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error(f"【RAG直通】未预期异常: {e}")

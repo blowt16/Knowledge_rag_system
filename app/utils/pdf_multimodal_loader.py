@@ -941,7 +941,7 @@ async def _process_scan_pdf(
 
         meta = {
             "source": file_path, "page": page_num,
-            "has_images": len(images_on_page) > 0 or blocks_has_images,
+            "has_images": len(images_on_page) > 0 or blocks.get("has_images", False),
             "ocr_engine": "paddleocr_gpu" if ocr is not None else "none",
             "scan_branch": "text_and_images",
             "toc": "[]", "chapter_count": 0,

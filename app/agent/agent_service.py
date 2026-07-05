@@ -10,6 +10,14 @@ logger = get_logger(__name__)
 class AgentService:
     """LangChain Agent 编排服务：工具链注册 + 推理循环 + 流式输出。"""
 
+    @staticmethod
+    def _log_agent_refs(text_refs: list, img_refs: list):
+        if text_refs:
+            labels = [r["label"] for r in text_refs]
+            logger.info(f"【Agent】文本参考来源:\n  - " + "\n  - ".join(labels))
+        if img_refs:
+            logger.info(f"【Agent】图片参考来源:\n  - " + "\n  - ".join(img_refs))
+
     def _get_llm(self):
         from app.core.background_init import init_manager
         llm = init_manager.chat_model
@@ -18,7 +26,8 @@ class AgentService:
             llm = create_chat_model()
         return llm
 
-    def _get_tools(self, user_id: str, chat_history: list = None, refs_list: list = None):
+    def _get_tools(self, user_id: str, chat_history: list = None,
+                    refs_list: list = None, img_refs_list: list = None):
         from langchain_core.tools import tool
         from app.rag.rag_service import RAGService
 
@@ -35,26 +44,63 @@ class AgentService:
             answer = result.get("answer", "")
             docs = result.get("documents", [])
             max_chars = get_config("knowledge_search_max_chars", 300)
-            # 收集文档来源供 references 事件使用
+            # 收集文档来源供 references 事件使用（图片已通过 LLM 回答展示）
             if refs_list is not None:
+                seen = set()
                 for d in docs:
                     src = d.metadata.get("original_filename", "未知")
                     page = d.metadata.get("page", "")
+                    chapter = d.metadata.get("current_chapter", "")
                     label = src
                     if page:
                         label += f" (第{page}页)"
-                    if label not in refs_list:
-                        refs_list.append(label)
+                    if chapter:
+                        label += f" [{chapter}]"
+                    if label not in seen:
+                        seen.add(label)
+                        refs_list.append({
+                            "label": label,
+                            "source": src,
+                            "page": str(page) if page else "",
+                            "chapter": chapter or "",
+                        })
+            # 收集图片引用供日志使用
+            if img_refs_list is not None:
+                import os
+                base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+                img_seen = set()
+                for d in docs:
+                    src = d.metadata.get("original_filename", "未知")
+                    for img_path in d.metadata.get("image_paths", []):
+                        relative = img_path.replace("\\", "/")
+                        prefix = "extracted_images/"
+                        if relative.startswith(prefix):
+                            relative = relative[len(prefix):]
+                        if relative not in img_seen:
+                            img_seen.add(relative)
+                            img_refs_list.append(f"{src} → {base_url}/images/{relative}")
             if not answer:
                 lines = []
                 for i, doc in enumerate(docs):
                     src = doc.metadata.get("original_filename", "未知")
                     page = doc.metadata.get("page", "")
-                    header = f"[文档{i+1}] 来源: {src}"
+                    chapter = doc.metadata.get("current_chapter", "")
+                    header = f"[来源: {src}"
                     if page:
                         header += f", 第{page}页"
+                    if chapter:
+                        header += f", {chapter}"
+                    header += "]"
                     lines.append(f"{header}\n{doc.page_content[:max_chars]}")
                 answer = "\n\n".join(lines)
+            # 将图片 Markdown 注入工具返回结果，让 Agent LLM 可以在回答中引用图片
+            from app.rag.rag_service import RAGService
+            img_md_lines = RAGService._build_image_markdown(docs)
+            if img_md_lines:
+                import os
+                base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+                answer += "\n\n=== 可用的相关图片（请在回答中包含这些图片） ===\n"
+                answer += "\n".join(img_md_lines)
             else:
                 sources = []
                 for i, doc in enumerate(docs):
@@ -91,13 +137,14 @@ class AgentService:
 
         return [knowledge_search, web_search, summarize_document]
 
-    def _create_executor(self, user_id: str, chat_history: list = None, refs_list: list = None):
+    def _create_executor(self, user_id: str, chat_history: list = None,
+                          refs_list: list = None, img_refs_list: list = None):
         """创建 AgentExecutor（不含 RunnableWithMessageHistory，手动管理历史）。"""
         from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
         llm = self._get_llm()
-        tools = self._get_tools(user_id, chat_history, refs_list)
+        tools = self._get_tools(user_id, chat_history, refs_list, img_refs_list)
 
         loader = PromptLoader()
         system_prompt = loader.load("agent")
@@ -130,8 +177,9 @@ class AgentService:
         tool_call_counts: dict[str, int] = {}
         tool_limits: dict = get_config("tool_call_limits", {})
         agent_references: list[str] = []
+        agent_img_refs: list[str] = []
 
-        agent = self._create_executor(user_id, chat_history, agent_references)
+        agent = self._create_executor(user_id, chat_history, agent_references, agent_img_refs)
 
         try:
             async for event in agent.astream_events(
@@ -189,7 +237,7 @@ class AgentService:
                     accumulated = answer
                     done_sent = True
                     if agent_references:
-                        logger.info(f"【Agent】参考来源: {agent_references}")
+                        self._log_agent_refs(agent_references, agent_img_refs)
                         yield {"event": "references", "data": agent_references}
                     yield {
                         "event": "done",
@@ -209,7 +257,7 @@ class AgentService:
                         accumulated = answer
                         done_sent = True
                         if agent_references:
-                            logger.info(f"【Agent】参考来源: {agent_references}")
+                            self._log_agent_refs(agent_references, agent_img_refs)
                             yield {"event": "references", "data": agent_references}
                         yield {
                             "event": "done",
@@ -219,7 +267,7 @@ class AgentService:
             # 兜底（仅在没有 on_agent_finish / on_chain_end 时触发）
             if not done_sent and accumulated:
                 if agent_references:
-                    logger.info(f"【Agent】参考来源: {agent_references}")
+                    self._log_agent_refs(agent_references, agent_img_refs)
                     yield {"event": "references", "data": agent_references}
                 yield {
                     "event": "done",
