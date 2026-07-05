@@ -44,7 +44,7 @@ class AgentService:
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
             docs = result.get("documents", [])
-            max_chars = get_config("knowledge_search_max_chars", 300)
+            max_chars = get_config("chunk_size", 500)
             # 收集文档来源供 references 事件使用
             if refs_list is not None:
                 seen = set()
@@ -117,7 +117,7 @@ class AgentService:
         def summarize_document(content: str) -> str:
             """对长文档内容进行摘要。"""
             logger.info(f"【Agent-文档摘要】原文 {len(content)} 字符")
-            if len(content) < get_config("summarize_min_chars", 500):
+            if len(content) < get_config("chunk_size", 500):
                 logger.info(f"【Agent-文档摘要】内容不足最小阈值，跳过摘要")
                 return content
             try:
@@ -131,7 +131,7 @@ class AgentService:
                 return result
             except Exception as e:
                 logger.error(f"【Agent-文档摘要】LLM 摘要失败: {e}")
-                max_chars = get_config("knowledge_search_max_chars", 300)
+                max_chars = get_config("chunk_size", 500)
                 return content[:max_chars] + "..."
 
         return [knowledge_search, web_search, summarize_document]

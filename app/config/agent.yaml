@@ -12,5 +12,4 @@ tool_call_limits:
   summarize_document: 2              # 文档摘要
 
 # --- 工具配置 ---
-knowledge_search_max_chars: 300      # knowledge_search 单文档截断字符数(rerank召回的每个chunk进行截取只保留设定的值)
-summarize_min_chars: 500             # summarize_document 触发摘要最小长度(召回的总chunk大小超过阈值进行摘要总结)
+# 工具内文本截断统一使用 chroma.yaml 的 chunk_size，防止信息丢失

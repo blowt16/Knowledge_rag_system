@@ -169,7 +169,7 @@ class RAGService:
                 fallback = self._format_docs(documents)
                 return fallback, [fallback]
 
-            max_chars = get_config("summary_max_chars", 800)
+            max_chars = get_config("chunk_size", 500)
             contexts = []
             for i, doc in enumerate(documents):
                 meta = doc.metadata
@@ -245,7 +245,7 @@ class RAGService:
     def _format_docs(self, documents: list) -> str:
         if not documents:
             return ""
-        max_chars = get_config("fallback_max_chars", 500)
+        max_chars = get_config("chunk_size", 500)
         lines = []
         for i, doc in enumerate(documents):
             source = doc.metadata.get("original_filename", "未知")
