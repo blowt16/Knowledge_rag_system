@@ -59,8 +59,7 @@ batch_retry_backoff: [1, 2, 4]  # 重试退避间隔（秒）
 # --- 查询改写 ---
 pure_keyword_max_length: 10
 hyde_min_length: 3
-history_max_chars: 200
-llm_history_turns: 5           # 输入 LLM 的最近对话轮次
+llm_history_turns: 5           # 输入 LLM 的最近对话轮次（替代字符截断，保留完整消息语义）
 query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
 pronoun_words: ["它", "他", "她", "这个", "那个", "这些", "那些", "它的", "他的", "她的", "这", "那", "上面", "前面", "刚才"]
 

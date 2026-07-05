@@ -95,16 +95,16 @@ async def hyde_rewrite(query: str, chat_history: list = None) -> str:
 
 
 def _format_chat_history(history: list) -> str:
-    """将消息列表格式化为文本。"""
+    """将消息列表格式化为文本，由 llm_history_turns 控制轮次。"""
     if not history:
         return "无"
-    max_chars = get_config("history_max_chars", 200)
+    max_turns = get_config("llm_history_turns", 5)
     lines = []
-    for msg in history:
+    for msg in history[-(max_turns * 2):]:
         role = getattr(msg, "type", "unknown")
         content = getattr(msg, "content", str(msg))
         prefix = "用户" if role == "human" else "助手" if role == "ai" else role
-        lines.append(f"{prefix}: {content[:max_chars]}")
+        lines.append(f"{prefix}: {content}")
     return "\n".join(lines)
 
 

@@ -230,7 +230,6 @@ class RAGService:
         if not chat_history:
             return "无"
         import re
-        max_chars = get_config("history_max_chars", 200)
         max_turns = get_config("llm_history_turns", 5)
         lines = []
         for msg in chat_history[-(max_turns * 2):]:
@@ -239,7 +238,7 @@ class RAGService:
             # 移除旧格式 [文档N] 引用，避免多轮对话中跨轮次幻觉
             content = re.sub(r'\[文档\d+\]', '', content)
             prefix = "用户" if role == "human" else "助手" if role == "ai" else role
-            lines.append(f"{prefix}: {content[:max_chars]}")
+            lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
     def _format_docs(self, documents: list) -> str:
