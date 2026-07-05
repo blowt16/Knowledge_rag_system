@@ -101,7 +101,7 @@ class AgentService:
             from app.rag.rag_service import RAGService
             img_md_lines = RAGService._build_image_markdown(docs)
             if img_md_lines:
-                answer += "\n\n=== 可用的相关图片（请仅使用以下图片展示，禁止编造不存在页码的图片链接） ===\n"
+                answer += "\n\n=== 可用的相关图片 ===\n"
                 answer += "\n".join(img_md_lines)
             return answer
 
