@@ -99,8 +99,8 @@ class ChatService:
                     seen = set()
                     img_refs = []
                     img_seen = set()
-                    import os as _os
-                    _base_url = _os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+                    from app.utils.path_tool import get_server_url
+                    _base_url = get_server_url()
                     for d in documents:
                         src = d.metadata.get("original_filename", "未知")
                         page = d.metadata.get("page", "")
@@ -120,7 +120,8 @@ class ChatService:
                             })
                         for img_path in d.metadata.get("image_paths", []):
                             relative = img_path.replace("\\", "/")
-                            prefix = "extracted_images/"
+                            from app.config.loader import get_config as _cfg
+                            prefix = _cfg("image_extract_dir", "extracted_images") + "/"
                             if relative.startswith(prefix):
                                 relative = relative[len(prefix):]
                             if relative not in img_seen:

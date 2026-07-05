@@ -134,16 +134,17 @@ class RAGService:
     @staticmethod
     def _build_image_markdown(documents: list) -> list[str]:
         """从文档元数据中提取图片路径，构建 Markdown 图片链接。"""
-        import os
-        base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+        from app.utils.path_tool import get_server_url
+        base_url = get_server_url()
         img_lines = []
         seen = set()
         for doc in documents:
             label = doc.metadata.get("original_filename", "未知")
             for img_path in doc.metadata.get("image_paths", []):
-                # 统一为前向斜杠，去掉 extracted_images/ 前缀
+                # 统一为前向斜杠，去掉 image_extract_dir 前缀
                 relative = img_path.replace("\\", "/")
-                prefix = "extracted_images/"
+                from app.config.loader import get_config as _cfg
+                prefix = _cfg("image_extract_dir", "extracted_images") + "/"
                 if relative.startswith(prefix):
                     relative = relative[len(prefix):]
                 if relative not in seen:

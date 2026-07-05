@@ -1,6 +1,6 @@
 """PDF 图片提取 — PyMuPDF 提取内嵌图片并持久化到本地。"""
 from pathlib import Path
-from app.utils.path_tool import get_data_path
+from app.utils.path_tool import get_data_path, get_image_dir
 from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
@@ -23,7 +23,7 @@ def extract_images_from_pdf(pdf_path: str, user_id: str, pdf_md5: str) -> dict[i
         return page_image_map
 
     try:
-        output_dir = get_data_path(f"extracted_images/{user_id}/{pdf_md5}")
+        output_dir = get_image_dir(f"{user_id}/{pdf_md5}")
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.warning(f"【图片提取】磁盘不足或权限拒绝，降级为内存模式: {e}")

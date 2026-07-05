@@ -287,8 +287,8 @@ async def _process_text_mix_pdf(
     # 持久化缓存目录: data/extracted_images/{user_id}/{md5}/_vl_cache/
     cache_dir = ""
     if user_id and md5_hex:
-        from app.utils.path_tool import get_data_path
-        cache_dir = str(get_data_path(f"extracted_images/{user_id}/{md5_hex}/_vl_cache"))
+        from app.utils.path_tool import get_image_dir
+        cache_dir = str(get_image_dir(f"{user_id}/{md5_hex}/_vl_cache"))
 
     doc_fitz = fitz.open(pdf_path)
     crop_dirs: set[Path] = set()
@@ -717,8 +717,8 @@ async def _process_scan_pdf(
 
     cache_dir = ""
     if user_id and md5_hex:
-        from app.utils.path_tool import get_data_path
-        cache_dir = str(get_data_path(f"extracted_images/{user_id}/{md5_hex}/_vl_cache"))
+        from app.utils.path_tool import get_image_dir
+        cache_dir = str(get_image_dir(f"{user_id}/{md5_hex}/_vl_cache"))
 
     doc = fitz.open(pdf_path)
     ocr = _init_paddleocr()

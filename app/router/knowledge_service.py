@@ -9,7 +9,7 @@ from app.rag.vector_store import VectorStoreService
 from app.rag.md5_manager.md5_store import MD5Store
 from app.rag.retrievers.hybrid_retriever import HybridRetriever
 from app.utils.log_tool import get_logger
-from app.utils.path_tool import get_data_path
+from app.utils.path_tool import get_data_path, get_image_dir
 
 logger = get_logger(__name__)
 
@@ -151,8 +151,8 @@ class KnowledgeService:
 
     def _delete_image_directory(self, user_id: str, md5: str):
         import shutil
-        shutil.rmtree(get_data_path(f"extracted_images/{user_id}/{md5}"), ignore_errors=True)
+        shutil.rmtree(str(get_image_dir(f"{user_id}/{md5}")), ignore_errors=True)
 
     def _delete_user_images(self, user_id: str):
         import shutil
-        shutil.rmtree(get_data_path(f"extracted_images/{user_id}"), ignore_errors=True)
+        shutil.rmtree(str(get_image_dir(user_id)), ignore_errors=True)

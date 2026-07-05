@@ -64,8 +64,8 @@ app.add_exception_handler(DocumentLoadException, app_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # 挂载静态文件 — 提取的图片通过 /images/ 访问
-_data_dir = Path(__file__).parent / "data" / "extracted_images"
-_data_dir.mkdir(parents=True, exist_ok=True)
+from app.utils.path_tool import get_image_dir
+_data_dir = get_image_dir()
 app.mount("/images", StaticFiles(directory=str(_data_dir)), name="images")
 
 

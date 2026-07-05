@@ -57,3 +57,21 @@ def get_models_path(model_name: str = "") -> Path:
     base = resolve_path(models_dir)
     base.mkdir(parents=True, exist_ok=True)
     return base / model_name if model_name else base
+
+
+def get_image_dir(subpath: str = "") -> Path:
+    """获取图片提取目录的绝对路径，目录名从 chroma.yaml image_extract_dir 读取。
+
+    返回 data/{image_extract_dir}/{subpath}，自动创建父目录。
+    """
+    img_dir = _cfg_dir("image_extract_dir", "extracted_images")
+    return get_data_path(f"{img_dir}/{subpath}") if subpath else get_data_path(img_dir)
+
+
+def get_server_url() -> str:
+    """获取后端服务地址，从 chroma.yaml server_base_url 读取。"""
+    try:
+        from app.config.loader import get_config
+        return get_config("server_base_url", "http://127.0.0.1:8000")
+    except Exception:
+        return "http://127.0.0.1:8000"

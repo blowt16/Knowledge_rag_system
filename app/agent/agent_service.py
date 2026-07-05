@@ -67,14 +67,15 @@ class AgentService:
                         })
             # 收集图片引用供日志使用
             if img_refs_list is not None:
-                import os
-                base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
+                from app.utils.path_tool import get_server_url
+                base_url = get_server_url()
                 img_seen = set()
                 for d in docs:
                     src = d.metadata.get("original_filename", "未知")
                     for img_path in d.metadata.get("image_paths", []):
                         relative = img_path.replace("\\", "/")
-                        prefix = "extracted_images/"
+                        from app.config.loader import get_config as _cfg
+                        prefix = _cfg("image_extract_dir", "extracted_images") + "/"
                         if relative.startswith(prefix):
                             relative = relative[len(prefix):]
                         if relative not in img_seen:

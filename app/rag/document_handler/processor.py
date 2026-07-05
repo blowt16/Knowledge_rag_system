@@ -162,8 +162,8 @@ class DocumentProcessor:
     def _cleanup_images(user_id: str, md5_hex: str):
         """清理 PDF 解析失败后遗留的提取图片目录。"""
         import shutil
-        from app.utils.path_tool import get_data_path
-        img_dir = get_data_path(f"extracted_images/{user_id}/{md5_hex}")
+        from app.utils.path_tool import get_image_dir
+        img_dir = get_image_dir(f"{user_id}/{md5_hex}")
         if img_dir.exists():
             shutil.rmtree(img_dir, ignore_errors=True)
             logger.info(f"【图片清理】已清理孤儿图片目录: {img_dir}")

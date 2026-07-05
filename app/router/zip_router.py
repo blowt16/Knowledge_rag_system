@@ -39,7 +39,8 @@ async def upload_zip(
             code=400,
         )
 
-    tmp_dir = get_data_path("tmp")
+    from app.config.loader import get_config
+    tmp_dir = get_data_path(get_config("temp_upload_dir", "tmp/uploads"))
     tmp_path = tmp_dir / f"upload_{uuid.uuid4().hex[:8]}_{Path(filename).name}"
     content = await file.read()
 

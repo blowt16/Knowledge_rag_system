@@ -184,10 +184,10 @@ def _extract_docx_images(file_path: Path, user_id: str, md5: str) -> list[str]:
     try:
         from docx import Document
         from docx.opc.constants import RELATIONSHIP_TYPE as RT
-        from app.utils.path_tool import get_data_path
+        from app.utils.path_tool import get_image_dir
 
         doc = Document(str(file_path))
-        output_dir = get_data_path(f"extracted_images/{user_id}/{md5}")
+        output_dir = get_image_dir(f"{user_id}/{md5}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         for i, rel in enumerate(doc.part.rels.values()):
