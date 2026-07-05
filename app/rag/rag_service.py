@@ -105,7 +105,7 @@ class RAGService:
             answer = self._format_docs(reranked)
             img_md_lines = self._build_image_markdown(reranked)
             if img_md_lines:
-                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
+                img_block = "\n\n---\n**📷 相关图片（仅展示以下图片，禁止编造不存在页码的图片链接）：**\n\n" + "\n\n".join(img_md_lines)
                 answer += img_block
                 logger.info(f"【RAG】图片注入: {len(img_md_lines)} 张\n  " + "\n  ".join(img_md_lines))
             if on_chunk:
@@ -187,7 +187,7 @@ class RAGService:
                 if image_paths:
                     img_md = self._build_image_markdown([doc])
                     if img_md:
-                        ctx += "\n\n--- 可用的相关图片 ---\n" + "\n".join(img_md)
+                        ctx += "\n\n--- 可用的相关图片（仅使用以下图片，禁止编造不存在页码的链接） ---\n" + "\n".join(img_md)
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 
@@ -212,7 +212,7 @@ class RAGService:
             # LLM 回答后追加图片 Markdown，确保图片始终展示
             img_md_lines = self._build_image_markdown(documents)
             if img_md_lines:
-                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
+                img_block = "\n\n---\n**📷 相关图片（仅展示以下图片，禁止编造不存在页码的图片链接）：**\n\n" + "\n\n".join(img_md_lines)
                 answer += img_block
                 chunks.append(img_block)
                 if on_chunk:
