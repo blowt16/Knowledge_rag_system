@@ -39,8 +39,10 @@ class AgentService:
             返回原始文档内容，不进行 LLM 摘要——让 Agent 自行分析。
             当需要查找用户上传的文档内容时使用此工具。
             """
+            _skip = get_config("agent_skip_summary", True)
             result = await rag_service.search(
-                query=query, user_id=user_id, chat_history=chat_history)
+                query=query, user_id=user_id, chat_history=chat_history,
+                skip_summary=_skip)
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
             docs = result.get("documents", [])

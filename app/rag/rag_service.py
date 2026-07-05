@@ -19,12 +19,10 @@ class RAGService:
 
     async def search(self, query: str, user_id: str = "",
                      chat_history: list = None, top_k: int = None,
-                     on_chunk=None, skip_summary: bool = None) -> dict:
+                     on_chunk=None, skip_summary: bool = False) -> dict:
         """RAG 检索。若 on_chunk 回调传入则流式推送 token。
 
-        skip_summary 默认从 chroma.yaml 读取（默认 true），跳过 LLM 摘要直接返回原始文档。"""
-        if skip_summary is None:
-            skip_summary = get_config("skip_summary", True)
+        skip_summary 由调用方根据模式传入：RAG 直通读 rag_skip_summary，Agent 读 agent_skip_summary。"""
         if top_k is None:
             top_k = get_config("k", 5)
 

@@ -65,9 +65,10 @@ class ChatService:
                 async def _push_token(chunk: str):
                     await token_queue.put(chunk)
 
+                _skip = get_config("rag_skip_summary", False)
                 search_task = _asyncio.create_task(
                     self._rag_svc.search(query, user_id, history, on_chunk=_push_token,
-                                         skip_summary=False))
+                                         skip_summary=_skip))
 
                 # 检索 + 重排序期间 token_queue 为空, search_task 完成后 tokens 才开始到达
                 while not search_task.done() or not token_queue.empty():
