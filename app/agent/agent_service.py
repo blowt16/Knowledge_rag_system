@@ -108,21 +108,29 @@ class AgentService:
         @tool
         def web_search(query: str) -> str:
             """联网搜索补充外部实时信息。仅在知识库无相关内容时使用。"""
-            return web_svc.search(query)
+            logger.info(f"【Agent-联网搜索】查询: {query[:100]}")
+            result = web_svc.search(query)
+            logger.info(f"【Agent-联网搜索】返回 {len(result)} 字符")
+            return result
 
         @tool
         def summarize_document(content: str) -> str:
             """对长文档内容进行摘要。"""
+            logger.info(f"【Agent-文档摘要】原文 {len(content)} 字符")
             if len(content) < get_config("summarize_min_chars", 500):
+                logger.info(f"【Agent-文档摘要】内容不足最小阈值，跳过摘要")
                 return content
             try:
                 llm = self._get_llm()
                 loader = PromptLoader()
                 prompt = loader.load("summary", content=content)
+                logger.info(f"【Agent-文档摘要】调用 LLM 生成摘要…")
                 response = llm.invoke(prompt)
-                return response.content if hasattr(response, "content") else str(response)
+                result = response.content if hasattr(response, "content") else str(response)
+                logger.info(f"【Agent-文档摘要】LLM 摘要完成: {len(content)} → {len(result)} 字符")
+                return result
             except Exception as e:
-                logger.error(f"摘要生成失败: {e}")
+                logger.error(f"【Agent-文档摘要】LLM 摘要失败: {e}")
                 max_chars = get_config("knowledge_search_max_chars", 300)
                 return content[:max_chars] + "..."
 
