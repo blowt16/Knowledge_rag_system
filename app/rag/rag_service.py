@@ -103,6 +103,11 @@ class RAGService:
         # 步骤5: LLM 摘要 — skip_summary 时直接返回原始文档，省一次 LLM 调用
         if skip_summary:
             answer = self._format_docs(reranked)
+            img_md_lines = self._build_image_markdown(reranked)
+            if img_md_lines:
+                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
+                answer += img_block
+                logger.info(f"【RAG】图片注入: {len(img_md_lines)} 张\n  " + "\n  ".join(img_md_lines))
             if on_chunk:
                 await on_chunk(answer)
             return {
