@@ -199,11 +199,19 @@ class DocumentProcessor:
                 self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, fp)
             except Exception as e:
                 logger.error(f"【MD5】保存失败，回滚向量数据: {e}")
+                rolled_back = False
                 try:
                     self._vector_store.delete_by_md5(user_id, md5_hex)
+                    rolled_back = True
                 except Exception as re:
                     logger.error(f"【MD5】回滚 ChromaDB 也失败: {re}")
-                self._cleanup_images(user_id, md5_hex)
+                if rolled_back:
+                    self._cleanup_images(user_id, md5_hex)
+                else:
+                    logger.error(
+                        f"【严重】ChromaDB 回滚失败，图片保留不删: user={user_id}, md5={md5_hex}。"
+                        f"ChromaDB 有 chunks 引用这些图片，若删除图片将导致 404。请手动检查。"
+                    )
                 return {"status": "failed", "reason": f"MD5 保存失败: {e}", "filename": original_filename, "md5": md5_hex}
             logger.info(
                 f"【降级】文件 {original_filename} 已入库: {len(chunks)} chunks, "
@@ -219,11 +227,19 @@ class DocumentProcessor:
             self._md5_store.save_md5_hex(user_id, md5_hex, original_filename, fp)
         except Exception as e:
             logger.error(f"【MD5】保存失败，回滚向量数据: {e}")
+            rolled_back = False
             try:
                 self._vector_store.delete_by_md5(user_id, md5_hex)
+                rolled_back = True
             except Exception as re:
                 logger.error(f"【MD5】回滚 ChromaDB 也失败: {re}")
-            self._cleanup_images(user_id, md5_hex)
+            if rolled_back:
+                self._cleanup_images(user_id, md5_hex)
+            else:
+                logger.error(
+                    f"【严重】ChromaDB 回滚失败，图片保留不删: user={user_id}, md5={md5_hex}。"
+                    f"ChromaDB 有 chunks 引用这些图片，若删除图片将导致 404。请手动检查。"
+                )
             return {"status": "failed", "reason": f"MD5 保存失败: {e}", "filename": original_filename, "md5": md5_hex}
 
         return {"status": "done", "md5": md5_hex, "filename": original_filename, "chunks": len(chunks)}

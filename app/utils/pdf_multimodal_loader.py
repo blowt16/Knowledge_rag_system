@@ -395,6 +395,11 @@ async def _process_text_mix_pdf(
                 err_msg = str(r)
                 executor.shutdown(wait=True)
                 doc_fitz.close()
+                for d in crop_dirs:
+                    try:
+                        shutil.rmtree(str(d), ignore_errors=True)
+                    except Exception:
+                        pass
                 raise ValueError(
                     f"【text_mix_pdf】第{pn}页采集异常: {err_msg}. "
                     f"文本提取失败（pdfplumber + PyMuPDF 均无法提取），"
@@ -521,6 +526,12 @@ async def _process_text_mix_pdf(
         f"去重后调用={len(new_calls)}, 有效描述={new_desc}"
         + (f", 降级={degraded_pages}页" if degraded_pages > 0 else "")
     )
+    # 清理裁切临时目录
+    for d in crop_dirs:
+        try:
+            shutil.rmtree(str(d), ignore_errors=True)
+        except Exception:
+            pass
     return documents, degradation
 
 
@@ -941,7 +952,7 @@ async def _process_scan_pdf(
 
         meta = {
             "source": file_path, "page": page_num,
-            "has_images": len(images_on_page) > 0 or blocks.get("has_images", False),
+            "has_images": len(images_on_page) > 0 or blocks_has_images,
             "ocr_engine": "paddleocr_gpu" if ocr is not None else "none",
             "scan_branch": "text_and_images",
             "toc": "[]", "chapter_count": 0,
