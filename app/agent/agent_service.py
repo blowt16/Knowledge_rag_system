@@ -35,16 +35,17 @@ class AgentService:
 
         @tool
         async def knowledge_search(query: str) -> str:
-            """从用户知识库中检索相关文档（HyDE 改写 + 混合检索 + 重排序 + 摘要）。
+            """从用户知识库中检索相关文档（HyDE 改写 + 混合检索 + 重排序）。
+            返回原始文档内容，不进行 LLM 摘要——让 Agent 自行分析。
             当需要查找用户上传的文档内容时使用此工具。
             """
-            result = await rag_service.search(query=query, user_id=user_id, chat_history=chat_history)
+            result = await rag_service.search(
+                query=query, user_id=user_id, chat_history=chat_history)
             if not result or not result.get("documents"):
                 return "知识库中未找到相关内容。"
-            answer = result.get("answer", "")
             docs = result.get("documents", [])
             max_chars = get_config("knowledge_search_max_chars", 300)
-            # 收集文档来源供 references 事件使用（图片已通过 LLM 回答展示）
+            # 收集文档来源供 references 事件使用
             if refs_list is not None:
                 seen = set()
                 for d in docs:
@@ -79,36 +80,26 @@ class AgentService:
                         if relative not in img_seen:
                             img_seen.add(relative)
                             img_refs_list.append(f"{src} → {base_url}/images/{relative}")
-            if not answer:
-                lines = []
-                for i, doc in enumerate(docs):
-                    src = doc.metadata.get("original_filename", "未知")
-                    page = doc.metadata.get("page", "")
-                    chapter = doc.metadata.get("current_chapter", "")
-                    header = f"[来源: {src}"
-                    if page:
-                        header += f", 第{page}页"
-                    if chapter:
-                        header += f", {chapter}"
-                    header += "]"
-                    lines.append(f"{header}\n{doc.page_content[:max_chars]}")
-                answer = "\n\n".join(lines)
+            # 格式化原始文档内容
+            lines = []
+            for i, doc in enumerate(docs):
+                src = doc.metadata.get("original_filename", "未知")
+                page = doc.metadata.get("page", "")
+                chapter = doc.metadata.get("current_chapter", "")
+                header = f"[来源: {src}"
+                if page:
+                    header += f", 第{page}页"
+                if chapter:
+                    header += f", {chapter}"
+                header += "]"
+                lines.append(f"{header}\n{doc.page_content[:max_chars]}")
+            answer = "\n\n".join(lines)
             # 将图片 Markdown 注入工具返回结果，让 Agent LLM 可以在回答中引用图片
             from app.rag.rag_service import RAGService
             img_md_lines = RAGService._build_image_markdown(docs)
             if img_md_lines:
-                import os
-                base_url = os.getenv("SERVER_BASE_URL", "http://127.0.0.1:8000")
                 answer += "\n\n=== 可用的相关图片（请在回答中包含这些图片） ===\n"
                 answer += "\n".join(img_md_lines)
-            else:
-                sources = []
-                for i, doc in enumerate(docs):
-                    src = doc.metadata.get("original_filename", "未知")
-                    if src not in sources:
-                        sources.append(src)
-                if sources:
-                    answer += f"\n\n📚 参考来源: {', '.join(sources)}"
             return answer
 
         from app.rag.web_search_service import WebSearchService

@@ -105,6 +105,7 @@ vision_max_image_dim: 2048                   # 压缩后最大边长（像素）
 phase1_max_workers: 0                        # 阶段1 并发页面采集线程数，0=自动（CPU核心数×2）
 
 # --- RAG 摘要 ---
+skip_summary: true                           # 是否跳过 LLM 摘要：true=返回原始文档，false=LLM 生成摘要
 summary_max_chars: 800
 fallback_max_chars: 500
 

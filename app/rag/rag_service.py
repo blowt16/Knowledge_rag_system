@@ -19,8 +19,12 @@ class RAGService:
 
     async def search(self, query: str, user_id: str = "",
                      chat_history: list = None, top_k: int = None,
-                     on_chunk=None) -> dict:
-        """RAG 检索。若 on_chunk 回调传入则流式推送 token。"""
+                     on_chunk=None, skip_summary: bool = None) -> dict:
+        """RAG 检索。若 on_chunk 回调传入则流式推送 token。
+
+        skip_summary 默认从 chroma.yaml 读取（默认 true），跳过 LLM 摘要直接返回原始文档。"""
+        if skip_summary is None:
+            skip_summary = get_config("skip_summary", True)
         if top_k is None:
             top_k = get_config("k", 5)
 
@@ -96,7 +100,17 @@ class RAGService:
             summary_lines.append(f"  文档{i+1}[{src}]: {content}...")
         logger.info("【RAG】检索结果汇总:\n" + "\n".join(summary_lines))
 
-        # 步骤5: LLM 摘要 (on_chunk 回调支持流式推送)
+        # 步骤5: LLM 摘要 — skip_summary 时直接返回原始文档，省一次 LLM 调用
+        if skip_summary:
+            answer = self._format_docs(reranked)
+            if on_chunk:
+                await on_chunk(answer)
+            return {
+                "answer": answer, "documents": reranked,
+                "rewritten_query": rewritten_query or query,
+                "chunks": [answer],
+            }
+
         try:
             answer, chunks = await self._generate_summary(
                 query=query, documents=reranked, chat_history=chat_history,
