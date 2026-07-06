@@ -13,6 +13,7 @@ class AgentService:
     @staticmethod
     def _log_agent_refs(text_refs: list, img_refs: list):
         if text_refs:
+            text_refs.sort(key=lambda r: int(r["page"]) if r["page"] else 0)
             labels = [r["label"] for r in text_refs]
             logger.info(f"【Agent】文本参考来源:\n  - " + "\n  - ".join(labels))
         if img_refs:
@@ -285,6 +286,7 @@ class AgentService:
         finally:
             saved_answer = accumulated or ""
             if agent_references:
+                agent_references.sort(key=lambda r: int(r["page"]) if r["page"] else 0)
                 ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {r['label']}" for r in agent_references)
                 saved_answer += ref_text
             logger.debug(f"【Agent】准备持久化: session={session_id}, query_len={len(query)}, answer_len={len(saved_answer)}")
