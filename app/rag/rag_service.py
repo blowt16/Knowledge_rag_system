@@ -181,7 +181,7 @@ class RAGService:
                 if image_paths:
                     img_md = self._build_image_markdown([doc])
                     if img_md:
-                        ctx += "\n\n--- 以下图片来自该段资料，请自然穿插在回答中展示 ---\n" + "\n".join(img_md)
+                        ctx += "\n\n--- 附：该段资料含以下图片（只能引用这些URL，严禁修改或编造） ---\n" + "\n".join(img_md)
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 

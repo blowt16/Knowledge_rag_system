@@ -102,7 +102,7 @@ class AgentService:
             from app.rag.rag_service import RAGService
             img_md_lines = RAGService._build_image_markdown(docs)
             if img_md_lines:
-                answer += "\n\n=== 可用的相关图片 ===\n"
+                answer += "\n\n=== 附：检索结果含以下图片（只能引用这些URL，严禁修改或编造） ===\n"
                 answer += "\n".join(img_md_lines)
             return answer
 
