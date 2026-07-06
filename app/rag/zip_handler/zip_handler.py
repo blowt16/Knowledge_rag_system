@@ -263,6 +263,13 @@ class ZipTaskManager:
         if task_id in self._queues:
             del self._queues[task_id]
 
+    def cancel_all(self):
+        """关闭时取消所有后台处理任务。"""
+        for task_id in list(self.tasks.keys()):
+            self.tasks[task_id]["status"] = "cancelled"
+        self._queues.clear()
+        logger.info(f"[ZipTaskManager] cancelled {len(self.tasks)} tasks")
+
 
 # ============================================================
 # 全局公共复用文档管道

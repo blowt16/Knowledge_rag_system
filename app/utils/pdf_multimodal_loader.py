@@ -995,7 +995,25 @@ async def _process_scan_pdf(
     return documents, degradation
 
 
+_paddleocr_instance = None
+
+
+def _release_paddleocr():
+    global _paddleocr_instance
+    if _paddleocr_instance is not None:
+        try:
+            del _paddleocr_instance
+            _paddleocr_instance = None
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info('[scan_pdf] PaddleOCR instance released, GPU memory cleared')
+        except Exception as e:
+            logger.warning(f'[scan_pdf] Release PaddleOCR failed: {e}')
+
+
 def _init_paddleocr():
+    global _paddleocr_instance
     """初始化 PaddleOCR，不可用时返回 None。
 
     版本要求: paddlepaddle==3.0.0 + paddleocr==2.10.0
@@ -1014,19 +1032,24 @@ def _init_paddleocr():
         except Exception:
             pass
 
+    if _paddleocr_instance is not None:
+        return _paddleocr_instance
+
     try:
         from paddleocr import PaddleOCR
         device = os.getenv("PADDLEOCR_DEVICE", "cpu")
-        return PaddleOCR(
+        _paddleocr_instance = PaddleOCR(
             lang=PADDLEOCR_LANG, use_angle_cls=PADDLEOCR_ANGLE_CLS,
             use_gpu=(device == "gpu"),
             show_log=PADDLEOCR_SHOW_LOG,
         )
+        logger.info("[scan_pdf] PaddleOCR global singleton initialized")
+        return _paddleocr_instance
     except ImportError:
-        logger.warning("【scan_pdf】PaddleOCR 未安装，扫描件文本提取将跳过")
+        logger.warning("[scan_pdf] PaddleOCR not installed")
         return None
     except Exception as e:
-        logger.warning(f"【scan_pdf】PaddleOCR 初始化失败: {e}")
+        logger.warning(f"[scan_pdf] PaddleOCR init failed: {e}")
         return None
 
 

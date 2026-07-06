@@ -52,6 +52,19 @@ class VisionService:
                 self._model = None
         return self._model
 
+    def close(self):
+        """释放 Vision 模型的 httpx 连接池。"""
+        if self._model is not None:
+            try:
+                if hasattr(self._model, "root_client"):
+                    self._model.root_client.close()
+                if hasattr(self._model, "root_async_client"):
+                    self._model.root_async_client.close()
+                logger.info("【视觉服务】httpx 连接池已关闭")
+            except Exception as e:
+                logger.warning(f"【视觉服务】关闭连接池失败: {e}")
+            self._model = None
+
     async def _describe_single(self, image_path: str, max_retries: int = 1) -> tuple[str, str]:
         """带超时和重试的单张图片描述。超时/网络错误重试一次，硬错误不重试。"""
         last_error = None
@@ -193,3 +206,11 @@ def get_vision_service() -> VisionService:
     if _vision_service is None:
         _vision_service = VisionService()
     return _vision_service
+
+
+def close_vision_service():
+    """关闭 VisionService，释放 httpx 连接池。"""
+    global _vision_service
+    if _vision_service is not None:
+        _vision_service.close()
+        _vision_service = None

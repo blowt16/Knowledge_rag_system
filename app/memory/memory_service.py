@@ -44,6 +44,16 @@ class ConversationMemoryService:
             _shared_instance = cls()
         return _shared_instance
 
+    def close(self):
+        """关闭持久 SQLite 连接，清理 WAL 文件。"""
+        if hasattr(self, "_conn") and self._conn is not None:
+            try:
+                self._conn.close()
+                logger.info("【会话记忆】SQLite 连接已关闭")
+            except Exception as e:
+                logger.warning(f"【会话记忆】关闭 SQLite 连接失败: {e}")
+            self._conn = None
+
     def _ensure_tables(self):
         conn = self._conn
         conn.execute("""

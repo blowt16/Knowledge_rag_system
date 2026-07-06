@@ -56,6 +56,13 @@ class SingleUploadTracker:
     def cleanup(self, task_id: str):
         self._queues.pop(task_id, None)
 
+    def cancel_all(self):
+        """关闭时取消所有后台处理任务。"""
+        for task_id in list(self.tasks.keys()):
+            self.tasks[task_id]["status"] = "cancelled"
+        self._queues.clear()
+        logger.info(f"[SingleUploadTracker] cancelled {len(self.tasks)} tasks")
+
     async def _process(self, task_id: str, file_path: Path, filename: str, user_id: str):
         import time
         t_start = time.time()

@@ -111,7 +111,20 @@ class _BackgroundInitManager:
         """优雅关闭，释放所有模型和连接资源。"""
         logger.info("[SHUTDOWN] 开始清理资源...")
 
-        # 1. 清理 ReorderService
+        # 1. 取消文件处理后台任务（防止残留临时文件）
+        try:
+            from app.rag.single_upload_tracker import get_single_upload_tracker
+            tracker = get_single_upload_tracker()
+            tracker.cancel_all()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] SingleUploadTracker 清理失败: {e}")
+        try:
+            from app.router.zip_router import _task_manager
+            _task_manager.cancel_all()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] ZipTaskManager 清理失败: {e}")
+
+        # 2. 清理 ReorderService（CrossEncoder + GPU）
         try:
             from app.rag.reorder_service import ReorderService
             inst = ReorderService._instance
@@ -120,7 +133,7 @@ class _BackgroundInitManager:
         except Exception as e:
             logger.warning(f"[SHUTDOWN] ReorderService 清理失败: {e}")
 
-        # 2. 清理 VectorStoreService
+        # 3. 清理 VectorStoreService（ChromaDB SQLite）
         try:
             from app.rag.vector_store import VectorStoreService
             inst = VectorStoreService._instance
@@ -129,7 +142,22 @@ class _BackgroundInitManager:
         except Exception as e:
             logger.warning(f"[SHUTDOWN] VectorStoreService 清理失败: {e}")
 
-        # 3. 清理 ChatOpenAI httpx 连接池（DEEPSEEK 模式下 primary 为 ChatOpenAI）
+        # 4. 清理 ConversationMemoryService（SQLite 持久连接）
+        try:
+            from app.memory.memory_service import _shared_instance
+            if _shared_instance is not None:
+                _shared_instance.close()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] ConversationMemoryService 清理失败: {e}")
+
+        # 5. 清理 VisionService（httpx 连接池）
+        try:
+            from app.utils.vision_service import close_vision_service
+            close_vision_service()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] VisionService 清理失败: {e}")
+
+        # 6. 清理 ChatOpenAI + Embedding httpx 连接池
         try:
             if self._chat_model is not None:
                 bound = getattr(self._chat_model, "bound", None)
@@ -139,9 +167,27 @@ class _BackgroundInitManager:
                     if hasattr(bound, "root_async_client"):
                         bound.root_async_client.close()
         except Exception as e:
-            logger.warning(f"[SHUTDOWN] ChatModel 清理失败: {e}")
+            logger.warning(f"[SHUTDOWN] ChatModel httpx 清理失败: {e}")
 
-        # 4. 置空引用
+        try:
+            if self._embed_model is not None:
+                inner = getattr(self._embed_model, "_embedding", None)
+                if inner is not None:
+                    if hasattr(inner, "root_client"):
+                        inner.root_client.close()
+                    if hasattr(inner, "root_async_client"):
+                        inner.root_async_client.close()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] EmbedModel httpx 清理失败: {e}")
+
+        # 7. 清理 PaddleOCR（GPU 显存）
+        try:
+            from app.utils.pdf_multimodal_loader import _release_paddleocr
+            _release_paddleocr()
+        except Exception as e:
+            logger.warning(f"[SHUTDOWN] PaddleOCR 清理失败: {e}")
+
+        # 8. 置空引用
         self._chat_model = None
         self._embed_model = None
         logger.info("[SHUTDOWN] 资源清理完成")
