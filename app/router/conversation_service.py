@@ -10,7 +10,7 @@ class ConversationService:
     """会话管理业务逻辑。"""
 
     def __init__(self):
-        self._memory = ConversationMemoryService()
+        self._memory = ConversationMemoryService.get_shared()
 
     def create(self, user_id: str, title: str = "") -> dict:
         session_id = self._memory.create_conversation(user_id, title)

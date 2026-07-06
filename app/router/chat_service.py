@@ -18,7 +18,7 @@ class ChatService:
     """统一对话服务：Agent + RAG 双模式 + 会话管理。"""
 
     def __init__(self):
-        self._memory = ConversationMemoryService()
+        self._memory = ConversationMemoryService.get_shared()
         self._agent_svc = AgentService()
         self._rag_svc = RAGService()
 

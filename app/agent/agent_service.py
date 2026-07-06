@@ -169,7 +169,7 @@ class AgentService:
                           user_id: str = "default_user") -> AsyncIterator[dict]:
         """流式执行 Agent 对话，通过 SSE 推送事件。"""
         from app.memory.memory_service import ConversationMemoryService
-        memory_svc = ConversationMemoryService()
+        memory_svc = ConversationMemoryService.get_shared()
 
         # 手动加载历史消息
         chat_history = memory_svc.load_context(session_id)
