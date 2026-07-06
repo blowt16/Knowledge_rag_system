@@ -101,11 +101,6 @@ class RAGService:
         # 步骤5: LLM 摘要 — skip_summary 时直接返回原始文档，省一次 LLM 调用
         if skip_summary:
             answer = self._format_docs(reranked)
-            img_md_lines = self._build_image_markdown(reranked)
-            if img_md_lines:
-                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
-                answer += img_block
-                logger.info(f"【RAG】图片注入: {len(img_md_lines)} 张\n  " + "\n  ".join(img_md_lines))
             if on_chunk:
                 await on_chunk(answer)
             return {
@@ -186,7 +181,7 @@ class RAGService:
                 if image_paths:
                     img_md = self._build_image_markdown([doc])
                     if img_md:
-                        ctx += "\n\n--- 可用的相关图片（仅使用以下图片，禁止编造不存在页码的链接） ---\n" + "\n".join(img_md)
+                        ctx += "\n\n--- 以下图片来自该段资料，请自然穿插在回答中展示 ---\n" + "\n".join(img_md)
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 
@@ -207,16 +202,6 @@ class RAGService:
                     chunks.append(chunk)
                     if on_chunk:
                         await on_chunk(chunk)
-
-            # LLM 回答后追加图片 Markdown，确保图片始终展示
-            img_md_lines = self._build_image_markdown(documents)
-            if img_md_lines:
-                img_block = "\n\n---\n**📷 相关图片：**\n\n" + "\n\n".join(img_md_lines)
-                answer += img_block
-                chunks.append(img_block)
-                if on_chunk:
-                    await on_chunk(img_block)
-                logger.info(f"【RAG】图片注入: {len(img_md_lines)} 张\n  " + "\n  ".join(img_md_lines))
 
             return answer.strip(), chunks
         except Exception as e:
