@@ -283,8 +283,12 @@ class AgentService:
                 "data": f"处理请求时出错: {str(e)}",
             }
         finally:
-            logger.debug(f"【Agent】准备持久化: session={session_id}, query_len={len(query)}, answer_len={len(accumulated)}")
-            if memory_svc.append_messages(session_id, query, accumulated):
+            saved_answer = accumulated or ""
+            if agent_references:
+                ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {r['label']}" for r in agent_references)
+                saved_answer += ref_text
+            logger.debug(f"【Agent】准备持久化: session={session_id}, query_len={len(query)}, answer_len={len(saved_answer)}")
+            if memory_svc.append_messages(session_id, query, saved_answer):
                 logger.info(f"【Agent】消息持久化成功: session={session_id}")
             else:
                 logger.error(f"【Agent】消息保存失败: session={session_id}")

@@ -139,8 +139,14 @@ class ChatService:
             answer = answer or f"处理失败: {str(e)}"
             yield f"data: {json.dumps({'event': 'error', 'data': answer}, ensure_ascii=False)}\n\n"
         finally:
-            logger.debug(f"【RAG直通】准备持久化: query_len={len(query)}, answer_len={len(answer)}")
-            if self._memory.append_messages(session_id, query, answer or "未找到相关内容"):
+            # 将参考来源追加到 answer，确保历史记录重载时也能看到
+            saved_answer = answer or "未找到相关内容"
+            ref_sources = locals().get("sources", [])
+            if ref_sources:
+                ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {s['label']}" for s in ref_sources)
+                saved_answer += ref_text
+            logger.debug(f"【RAG直通】准备持久化: query_len={len(query)}, answer_len={len(saved_answer)}")
+            if self._memory.append_messages(session_id, query, saved_answer):
                 logger.info(f"【RAG直通】消息持久化成功: session={session_id}")
             else:
                 logger.error(f"【RAG直通】消息保存失败: session={session_id}")
