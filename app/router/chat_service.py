@@ -129,7 +129,7 @@ class ChatService:
                             if relative not in img_seen:
                                 img_seen.add(relative)
                                 img_refs.append(f"{src} → {_base_url}/images/{relative}")
-                    sources.sort(key=lambda s: int(s["page"]) if s["page"] else 0)
+                    sources.sort(key=lambda s: (s.get("source", ""), int(s["page"]) if s["page"] else 0))
                     if sources:
                         logger.info(f"【RAG直通】文本参考来源:\n  - " + "\n  - ".join(s["label"] for s in sources))
                     if img_refs:
