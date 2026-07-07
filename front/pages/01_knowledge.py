@@ -42,6 +42,8 @@ if "toast_message" not in st.session_state:
     st.session_state.toast_message = None
 if "delete_confirm" not in st.session_state:
     st.session_state.delete_confirm = None
+if "degraded_upload_info" not in st.session_state:
+    st.session_state.degraded_upload_info = None
 
 # 在顶层渲染 toast（不依赖 button 回调时机）
 if st.session_state.toast_message:
@@ -102,11 +104,12 @@ if uploaded_file is not None:
                     elif status in ("done", "degraded"):
                         bar.progress(1.0, "完成！")
                         if status == "degraded":
-                            deg = ddata.get("degradation", {})
-                            stage_placeholder.warning(
-                                f"上传成功（部分内容降级）: {uploaded_file.name} ({ddata.get('chunks', 0)} chunks)\n\n"
-                                f"图片描述部分失败: {deg}，文本内容正常入库。可删除后重新上传以修复。"
-                            )
+                            st.session_state.degraded_upload_info = {
+                                "filename": uploaded_file.name,
+                                "md5": ddata.get("md5", ""),
+                                "chunks": ddata.get("chunks", 0),
+                                "degradation": ddata.get("degradation", {}),
+                            }
                         else:
                             stage_placeholder.success(f"上传成功: {uploaded_file.name} ({ddata.get('chunks', 0)} chunks)")
                         refresh_docs()
@@ -302,3 +305,39 @@ def confirm_delete():
 
 if st.session_state.delete_confirm is not None:
     confirm_delete()
+
+
+@st.dialog("⚠️ 文档解析不完整")
+def degraded_upload_dialog():
+    info = st.session_state.degraded_upload_info
+    if not info:
+        st.session_state.degraded_upload_info = None
+        return
+    fn = info.get("filename", "未知文件")
+    chunks = info.get("chunks", 0)
+    deg = info.get("degradation", {})
+    st.write(f"**{fn}** 上传成功，但存在以下问题：")
+    st.warning(
+        f"文本内容已正常入库（共 {chunks} 个片段），"
+        f"但部分图片描述处理失败，详情: {deg}。\n\n"
+        f"建议删除后重新上传以修复缺失的图片描述。"
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("删除并重新上传", type="primary", use_container_width=True):
+            try:
+                delete_document_by_md5(info["md5"], USER_ID)
+                st.success("已删除，请重新上传文件。")
+                refresh_docs()
+                st.session_state.degraded_upload_info = None
+                st.rerun()
+            except Exception as e:
+                st.error(f"删除失败: {e}")
+    with c2:
+        if st.button("暂不处理", use_container_width=True):
+            st.session_state.degraded_upload_info = None
+            st.rerun()
+
+
+if st.session_state.degraded_upload_info is not None:
+    degraded_upload_dialog()
