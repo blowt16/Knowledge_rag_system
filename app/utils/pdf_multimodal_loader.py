@@ -443,11 +443,13 @@ async def _process_text_mix_pdf(
         new_calls = [p for p, _ in unique_uncached]
 
         desc_map: dict[str, str] = {}
-        if new_calls:
+        if new_calls and VL_INCLUDE_EMBEDDED:
             vs = get_vision_service()
             batch_result = await vs.describe_image_batch(new_calls)
             desc_map = batch_result["results"]
             vl_degraded = batch_result.get("degraded", 0)
+        elif new_calls and not VL_INCLUDE_EMBEDDED:
+            logger.info(f"【VL】VL_INCLUDE_EMBEDDED=false, 跳过 {len(new_calls)} 张 VL 描述")
 
         for dup_path, rep_path in dedup_map.items():
             if rep_path in desc_map:
@@ -896,11 +898,13 @@ async def _process_scan_pdf(
         new_calls = [p for p, _ in unique_uncached]
 
         desc_map: dict[str, str] = {}
-        if new_calls:
+        if new_calls and VL_INCLUDE_EMBEDDED:
             vs = get_vision_service()
             batch_result = await vs.describe_image_batch(new_calls)
             desc_map = batch_result["results"]
             vl_degraded = batch_result.get("degraded", 0)
+        elif new_calls and not VL_INCLUDE_EMBEDDED:
+            logger.info(f"【VL】VL_INCLUDE_EMBEDDED=false, 跳过 {len(new_calls)} 张 VL 描述")
 
         for dup_path, rep_path in dedup_map.items():
             if rep_path in desc_map:
