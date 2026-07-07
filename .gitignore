@@ -223,5 +223,8 @@ data/extracted_images/
 data/tmp/
 data/md5_hex_store/
 db/*.db
+db/*.db-wal
+db/*.db-shm
 logs/*.log
+logs/*.log.*
 models/*/
