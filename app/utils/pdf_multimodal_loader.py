@@ -777,7 +777,8 @@ async def _process_scan_pdf(
                 else:
                     # 支路2: 含图片扫描页
                     ocr_text = ""
-                    if ocr is not None and blocks["text_regions"]:
+                    ocr_attempted = ocr is not None and bool(blocks["text_regions"])
+                    if ocr_attempted:
                         text_lines = []
                         for (x, y, w, h) in blocks["text_regions"]:
                             region = page_img[y:y+h, x:x+w]
@@ -808,7 +809,7 @@ async def _process_scan_pdf(
                         page_crop_paths.append((0, img_path, p.parent.name + "/" + p.name))
 
                     return ("image_page", page_num, ocr_text, images_on_page,
-                            blocks["has_images"], page_crop_paths)
+                            blocks["has_images"], page_crop_paths, ocr_attempted)
 
             result = await loop.run_in_executor(executor, _work)
 
@@ -836,8 +837,8 @@ async def _process_scan_pdf(
                         f"PaddleOCR={'成功' if (ocr_text and ocr_text.strip()) else '失败'}"
                     )
                 else:
-                    _, pn, ocr_text, images_on_page, blk_has_images, page_crop_paths = result
-                    if blk_has_images and ocr is not None and not (ocr_text and ocr_text.strip()):
+                    _, pn, ocr_text, images_on_page, blk_has_images, page_crop_paths, ocr_attempted = result
+                    if ocr_attempted and not (ocr_text and ocr_text.strip()):
                         ocr_failed_pages.append(pn)
                     image_pages.append({
                         "page_num": pn, "ocr_text": ocr_text,
