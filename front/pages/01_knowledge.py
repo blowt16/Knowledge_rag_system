@@ -44,6 +44,8 @@ if "delete_confirm" not in st.session_state:
     st.session_state.delete_confirm = None
 if "degraded_upload_info" not in st.session_state:
     st.session_state.degraded_upload_info = None
+if "duplicate_upload_name" not in st.session_state:
+    st.session_state.duplicate_upload_name = None
 
 # 在顶层渲染 toast（不依赖 button 回调时机）
 if st.session_state.toast_message:
@@ -99,7 +101,7 @@ if uploaded_file is not None:
                     if status == "duplicate":
                         bar.empty()
                         stage_placeholder.empty()
-                        st.session_state.toast_message = f"文件已存在，不能重复上传（{uploaded_file.name}）"
+                        st.session_state.duplicate_upload_name = uploaded_file.name
                         st.rerun()
                     elif status in ("done", "degraded"):
                         bar.progress(1.0, "完成！")
@@ -307,6 +309,15 @@ if st.session_state.delete_confirm is not None:
     confirm_delete()
 
 
+@st.dialog("⚠️ 文件已存在")
+def duplicate_upload_dialog():
+    fn = st.session_state.duplicate_upload_name or "未知文件"
+    st.warning(f"**{fn}** 已经上传过，不能重复上传。")
+    if st.button("我知道了", use_container_width=True):
+        st.session_state.duplicate_upload_name = None
+        st.rerun()
+
+
 @st.dialog("⚠️ 文档解析不完整")
 def degraded_upload_dialog():
     info = st.session_state.degraded_upload_info
@@ -338,6 +349,9 @@ def degraded_upload_dialog():
             st.session_state.degraded_upload_info = None
             st.rerun()
 
+
+if st.session_state.duplicate_upload_name is not None:
+    duplicate_upload_dialog()
 
 if st.session_state.degraded_upload_info is not None:
     degraded_upload_dialog()
