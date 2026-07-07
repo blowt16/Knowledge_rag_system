@@ -733,6 +733,7 @@ async def _process_scan_pdf(
     image_pages: list[dict] = []
     all_candidates: list[tuple[str, str]] = []
     text_only_count = [0]  # mutable int for lock
+    ocr_failed_pages: list[int] = []  # OCR 文本提取完全失败的页码
     _lock = threading.Lock()
     sem = asyncio.Semaphore(PHASE1_MAX_WORKERS)
     executor = ThreadPoolExecutor(max_workers=PHASE1_MAX_WORKERS)
@@ -816,7 +817,10 @@ async def _process_scan_pdf(
                 if branch == "text_only":
                     _, pn, ocr_text, _ = result
                     text_only_count[0] += 1
-                    content = ocr_text.strip() if ocr_text and ocr_text.strip() else "[本页扫描文字识别失败]"
+                    ocr_ok = ocr_text and ocr_text.strip()
+                    if not ocr_ok:
+                        ocr_failed_pages.append(pn)
+                    content = ocr_text.strip() if ocr_ok else "[本页扫描文字识别失败]"
                     text_only_docs[pn] = Document(
                         page_content=content,
                         metadata={
@@ -833,6 +837,8 @@ async def _process_scan_pdf(
                     )
                 else:
                     _, pn, ocr_text, images_on_page, blk_has_images, page_crop_paths = result
+                    if blk_has_images and ocr is not None and not (ocr_text and ocr_text.strip()):
+                        ocr_failed_pages.append(pn)
                     image_pages.append({
                         "page_num": pn, "ocr_text": ocr_text,
                         "images_on_page": images_on_page,
@@ -856,15 +862,26 @@ async def _process_scan_pdf(
         *[_process_one_scan_page(pn) for pn in page_nums],
         return_exceptions=True,
     )
-    # 记录逐页异常但不中断整批
+    # 任意页采集异常 → 立即终止，不允许不完整数据入库
     for pn, r in zip(page_nums, results):
         if isinstance(r, BaseException):
-            logger.warning(f"【scan_pdf】第{pn}页采集异常: {r}")
+            executor.shutdown(wait=True)
+            doc.close()
+            raise ValueError(
+                f"【scan_pdf】第{pn}页采集异常: {r}. "
+                f"扫描件文本提取失败，请检查文件后重新上传: {Path(pdf_path).name}"
+            ) from r
 
     text_only_count_val = text_only_count[0]
-    failed_scan = sum(1 for r in results if isinstance(r, BaseException))
     executor.shutdown(wait=True)
     doc.close()
+
+    # OCR 文本提取完全失败的页 → 终止整批，不允许空内容入库
+    if ocr_failed_pages:
+        raise ValueError(
+            f"【scan_pdf】{len(ocr_failed_pages)} 页文本提取完全失败: 页码 {ocr_failed_pages[:10]}{'...' if len(ocr_failed_pages) > 10 else ''}. "
+            f"扫描件 OCR 解析不可靠，请检查文件后重新上传: {Path(pdf_path).name}"
+        )
 
     image_page_count = len(image_pages)
     scan_persisted = sum(len(p["images_on_page"]) for p in image_pages)
