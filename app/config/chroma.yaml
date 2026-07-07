@@ -89,6 +89,7 @@ ocr_adaptive_c: 2                           # 自适应二值化常数
 ocr_denoise_h: 10                           # 降噪强度
 
 # --- PDF 多模态 — PaddleOCR ---
+paddleocr_device: cpu                        # 推理设备 cpu/gpu（Windows pip 包仅 CPU，GPU 需 Linux）
 paddleocr_lang: ch                          # OCR 语言模型
 paddleocr_use_angle_cls: true               # 文字方向分类
 paddleocr_show_log: false                   # PaddleOCR 调试日志

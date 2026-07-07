@@ -1037,7 +1037,7 @@ def _init_paddleocr():
 
     try:
         from paddleocr import PaddleOCR
-        device = os.getenv("PADDLEOCR_DEVICE", "cpu")
+        device = get_config("paddleocr_device", "cpu")
         _paddleocr_instance = PaddleOCR(
             lang=PADDLEOCR_LANG, use_angle_cls=PADDLEOCR_ANGLE_CLS,
             use_gpu=(device == "gpu"),
