@@ -606,14 +606,6 @@ def _crop_chart_regions_from_rects(
     return crops
 
 
-def _crop_chart_regions(
-    doc_fitz, plumber_page, page_num: int, pdf_path: str
-) -> list[str]:
-    """从页面裁切图表/矢量图区域，保存为临时图片。失败时抛异常触发解析失败流程。"""
-    rects = plumber_page.rects or []
-    return _crop_chart_regions_from_rects(doc_fitz, rects, page_num, pdf_path)
-
-
 # ============================================================
 # 分支3: 扫描 PDF — MinerU (langchain-mineru)
 # ============================================================
