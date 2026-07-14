@@ -2,7 +2,7 @@
 
 分支1 text_pdf:    pdfplumber 直接提取，零视觉/GPU
 分支2 text_mix_pdf: pdfplumber 文本+bbox → PyMuPDF 裁切 → 阿里云多模态 VL
-分支3 scan_pdf:    OpenCV 轮廓分割 → PaddleOCR(GPU) + 阿里云多模态 VL
+分支3 scan_pdf:    MinerU (langchain-mineru) 云端解析
 """
 import asyncio
 import os
@@ -27,24 +27,10 @@ DEDUP_HAMMING = get_config("dedup_hamming_distance", 10)
 VL_INCLUDE_EMBEDDED = get_config("vl_include_embedded_images", False)
 CHART_AREA_THRESHOLD = get_config("chart_area_threshold", 5000)
 CHART_MAX_CROPS = get_config("chart_max_crops_per_page", 5)
-CONTOUR_MIN_AREA = get_config("contour_min_area", 500)
-CONTOUR_IMAGE_THRESHOLD = get_config("contour_image_threshold", 5000)
-CONTOUR_IMAGE_MIN_W = get_config("contour_image_min_w", 50)
-CONTOUR_IMAGE_MIN_H = get_config("contour_image_min_h", 50)
 # 图层判定: 忽略小于此尺寸的图片（logo/占位符/追踪像素）
 CLASSIFY_IMAGE_MIN_W = get_config("classify_image_min_w", 30)
 CLASSIFY_IMAGE_MIN_H = get_config("classify_image_min_h", 30)
 RENDER_RESOLUTION = get_config("render_resolution", 2)
-# OpenCV 预处理
-OCR_MORPH_KW = get_config("ocr_morph_kernel_width", 5)
-OCR_MORPH_KH = get_config("ocr_morph_kernel_height", 5)
-OCR_ADAPTIVE_BLOCK = get_config("ocr_adaptive_block_size", 11)
-OCR_ADAPTIVE_C = get_config("ocr_adaptive_c", 2)
-OCR_DENOISE_H = get_config("ocr_denoise_h", 10)
-# PaddleOCR
-PADDLEOCR_LANG = get_config("paddleocr_lang", "ch")
-PADDLEOCR_ANGLE_CLS = get_config("paddleocr_use_angle_cls", True)
-PADDLEOCR_SHOW_LOG = get_config("paddleocr_show_log", False)
 
 
 # ============================================================
@@ -629,68 +615,8 @@ def _crop_chart_regions(
 
 
 # ============================================================
-# 分支3: 扫描 PDF — 双支路
+# 分支3: 扫描 PDF — MinerU (langchain-mineru)
 # ============================================================
-
-def _detect_page_blocks(page_img) -> dict:
-    """OpenCV 轮廓分割：将扫描页分为文字区域和图片区域。
-
-    Returns:
-        {"has_images": bool, "text_regions": [(x,y,w,h),...], "image_regions": [(x,y,w,h),...]}
-    """
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return {"has_images": False, "text_regions": [], "image_regions": []}
-
-    gray = cv2.cvtColor(page_img, cv2.COLOR_RGB2GRAY) if page_img.shape[-1] == 3 else page_img
-    # 二值化
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # 形态学闭运算，连接相邻文字笔画
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (OCR_MORPH_KW, OCR_MORPH_KH))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    # 查找轮廓
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    text_regions = []
-    image_regions = []
-
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
-        if area < CONTOUR_MIN_AREA:
-            continue
-        if area > CONTOUR_IMAGE_THRESHOLD and w > CONTOUR_IMAGE_MIN_W and h > CONTOUR_IMAGE_MIN_H:
-            image_regions.append((x, y, w, h))
-        else:
-            text_regions.append((x, y, w, h))
-
-    # 按 y 坐标排序
-    text_regions.sort(key=lambda r: r[1])
-    image_regions.sort(key=lambda r: r[1])
-
-    return {
-        "has_images": len(image_regions) > 0,
-        "text_regions": text_regions,
-        "image_regions": image_regions,
-    }
-
-
-def _preprocess_text_region(region_img):
-    """OpenCV 预处理文字区块：灰度 → 二值化 → 降噪。"""
-    try:
-        import cv2
-        gray = cv2.cvtColor(region_img, cv2.COLOR_RGB2GRAY) if region_img.shape[-1] == 3 else region_img
-        # 自适应二值化
-        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                        cv2.THRESH_BINARY, OCR_ADAPTIVE_BLOCK, OCR_ADAPTIVE_C)
-        # 降噪
-        denoised = cv2.fastNlMeansDenoising(binary, h=OCR_DENOISE_H)
-        return denoised
-    except ImportError:
-        return region_img
-
 
 async def _process_scan_pdf(
     pdf_path: str,
@@ -701,378 +627,21 @@ async def _process_scan_pdf(
     progress_callback=None,
     page_filter: set | None = None,
 ) -> tuple[list[Document], dict]:
-    """OpenCV 轮廓分割 → 双支路分流。
+    """MinerU 扫描件解析管线 (替代 PaddleOCR)。
 
-    page_filter: 仅处理指定页码集合，None 表示全部页面。
-
-    支路1（纯文字扫描页）：OpenCV 预处理 → PaddleOCR(GPU) → 无 VL 调用
-    支路2（含图片扫描页）：文字块 PaddleOCR + 图片块裁切 → 全局 VL → y 坐标融合
+    委托给 app.utils.mineru_scan_loader.process_scan_pdf_mineru()。
     """
-    try:
-        import cv2
-        import fitz
-        import numpy as np
-    except ImportError as e:
-        raise ImportError(f"必要依赖未安装: {e}")
+    from app.utils.mineru_scan_loader import process_scan_pdf_mineru
 
-    from app.utils.vision_service import get_vision_service
-
-    cache_dir = ""
-    if user_id and md5_hex:
-        from app.utils.path_tool import get_image_dir
-        cache_dir = str(get_image_dir(f"{user_id}/{md5_hex}/_vl_cache"))
-
-    doc = fitz.open(pdf_path)
-    ocr = _init_paddleocr()
-    total_pages = len(doc)
-    crop_dirs: set[Path] = set()
-    scale = RENDER_RESOLUTION
-
-    # === 阶段1: 并发逐页采集，支路1直接OCR，支路2采集VL候选 ===
-    text_only_docs: dict[int, Document] = {}
-    image_pages: list[dict] = []
-    all_candidates: list[tuple[str, str]] = []
-    text_only_count = [0]  # mutable int for lock
-    ocr_failed_pages: list[int] = []  # OCR 文本提取完全失败的页码
-    _lock = threading.Lock()
-    sem = asyncio.Semaphore(PHASE1_MAX_WORKERS)
-    executor = ThreadPoolExecutor(max_workers=PHASE1_MAX_WORKERS)
-    loop = asyncio.get_running_loop()
-
-    page_nums = [
-        pn for pn in range(1, total_pages + 1)
-        if page_filter is None or pn in page_filter
-    ]
-
-    async def _process_one_scan_page(page_num: int):
-        async with sem:
-            def _work():
-                page = doc[page_num - 1]
-                images_on_page = page_image_map.get(page_num, [])
-
-                pix = page.get_pixmap(
-                    matrix=fitz.Matrix(scale, scale), colorspace=fitz.csRGB
-                )
-                page_img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height, pix.width, 3
-                )
-
-                blocks = _detect_page_blocks(page_img)
-                has_image_blocks = blocks["has_images"] or len(images_on_page) > 0
-
-                if not has_image_blocks:
-                    # 支路1: 纯文字扫描页
-                    ocr_text = ""
-                    if ocr is not None:
-                        preprocessed = _preprocess_text_region(page_img)
-                        results = ocr.ocr(preprocessed, cls=True)
-                        if results and results[0]:
-                            lines = []
-                            for line in results[0]:
-                                t = line[1][0] if len(line) > 1 else ""
-                                if t.strip():
-                                    lines.append(t.strip())
-                            ocr_text = "\n".join(lines)
-                    return ("text_only", page_num, ocr_text, None)
-                else:
-                    # 支路2: 含图片扫描页
-                    ocr_text = ""
-                    ocr_attempted = ocr is not None and bool(blocks["text_regions"])
-                    if ocr_attempted:
-                        text_lines = []
-                        for (x, y, w, h) in blocks["text_regions"]:
-                            region = page_img[y:y+h, x:x+w]
-                            preprocessed = _preprocess_text_region(region)
-                            results = ocr.ocr(preprocessed, cls=True)
-                            if results and results[0]:
-                                for line in results[0]:
-                                    t = line[1][0] if len(line) > 1 else ""
-                                    if t.strip():
-                                        text_lines.append(t.strip())
-                            ocr_text = "\n".join(text_lines)
-
-                    page_crop_paths: list[tuple[int, str, str]] = []
-                    for (x, y, w, h) in blocks["image_regions"]:
-                        try:
-                            region = page_img[y:y+h, x:x+w]
-                            cdir = Path(pdf_path).parent / f"_scan_crops_p{page_num}"
-                            cdir.mkdir(exist_ok=True)
-                            cpath = cdir / f"img_{x}_{y}.png"
-                            cv2.imwrite(str(cpath), cv2.cvtColor(region, cv2.COLOR_RGB2BGR))
-                            cname = cpath.parent.name + "/" + cpath.name
-                            page_crop_paths.append((y, str(cpath), cname))
-                        except Exception:
-                            continue
-
-                    for img_path in images_on_page:
-                        p = Path(img_path)
-                        page_crop_paths.append((0, img_path, p.parent.name + "/" + p.name))
-
-                    return ("image_page", page_num, ocr_text, images_on_page,
-                            blocks["has_images"], page_crop_paths, ocr_attempted)
-
-            result = await loop.run_in_executor(executor, _work)
-
-            branch = result[0]
-            with _lock:
-                if branch == "text_only":
-                    _, pn, ocr_text, _ = result
-                    text_only_count[0] += 1
-                    ocr_ok = ocr_text and ocr_text.strip()
-                    if not ocr_ok:
-                        ocr_failed_pages.append(pn)
-                    content = ocr_text.strip() if ocr_ok else "[本页扫描文字识别失败]"
-                    text_only_docs[pn] = Document(
-                        page_content=content,
-                        metadata={
-                            "source": file_path, "page": pn,
-                            "has_images": False,
-                            "ocr_engine": "paddleocr_gpu" if ocr is not None else "none",
-                            "scan_branch": "text_only",
-                            "toc": "[]", "chapter_count": 0,
-                        },
-                    )
-                    logger.info(
-                        f"【scan_pdf】第{pn}页 → 支路1(纯文字): "
-                        f"PaddleOCR={'成功' if (ocr_text and ocr_text.strip()) else '失败'}"
-                    )
-                else:
-                    _, pn, ocr_text, images_on_page, blk_has_images, page_crop_paths, ocr_attempted = result
-                    if ocr_attempted and not (ocr_text and ocr_text.strip()):
-                        ocr_failed_pages.append(pn)
-                    image_pages.append({
-                        "page_num": pn, "ocr_text": ocr_text,
-                        "images_on_page": images_on_page,
-                        "blocks_has_images": blk_has_images,
-                        "crop_paths": page_crop_paths,
-                    })
-                    for _, cp, cp_name in page_crop_paths:
-                        all_candidates.append((cp, cp_name))
-                    # 收集 crop_dirs
-                    for _, cp, _ in page_crop_paths:
-                        parent = Path(cp).parent
-                        if "_scan_crops_p" in str(parent):
-                            crop_dirs.add(parent)
-
-            if progress_callback:
-                done = len(text_only_docs) + len(image_pages)
-                await progress_callback("loading",
-                    f"扫描采集 ({done}/{total_pages})...")
-
-    results = await asyncio.gather(
-        *[_process_one_scan_page(pn) for pn in page_nums],
-        return_exceptions=True,
+    return await process_scan_pdf_mineru(
+        pdf_path=pdf_path,
+        file_path=file_path,
+        page_image_map=page_image_map,
+        user_id=user_id,
+        md5_hex=md5_hex,
+        progress_callback=progress_callback,
+        page_filter=page_filter,
     )
-    # 任意页采集异常 → 立即终止，不允许不完整数据入库
-    for pn, r in zip(page_nums, results):
-        if isinstance(r, BaseException):
-            executor.shutdown(wait=True)
-            doc.close()
-            raise ValueError(
-                f"【scan_pdf】第{pn}页采集异常: {r}. "
-                f"扫描件文本提取失败，请检查文件后重新上传: {Path(pdf_path).name}"
-            ) from r
-
-    text_only_count_val = text_only_count[0]
-    executor.shutdown(wait=True)
-    doc.close()
-
-    # OCR 文本提取完全失败的页 → 终止整批，不允许空内容入库
-    if ocr_failed_pages:
-        raise ValueError(
-            f"【scan_pdf】{len(ocr_failed_pages)} 页文本提取完全失败: 页码 {ocr_failed_pages[:10]}{'...' if len(ocr_failed_pages) > 10 else ''}. "
-            f"扫描件 OCR 解析不可靠，请检查文件后重新上传: {Path(pdf_path).name}"
-        )
-
-    image_page_count = len(image_pages)
-    scan_persisted = sum(len(p["images_on_page"]) for p in image_pages)
-    scan_crops = sum(len(p["crop_paths"]) for p in image_pages)
-    logger.info(
-        f"【scan_pdf-阶段1】完成: {text_only_count_val + image_page_count} 页, "
-        f"失败 {failed_scan} 页 | "
-        f"支路1纯文字={text_only_count_val}, 支路2含图片={image_page_count} | "
-        f"图片: 嵌入={scan_persisted}, 裁切={scan_crops}"
-    )
-
-    # === 阶段2: 全局 pHash 去重 + 查缓存 + 一次并发 VL 调用 ===
-    vl_cache = _load_vl_cache(cache_dir) if cache_dir else {}
-
-    uncached: list[tuple[str, str]] = []
-    path_to_desc: dict[str, str] = {}
-    for path, key in all_candidates:
-        if key in vl_cache:
-            path_to_desc[path] = vl_cache[key]
-        else:
-            uncached.append((path, key))
-
-    cache_hits = len(all_candidates) - len(uncached)
-    if cache_hits > 0:
-        logger.info(f"【VL缓存】命中 {cache_hits} 张，剩余 {len(uncached)} 张需调用")
-
-    new_calls: list[str] = []
-    vl_degraded = 0
-    if uncached:
-        unique_uncached, dedup_map = _global_phash_dedup(uncached)
-        new_calls = [p for p, _ in unique_uncached]
-
-        desc_map: dict[str, str] = {}
-        if new_calls and VL_INCLUDE_EMBEDDED:
-            vs = get_vision_service()
-            batch_result = await vs.describe_image_batch(new_calls)
-            desc_map = batch_result["results"]
-            vl_degraded = batch_result.get("degraded", 0)
-        elif new_calls and not VL_INCLUDE_EMBEDDED:
-            logger.info(f"【VL】VL_INCLUDE_EMBEDDED=false, 跳过 {len(new_calls)} 张 VL 描述")
-
-        for dup_path, rep_path in dedup_map.items():
-            if rep_path in desc_map:
-                desc_map[dup_path] = desc_map[rep_path]
-
-        path_to_desc.update(desc_map)
-
-        if cache_dir and any(desc_map.values()):
-            _save_vl_cache(cache_dir, desc_map)
-
-    new_desc = len([d for d in path_to_desc.values() if d])
-
-    # === 阶段3: 组装 Document（支路1已完成 + 支路2 y坐标融合）===
-    documents: list[Document] = []
-    degraded_pages = 0
-
-    for page_num in sorted(text_only_docs):
-        documents.append(text_only_docs[page_num])
-
-    for ip in image_pages:
-        page_num = ip["page_num"]
-        ocr_text = ip["ocr_text"]
-        images_on_page = ip["images_on_page"]
-        blocks_has_images = ip["blocks_has_images"]
-
-        vl_parts: list[tuple[int, str]] = []
-        page_degraded_images = 0
-        total_crop_images = len(ip["crop_paths"])
-        for y, path, _ in ip["crop_paths"]:
-            desc = path_to_desc.get(path, "")
-            if desc:
-                vl_parts.append((y, f"[图片描述]: {desc}"))
-            else:
-                page_degraded_images += 1
-
-        page_degraded = page_degraded_images > 0
-        if page_degraded:
-            degraded_pages += 1
-
-        all_parts = []
-        if ocr_text:
-            all_parts.append((0, ocr_text))
-        all_parts.extend(vl_parts)
-        all_parts.sort(key=lambda p: p[0])
-        content = "\n\n".join(p[1] for p in all_parts)
-
-        if not content.strip():
-            content = "[本页扫描图像识别失败]"
-
-        meta = {
-            "source": file_path, "page": page_num,
-            "has_images": len(images_on_page) > 0 or blocks_has_images,
-            "ocr_engine": "paddleocr_gpu" if ocr is not None else "none",
-            "scan_branch": "text_and_images",
-            "toc": "[]", "chapter_count": 0,
-        }
-        if images_on_page:
-            meta["image_paths"] = images_on_page
-        if page_degraded:
-            meta["degraded"] = True
-            meta["degraded_images"] = page_degraded_images
-        documents.append(Document(page_content=content, metadata=meta))
-        logger.info(
-            f"【scan_pdf】第{page_num}页 → 支路2(含图片): "
-            f"VL描述={len(vl_parts)}{', 降级=' + str(page_degraded_images) + '张' if page_degraded else ''}"
-        )
-
-    documents.sort(key=lambda d: d.metadata.get("page", 0))
-
-    for d in crop_dirs:
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-        except Exception:
-            pass
-
-    if not documents:
-        raise ValueError(f"扫描 PDF 解析结果为空: {Path(pdf_path).name}")
-
-    degradation = {}
-    if vl_degraded > 0:
-        degradation["vl_timeouts"] = vl_degraded
-    if degraded_pages > 0:
-        degradation["degraded_pages"] = degraded_pages
-
-    logger.info(
-        f"【scan_pdf】完成: {len(documents)} 页 "
-        f"(支路1纯文字={text_only_count_val}, 支路2含图片={image_page_count}), "
-        f"VL图片={len(all_candidates)}, 缓存命中={cache_hits}, "
-        f"去重后调用={len(new_calls)}, 有效描述={new_desc}"
-        + (f", 降级={degraded_pages}页" if degraded_pages > 0 else "")
-    )
-    return documents, degradation
-
-
-_paddleocr_instance = None
-
-
-def _release_paddleocr():
-    global _paddleocr_instance
-    if _paddleocr_instance is not None:
-        try:
-            del _paddleocr_instance
-            _paddleocr_instance = None
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            logger.info('[scan_pdf] PaddleOCR instance released, GPU memory cleared')
-        except Exception as e:
-            logger.warning(f'[scan_pdf] Release PaddleOCR failed: {e}')
-
-
-def _init_paddleocr():
-    global _paddleocr_instance
-    """初始化 PaddleOCR，不可用时返回 None。
-
-    版本要求: paddlepaddle==3.0.0 + paddleocr==2.10.0
-    Windows: 需预加载 torch shm.dll + 禁用 OneDNN
-    """
-    # Windows 兼容：预加载 torch shm.dll + 禁用 OneDNN（必须在 import paddle 前设置）
-    if os.name == "nt":
-        os.environ.setdefault("FLAGS_use_mkldnn", "0")
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-        try:
-            import ctypes
-            import torch
-            shm_path = os.path.join(os.path.dirname(torch.__file__), "lib", "shm.dll")
-            if os.path.isfile(shm_path):
-                ctypes.CDLL(shm_path)
-        except Exception:
-            pass
-
-    if _paddleocr_instance is not None:
-        return _paddleocr_instance
-
-    try:
-        from paddleocr import PaddleOCR
-        device = get_config("paddleocr_device", "cpu")
-        _paddleocr_instance = PaddleOCR(
-            lang=PADDLEOCR_LANG, use_angle_cls=PADDLEOCR_ANGLE_CLS,
-            use_gpu=(device == "gpu"),
-            show_log=PADDLEOCR_SHOW_LOG,
-        )
-        logger.info("[scan_pdf] PaddleOCR global singleton initialized")
-        return _paddleocr_instance
-    except ImportError:
-        logger.warning("[scan_pdf] PaddleOCR not installed")
-        return None
-    except Exception as e:
-        logger.warning(f"[scan_pdf] PaddleOCR init failed: {e}")
-        return None
 
 
 # ============================================================

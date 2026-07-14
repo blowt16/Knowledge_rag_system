@@ -180,14 +180,7 @@ class _BackgroundInitManager:
         except Exception as e:
             logger.warning(f"[SHUTDOWN] EmbedModel httpx 清理失败: {e}")
 
-        # 7. 清理 PaddleOCR（GPU 显存）
-        try:
-            from app.utils.pdf_multimodal_loader import _release_paddleocr
-            _release_paddleocr()
-        except Exception as e:
-            logger.warning(f"[SHUTDOWN] PaddleOCR 清理失败: {e}")
-
-        # 8. 置空引用
+        # 7. 置空引用
         self._chat_model = None
         self._embed_model = None
         logger.info("[SHUTDOWN] 资源清理完成")
