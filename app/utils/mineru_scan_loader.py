@@ -58,6 +58,7 @@ async def process_scan_pdf_mineru(
         loader = MinerULoader(**loader_kwargs)
         docs = loader.load()
     except Exception as e:
+        logger.warning(f"【scan_pdf】MinerU 解析异常: {e}")
         raise ValueError(
             f"【scan_pdf】MinerU 解析失败: {e}. "
             f"请检查文件后重新上传: {pdf_name}"
@@ -68,7 +69,7 @@ async def process_scan_pdf_mineru(
             f"【scan_pdf】MinerU 解析结果为空: {pdf_name}"
         )
 
-    # 补充元数据 + 过滤页码
+    # 补充元数据 + 过滤页码 + 逐页日志
     processed = []
     for doc in docs:
         page_num = doc.metadata.get("page", 0)
@@ -85,6 +86,11 @@ async def process_scan_pdf_mineru(
         })
         if images_on_page:
             doc.metadata["image_paths"] = images_on_page
+        # 逐页日志 (与旧 PaddleOCR 格式一致)
+        if doc.page_content.strip():
+            logger.info(f"【scan_pdf】第{page_num}页 MinerU 成功")
+        else:
+            logger.warning(f"【scan_pdf】第{page_num}页 MinerU 无结果")
         processed.append(doc)
 
     if not processed:
