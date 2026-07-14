@@ -96,13 +96,16 @@ class ChatService:
                 else:
                     if not answer:
                         yield f"data: {json.dumps({'event': 'token', 'data': answer}, ensure_ascii=False)}\n\n"
-                    # 参考资料来源（章节溯源，图片已通过 LLM 回答展示）
+                    # 参考资料来源（章节溯源 + 图片溯源）
                     sources = []
                     seen = set()
+                    source_images: dict[str, list[str]] = {}  # label → image URLs
                     img_refs = []
                     img_seen = set()
                     from app.utils.path_tool import get_server_url
                     _base_url = get_server_url()
+                    from app.config.loader import get_config as _cfg
+                    _img_prefix = _cfg("image_extract_dir", "extracted_images") + "/"
                     for d in documents:
                         src = d.metadata.get("original_filename", "未知")
                         page = d.metadata.get("page", "")
@@ -120,15 +123,20 @@ class ChatService:
                                 "page": str(page) if page else "",
                                 "chapter": chapter or "",
                             })
+                            source_images[label] = []
+                        # 收集该文档的图片
                         for img_path in d.metadata.get("image_paths", []):
                             relative = img_path.replace("\\", "/")
-                            from app.config.loader import get_config as _cfg
-                            prefix = _cfg("image_extract_dir", "extracted_images") + "/"
-                            if relative.startswith(prefix):
-                                relative = relative[len(prefix):]
+                            if relative.startswith(_img_prefix):
+                                relative = relative[len(_img_prefix):]
                             if relative not in img_seen:
                                 img_seen.add(relative)
-                                img_refs.append(f"{src} → {_base_url}/images/{relative}")
+                                img_url = f"{_base_url}/images/{relative}"
+                                img_refs.append(f"{src} → {img_url}")
+                                source_images.setdefault(label, []).append(img_url)
+                    # 将图片关联到对应的 source
+                    for s in sources:
+                        s["images"] = source_images.get(s["label"], [])
                     sources.sort(key=lambda s: (s.get("source", ""), int(s["page"]) if s["page"] else 0))
                     if sources:
                         logger.info(f"【RAG直通】文本参考来源:\n  - " + "\n  - ".join(s["label"] for s in sources))

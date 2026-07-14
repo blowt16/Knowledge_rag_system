@@ -48,8 +48,12 @@ class AgentService:
                 return "知识库中未找到相关内容。"
             docs = result.get("documents", [])
             max_chars = get_config("chunk_size", 500)
-            # 收集文档来源供 references 事件使用
+            # 收集文档来源供 references 事件使用（含图片溯源）
             if refs_list is not None:
+                from app.utils.path_tool import get_server_url
+                base_url = get_server_url()
+                from app.config.loader import get_config as _cfg
+                _img_prefix = _cfg("image_extract_dir", "extracted_images") + "/"
                 seen = set()
                 for d in docs:
                     src = d.metadata.get("original_filename", "未知")
@@ -60,6 +64,13 @@ class AgentService:
                         label += f" (第{page}页)"
                     if chapter:
                         label += f" [{chapter}]"
+                    # 收集该文档的图片URL
+                    doc_images = []
+                    for img_path in d.metadata.get("image_paths", []):
+                        relative = img_path.replace("\\", "/")
+                        if relative.startswith(_img_prefix):
+                            relative = relative[len(_img_prefix):]
+                        doc_images.append(f"{base_url}/images/{relative}")
                     if label not in seen:
                         seen.add(label)
                         refs_list.append({
@@ -67,7 +78,18 @@ class AgentService:
                             "source": src,
                             "page": str(page) if page else "",
                             "chapter": chapter or "",
+                            "images": doc_images,
                         })
+                    else:
+                        # 同一来源的多个 chunk → 合并图片
+                        for entry in refs_list:
+                            if entry.get("label") == label:
+                                existing = set(entry.get("images", []))
+                                for img in doc_images:
+                                    if img not in existing:
+                                        entry["images"].append(img)
+                                        existing.add(img)
+                                break
             # 收集图片引用供日志使用
             if img_refs_list is not None:
                 from app.utils.path_tool import get_server_url
