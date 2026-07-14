@@ -141,7 +141,7 @@ def _extract_loader_error(loader_errors: list[str]) -> str:
         (r"不支持的文件格式|格式不支持", True),
         (r"解析结果为空|提取结果为空|加载内容为空", True),
         (r"无法打开|已加密|密码", True),
-        (r"pdfplumber|PyMuPDF|fitz|opencv", True),
+        (r"pdfplumber|PyMuPDF|fitz", True),
     ]
     for err in loader_errors:
         for pattern, _ in patterns:
