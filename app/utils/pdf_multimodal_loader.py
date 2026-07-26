@@ -655,7 +655,7 @@ async def load_pdf_async(
 ) -> tuple[list[Document], dict]:
     """PDF 多模态三分支统一入口（异步）。
 
-    流程: 加密检测 → 图片提取持久化 → 图层判定 → 分支路由
+    流程: 加密检测 → 图层判定 → 图片提取（跳过扫描页） → 分支路由
     返回: (documents, degradation) — degradation 为空 dict 表示完美解析
     """
     name = Path(file_path).name
@@ -679,19 +679,27 @@ async def load_pdf_async(
     except Exception as e:
         raise ValueError(f"PDF 文件无法打开（可能已损坏）: {e}")
 
-    # 1. 提取内嵌图片并持久化
-    await _push("extracting", "提取内嵌图片…")
-    from app.utils.image_extractor import extract_images_from_pdf
-    page_image_map = extract_images_from_pdf(file_path, user_id, md5_hex)
-
-    # 2. 图层判定
+    # 1. 图层判定（先分类，确定哪些页是扫描件）
     await _push("classifying", "判定 PDF 图层类型…")
     info = judge_pdf_type(file_path)
     pdf_type = info["pdf_type"]
     total_page = info["total_page"]
+    page_types = info.get("page_types", [])
+
+    # 扫描件页面：PyMuPDF 提取的是整页位图，应跳过（MinerU 会提取页内子图）
+    scan_pages: set[int] = set()
+    for i, pt in enumerate(page_types, start=1):
+        if pt == "scan_pdf":
+            scan_pages.add(i)
+
+    # 2. 提取内嵌图片（跳过扫描件页面）
+    await _push("extracting", "提取内嵌图片…")
+    from app.utils.image_extractor import extract_images_from_pdf
+    page_image_map = extract_images_from_pdf(
+        file_path, user_id, md5_hex, skip_pages=scan_pages if scan_pages else None,
+    )
 
     # 3. 按类型分支处理
-    page_types = info.get("page_types", [])
     loop = asyncio.get_running_loop()
 
     degradation: dict[str, int] = {}

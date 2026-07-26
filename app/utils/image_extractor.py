@@ -6,10 +6,18 @@ from app.utils.log_tool import get_logger
 logger = get_logger(__name__)
 
 
-def extract_images_from_pdf(pdf_path: str, user_id: str, pdf_md5: str) -> dict[int, list[str]]:
+def extract_images_from_pdf(
+    pdf_path: str,
+    user_id: str,
+    pdf_md5: str,
+    skip_pages: set[int] | None = None,
+) -> dict[int, list[str]]:
     """从 PDF 提取所有内嵌图片，持久化到 extracted_images/ 目录。
 
     存储路径: data/extracted_images/{user_id}/{md5}/p{page_num}_i{img_idx}.{ext}
+
+    Args:
+        skip_pages: 要跳过的页码集合（1-indexed），扫描件页面提取的是整页位图，应跳过。
 
     Returns:
         {页码: [相对图片路径列表]}，路径相对于 data/ 目录
@@ -36,6 +44,8 @@ def extract_images_from_pdf(pdf_path: str, user_id: str, pdf_md5: str) -> dict[i
         return page_image_map
 
     for page_num in range(1, len(doc) + 1):
+        if skip_pages and page_num in skip_pages:
+            continue
         page = doc[page_num - 1]
         images = page.get_images(full=True)
 
