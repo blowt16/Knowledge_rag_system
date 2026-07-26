@@ -71,7 +71,7 @@ class VectorStoreService:
                 else:
                     ids.append(f"{doc.metadata.get('md5', 'unknown')}_{i}")
             self.get_store().add_documents(documents, ids=ids)
-            logger.debug(f"【向量数据库】已入库 {len(documents)} 条文档")
+            logger.info(f"【向量数据库】成功向量化 + 入库 {len(documents)} 条 chunk")
 
     def similarity_search(self, query: str, user_id: str, k: int = None) -> list:
         """向量相似度检索，按 user_id 隔离 + 低于阈值过滤。"""

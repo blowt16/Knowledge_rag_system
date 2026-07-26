@@ -110,7 +110,10 @@ class ChunkBatchBuffer:
                     logger.error(f"【批量嵌入】MD5 保存失败 {filename}: {e}")
 
         self._total_flushed += batch_len
-        logger.info(f"【批量嵌入】刷批完成: {batch_len} chunks, 累计 {self._total_flushed} chunks")
+        logger.info(
+            f"【批量嵌入】本批 {batch_len} 条成功入库, "
+            f"累计 {self._total_flushed} 条 chunk 已入库"
+        )
         time.sleep(self._sleep_ms / 1000.0)
         return True
 
