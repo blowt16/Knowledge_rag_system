@@ -61,15 +61,16 @@ class ChunkBatchBuffer:
         return has_any_failure
 
     def final_flush(self) -> bool:
-        """强制刷出缓冲内所有剩余 chunk（尾批）。返回 True 表示全部成功。"""
+        """强制刷出缓冲内所有剩余 chunk（尾批），循环直到 buffer 清空。返回 True 表示全部成功。"""
         has_failure = False
-        with self._lock:
-            if not self._buffer:
-                return not self.has_failures
-            batch, batch_md5s = self._extract_batch()
-        if batch:
-            if not self._flush(batch, batch_md5s):
-                has_failure = True
+        while True:
+            with self._lock:
+                if not self._buffer:
+                    break
+                batch, batch_md5s = self._extract_batch()
+            if batch:
+                if not self._flush(batch, batch_md5s):
+                    has_failure = True
         return not self.has_failures and not has_failure
 
     def _should_flush(self) -> bool:
