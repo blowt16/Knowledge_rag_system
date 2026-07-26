@@ -150,8 +150,13 @@ def _build_documents(
 
     for idx, img in enumerate(images):
         try:
+            # 只保留 content_list 中引用的图片（image/table 块的 img_path），
+            # 过滤 MinerU 提取但未在文本中引用的背景图/装饰元素，节省磁盘空间
+            page_num = img_path_to_page.get(img.path)
+            if page_num is None:
+                continue
+
             ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "png"
-            page_num = img_path_to_page.get(img.path, 1)
 
             # 过滤 logo/无意义小图
             try:
@@ -174,6 +179,14 @@ def _build_documents(
             image_counts[page_num] = image_counts.get(page_num, 0) + 1
         except OSError as e:
             logger.warning(f"【scan_pdf】图片{idx}({img.name})保存失败: {e}")
+
+    saved = len(image_map)
+    skipped = len(images) - saved
+    if skipped > 0:
+        logger.info(
+            f"【scan_pdf】图片过滤: {saved}/{len(images)} 张已保存"
+            + (f", 跳过 {skipped} 张未引用图片" if skipped else "")
+        )
 
     # 逐页组装 Document
     documents: list[Document] = []
