@@ -112,7 +112,7 @@ async def upload_single_stream(
 
 @knowledge_router.get("/single/task/{task_id}/stream")
 async def stream_single_progress(task_id: str):
-    """SSE 流式推送单文件处理进度。"""
+    """SSE 流式推送单文件处理进度（空闲超时可重连）。"""
     q = _tracker.get_stream(task_id)
     if q is None:
         raise AppException(message="任务不存在或已过期", code=404)
@@ -120,15 +120,15 @@ async def stream_single_progress(task_id: str):
     async def event_generator():
         try:
             while True:
-                timeout = int(get_config("sse_stream_timeout", 600))
+                timeout = int(get_config("sse_stream_timeout", 1200))
                 event = await asyncio.wait_for(q.get(), timeout=timeout)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event.get("event") in ("done",):
+                    _tracker.cleanup(task_id)
                     break
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'event': 'error', 'data': '任务超时'})}\n\n"
-        finally:
-            _tracker.cleanup(task_id)
+            # 空闲超时 ≠ 解析失败，通知前端重连，不清理队列
+            yield f"data: {json.dumps({'event': 'timeout', 'data': '处理时间较长，正在重连…'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -139,3 +139,17 @@ async def stream_single_progress(task_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@knowledge_router.get("/single/task/{task_id}")
+async def get_single_task_status(task_id: str):
+    """查询单文件任务状态（轮询兜底）。"""
+    task = _tracker.get_task(task_id)
+    if task is None:
+        raise AppException(message="任务不存在或已过期", code=404)
+    return success_response({
+        "task_id": task_id,
+        "status": task.get("status", "unknown"),
+        "filename": task.get("filename", ""),
+        "stage": task.get("stage", ""),
+    })

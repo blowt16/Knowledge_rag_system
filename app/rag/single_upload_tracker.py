@@ -53,6 +53,10 @@ class SingleUploadTracker:
     def get_stream(self, task_id: str) -> asyncio.Queue | None:
         return self._queues.get(task_id)
 
+    def get_task(self, task_id: str) -> dict | None:
+        """获取任务状态信息（用于前端轮询兜底）。"""
+        return self.tasks.get(task_id)
+
     def cleanup(self, task_id: str):
         self._queues.pop(task_id, None)
 

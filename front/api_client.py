@@ -101,8 +101,13 @@ def upload_document_stream(file_content: bytes, filename: str, user_id: str = US
     return r.json()["data"]["task_id"]
 
 
-def _stream_sse_with_retry(url: str, timeout: int) -> Generator[dict, None, None]:
-    """SSE 流式读取，超时/网络错误自动重连。"""
+def _stream_sse_with_retry(
+    url: str, timeout: int, poll_url: str | None = None,
+) -> Generator[dict, None, None]:
+    """SSE 流式读取，超时/网络错误自动重连，后端 timeout 事件也触发重连。
+
+    重连耗尽后降级为轮询 poll_url（如果提供）。
+    """
     last_exception = None
     for attempt in range(_SSE_MAX_RETRIES):
         try:
@@ -113,24 +118,65 @@ def _stream_sse_with_retry(url: str, timeout: int) -> Generator[dict, None, None
                     continue
                 data_str = line.removeprefix("data: ")
                 try:
-                    yield json.loads(data_str)
+                    event = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-            return  # 正常结束
+                # 后端空闲超时 → 重连，不当作错误
+                if event.get("event") == "timeout":
+                    if attempt < _SSE_MAX_RETRIES - 1:
+                        break  # 跳出 iter_lines → 外层 for 循环重试
+                    yield event  # 最后一次，传给调用方处理
+                    return
+                yield event
+                if event.get("event") in ("done", "error"):
+                    return
+            else:
+                return  # resp.iter_lines 正常结束
         except (requests.ReadTimeout, requests.ConnectionError, requests.Timeout) as e:
             last_exception = e
-            if attempt < _SSE_MAX_RETRIES - 1:
-                time.sleep(_SSE_RETRY_DELAY)
         except Exception:
             raise
-    if last_exception:
+        if attempt < _SSE_MAX_RETRIES - 1:
+            time.sleep(_SSE_RETRY_DELAY)
+
+    # SSE 重连全部失败 → 降级为轮询
+    if poll_url:
+        yield from _poll_task_status(poll_url)
+    elif last_exception:
         raise last_exception
 
 
+def _poll_task_status(poll_url: str, interval: int = 5, max_wait: int = 1800) -> Generator[dict, None, None]:
+    """轮询任务状态（SSE 重连失败后的兜底）。"""
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        try:
+            r = requests.get(poll_url, timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status()
+            data = r.json().get("data", {})
+            status = data.get("status", "unknown")
+            if status in ("done", "degraded"):
+                yield {"event": "stage", "data": f"处理完成 ({data.get('filename', '')})", "stage": "embedding"}
+                yield {"event": "done", "data": {"status": status, "filename": data.get("filename", ""), "chunks": 0}}
+                return
+            elif status == "failed":
+                yield {"event": "error", "data": "文件解析失败，请重试"}
+                return
+            elif status == "duplicate":
+                yield {"event": "done", "data": {"status": "duplicate"}}
+                return
+            yield {"event": "stage", "data": f"⏳ 仍在处理中… ({data.get('stage', '')})", "stage": "loading"}
+        except Exception:
+            pass
+        time.sleep(interval)
+    yield {"event": "error", "data": "处理超时，请稍后重试或联系管理员"}
+
+
 def stream_single_progress(task_id: str) -> Generator[dict, None, None]:
-    """SSE 流式获取单文件处理进度（超时自动重连）。"""
+    """SSE 流式获取单文件处理进度，超时自动重连，重连失败降级轮询。"""
     url = f"{API_BASE_URL}/knowledge/single/task/{task_id}/stream"
-    yield from _stream_sse_with_retry(url, SSE_UPLOAD_TIMEOUT)
+    poll_url = f"{API_BASE_URL}/knowledge/single/task/{task_id}"
+    yield from _stream_sse_with_retry(url, SSE_UPLOAD_TIMEOUT, poll_url=poll_url)
 
 
 def list_documents(user_id: str = USER_ID) -> dict:
@@ -263,6 +309,7 @@ def get_zip_task_status(task_id: str) -> dict:
 
 
 def stream_zip_progress(task_id: str) -> Generator[dict, None, None]:
-    """SSE 流式获取压缩包处理进度（超时自动重连）。"""
+    """SSE 流式获取压缩包处理进度，超时自动重连，重连失败降级轮询。"""
     url = f"{API_BASE_URL}/api/knowledge/task/{task_id}/stream"
-    yield from _stream_sse_with_retry(url, SSE_UPLOAD_TIMEOUT)
+    poll_url = f"{API_BASE_URL}/api/knowledge/task/{task_id}"
+    yield from _stream_sse_with_retry(url, SSE_UPLOAD_TIMEOUT, poll_url=poll_url)

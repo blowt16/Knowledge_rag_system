@@ -79,7 +79,10 @@ if uploaded_file is not None:
             for event in stream_single_progress(task_id):
                 ev_type = event.get("event", "")
 
-                if ev_type == "stage":
+                if ev_type == "timeout":
+                    stage_placeholder.warning("⏳ 解析时间较长，自动重连中…")
+
+                elif ev_type == "stage":
                     stage_placeholder.info(event.get("data", "处理中…"))
                     stage_map = {
                         "hashing": 0.02, "checking": 0.05, "extracting": 0.08,
@@ -163,7 +166,10 @@ if zip_file is not None:
                     for event in stream_zip_progress(task_id):
                         ev_type = event.get("event", "")
 
-                        if ev_type == "status":
+                        if ev_type == "timeout":
+                            status_placeholder.warning("⏳ 解析时间较长，自动重连中…")
+
+                        elif ev_type == "status":
                             data = event.get("data", "")
                             # 初始进度（可能在 event 顶层或 data 内）
                             prog = event.get("progress", {})

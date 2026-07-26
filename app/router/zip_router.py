@@ -74,15 +74,15 @@ async def stream_task_progress(task_id: str):
     async def event_generator():
         try:
             while True:
-                timeout = int(get_config("sse_stream_timeout", 600))
+                timeout = int(get_config("sse_stream_timeout", 1200))
                 event = await asyncio.wait_for(q.get(), timeout=timeout)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event.get("event") == "done":
+                    _task_manager.cleanup_queue(task_id)
                     break
         except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'event': 'error', 'data': '任务超时'})}\n\n"
-        finally:
-            _task_manager.cleanup_queue(task_id)
+            # 空闲超时 ≠ 解析失败，通知前端重连，不清理队列
+            yield f"data: {json.dumps({'event': 'timeout', 'data': '处理时间较长，正在重连…'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
