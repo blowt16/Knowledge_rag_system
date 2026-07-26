@@ -159,6 +159,7 @@ async def process_scan_pdf_mineru(
     from tempfile import TemporaryDirectory
 
     for batch_idx, (batch_start, batch_end) in enumerate(batches):
+        batch_pages = batch_end - batch_start + 1
         if progress_callback:
             if len(batches) > 1:
                 await progress_callback(
@@ -177,6 +178,13 @@ async def process_scan_pdf_mineru(
                 writer.add_page(reader.pages[pn])
             with open(batch_pdf_path, "wb") as f:
                 writer.write(f)
+
+            _batch_size_mb = batch_pdf_path.stat().st_size / (1024 * 1024)
+            logger.info(
+                f"【scan_pdf】提交批次 {batch_idx + 1}/{len(batches)}: "
+                f"第{batch_start}-{batch_end}页 ({batch_pages}页, {_batch_size_mb:.1f}MB), "
+                f"预计等待 {MINERU_TIMEOUT // 60} 分钟内返回..."
+            )
 
             # 调用 MinerU API
             try:
@@ -206,6 +214,13 @@ async def process_scan_pdf_mineru(
                 f"【scan_pdf】MinerU 解析失败 (批次 {batch_start}-{batch_end}): "
                 f"state={result.state}, error={result.error}. 文件: {pdf_name}"
             )
+
+        logger.info(
+            f"【scan_pdf】批次 {batch_idx + 1}/{len(batches)} 完成: "
+            f"第{batch_start}-{batch_end}页, "
+            f"content_list={len(result.content_list or [])} 块, "
+            f"images={len(result.images or [])} 张"
+        )
 
         # 合并 content_list，偏移 page_idx（MinerU 从 0 开始编号每批，需加上该批起始页码）
         page_offset = batch_start - 1
