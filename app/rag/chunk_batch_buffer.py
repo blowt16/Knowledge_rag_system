@@ -39,17 +39,25 @@ class ChunkBatchBuffer:
         """添加一批 chunk 到缓冲池，达到阈值自动刷批。返回是否有失败。"""
         if not chunks:
             return False
-        batch = None
-        batch_md5s = None
         with self._lock:
             self._buffer.extend(chunks)
             self._total_chars += sum(len(d.page_content) for d in chunks)
             self._md5_records.append((md5_hex, filename, file_path))
-            if self._should_flush():
-                batch, batch_md5s = self._extract_batch()
-        if batch:
-            return self._flush(batch, batch_md5s)
-        return False
+
+        # 循环刷批，直到低于阈值（避免一次掏空 buffer 超过 API 限制）
+        has_any_failure = False
+        while True:
+            batch = None
+            batch_md5s = None
+            with self._lock:
+                if self._should_flush():
+                    batch, batch_md5s = self._extract_batch()
+            if batch:
+                if self._flush(batch, batch_md5s):
+                    has_any_failure = True
+            else:
+                break
+        return has_any_failure
 
     def final_flush(self) -> bool:
         """强制刷出缓冲内所有剩余 chunk（尾批）。返回 True 表示全部成功。"""
@@ -67,11 +75,20 @@ class ChunkBatchBuffer:
         return len(self._buffer) >= self._max_count or self._total_chars >= self._max_chars
 
     def _extract_batch(self) -> tuple[list, list[tuple[str, str, str]]]:
-        batch = list(self._buffer)
+        # 按 _max_count 截断，避免超出 Embedding API 的 batch size 限制
+        n = min(len(self._buffer), self._max_count)
+        batch = self._buffer[:n]
+        self._buffer = self._buffer[n:]
+
+        # 按比例扣减字符数
+        batch_chars = sum(len(d.page_content) for d in batch)
+        self._total_chars = max(0, self._total_chars - batch_chars)
+
+        # MD5 记录：保留所有（_flush 中会去重）
         batch_md5s = list(self._md5_records)
-        self._buffer.clear()
-        self._total_chars = 0
-        self._md5_records.clear()
+        if not self._buffer:
+            self._md5_records.clear()
+
         return batch, batch_md5s
 
     def _flush(self, batch: list, batch_md5s: list[tuple[str, str, str]]) -> bool:
