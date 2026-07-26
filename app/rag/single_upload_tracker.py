@@ -77,6 +77,19 @@ class SingleUploadTracker:
         _ctx = {"md5_hex": "", "extension": file_path.suffix.lower().lstrip(".")}
 
         try:
+            def _cleanup_on_failure():
+                """文件解析失败时清理所有残留数据：ChromaDB + 图片 + MD5。"""
+                from app.rag.chunk_batch_buffer import cleanup_failed_embedding
+                md5 = _ctx.get("md5_hex", "")
+                if md5:
+                    cleanup_failed_embedding(user_id, md5)
+                    # MD5 记录可能已被 buffer._flush 写入，需额外清理
+                    try:
+                        from app.rag.md5_manager.md5_store import MD5Store
+                        MD5Store().delete_single_md5(user_id, md5)
+                    except Exception:
+                        pass
+
             async def on_progress(stage: str, text: str):
                 self.tasks[task_id]["stage"] = stage
                 self._push_event(task_id, {"event": "stage", "data": text, "stage": stage})
@@ -126,13 +139,13 @@ class SingleUploadTracker:
                 return
 
             if status == "failed":
+                _cleanup_on_failure()
                 diagnosis = result.get("diagnosis", {})
                 self.tasks[task_id]["status"] = "failed"
                 self._push_event(task_id, {
                     "event": "error",
                     "data": diagnosis.get("detail", result.get("reason", "处理失败")),
                 })
-                # done 事件扁平化 diagnosis 信息，前端可直接读取 reason/detail
                 done_data = {
                     "status": "failed",
                     "filename": filename,
@@ -144,6 +157,7 @@ class SingleUploadTracker:
                 return
 
             if status not in ("ok", "degraded"):
+                _cleanup_on_failure()
                 self.tasks[task_id]["status"] = "failed"
                 self._push_event(task_id, {
                     "event": "error",
