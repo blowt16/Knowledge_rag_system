@@ -73,8 +73,19 @@ class SingleUploadTracker:
         processor = DocumentProcessor()
         buffer = ChunkBatchBuffer(user_id)
 
-        # 通过闭包保存 process_to_chunks 计算的 MD5
-        _ctx = {"md5_hex": "", "extension": file_path.suffix.lower().lstrip(".")}
+        # 通过闭包保存 MD5 + 流水线状态，供 on_batch / on_progress / cleanup 使用
+        _ctx = {
+            "md5_hex": "",
+            "extension": file_path.suffix.lower().lstrip("."),
+            "on_batch_triggered": False,
+        }
+
+        # 预计算 MD5，确保 process_to_chunks 内部的 on_batch 回调能拿到正确 MD5
+        import hashlib
+        try:
+            _ctx["md5_hex"] = hashlib.md5(file_path.read_bytes()).hexdigest()
+        except Exception:
+            pass
 
         try:
             def _cleanup_on_failure():
@@ -97,6 +108,7 @@ class SingleUploadTracker:
             async def on_batch(batch_docs, batch_start: int, batch_end: int,
                                batch_idx: int = 0, total_batches: int = 1):
                 """MinerU 分批回调：清洗 → 切分 → 缓冲 → 进度推送。"""
+                _ctx["on_batch_triggered"] = True
                 if not batch_docs:
                     return
                 chunks = await processor._prepare_chunks(
@@ -124,7 +136,14 @@ class SingleUploadTracker:
             )
 
             status = result.get("status", "failed")
-            _ctx["md5_hex"] = result.get("md5", "")
+            _ctx["md5_hex"] = result.get("md5", "") or _ctx["md5_hex"]
+
+            # 防御：流水线模式下 on_batch 从未触发但返回 ok → 实际加载失败
+            if status == "ok" and not result.get("chunks") and not _ctx.get("on_batch_triggered"):
+                logger.warning(
+                    f"【单文件上传】流水线模式但 on_batch 未触发，判定为加载失败: {filename}"
+                )
+                status = "failed"
 
             if status == "duplicate":
                 self.tasks[task_id]["status"] = "duplicate"
@@ -235,6 +254,7 @@ class SingleUploadTracker:
 
         except Exception as e:
             logger.error(f"【单文件上传】处理失败 {filename}: {e}")
+            _cleanup_on_failure()
             self.tasks[task_id]["status"] = "failed"
             self._push_event(task_id, {"event": "error", "data": str(e)})
             self._push_event(task_id, {"event": "done", "data": {"status": "failed", "reason": str(e)}})

@@ -71,6 +71,13 @@ class KnowledgeService:
                 if status == "degraded":
                     resp["degradation"] = result.get("degradation", {})
                 return resp
+
+            # process_to_chunks 返回 failed/duplicate → 清理已提取的图片等残留数据
+            if status == "failed":
+                md5 = result.get("md5", "")
+                if md5:
+                    from app.rag.chunk_batch_buffer import cleanup_failed_embedding
+                    cleanup_failed_embedding(user_id, md5)
             return result
         finally:
             try:

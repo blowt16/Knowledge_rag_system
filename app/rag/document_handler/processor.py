@@ -360,7 +360,7 @@ class DocumentProcessor:
             logger.error(f"【文档加载】{extension.upper()} 加载失败: {e}")
 
         if not documents:
-            if on_batch:
+            if on_batch and not loader_errors:
                 # 流水线模式：文档已通过 on_batch 逐批送出，空列表是预期行为
                 logger.info(
                     f"【向量数据库】文件 {original_filename} 流水线模式完成"
@@ -386,6 +386,7 @@ class DocumentProcessor:
                 )
                 return {
                     "status": "failed",
+                    "md5": md5_hex,
                     "diagnosis": {
                         "status": "failed",
                         "reason": "vl_error" if is_vl else "parse_error",
@@ -396,7 +397,8 @@ class DocumentProcessor:
                     "filename": original_filename,
                 }
             diagnosis = diagnose_failure(file_bytes, original_filename, loader_errors)
-            return {"status": "failed", "diagnosis": diagnosis, "filename": original_filename}
+            self._cleanup_images(user_id, md5_hex)
+            return {"status": "failed", "md5": md5_hex, "diagnosis": diagnosis, "filename": original_filename}
 
         # 3.5 降级检测：文本提取成功但 VL 图片描述部分失败
         if degradation:
@@ -409,10 +411,17 @@ class DocumentProcessor:
 
         # 4-6. 清洗 → 切分 → 元数据
         await _push("cleaning", "文本清洗中…")
-        documents = await self._prepare_chunks(
-            documents, user_id, md5_hex, original_filename, extension,
-        )
+        try:
+            documents = await self._prepare_chunks(
+                documents, user_id, md5_hex, original_filename, extension,
+            )
+        except Exception as e:
+            logger.error(f"【文档处理】_prepare_chunks 异常: {e}")
+            self._cleanup_images(user_id, md5_hex)
+            return {"status": "failed", "reason": str(e),
+                    "filename": original_filename, "md5": md5_hex}
         if not documents:
+            self._cleanup_images(user_id, md5_hex)
             return {"status": "failed", "reason": "empty_content",
                     "filename": original_filename, "md5": md5_hex}
 
