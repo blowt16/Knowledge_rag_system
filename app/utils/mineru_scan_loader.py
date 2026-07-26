@@ -3,7 +3,7 @@
 专用于 scan_pdf 分支，直接调用 mineru.MinerU API：
   - 整份 PDF 一次提交 → 解析 content_list.json 按 page_idx 分组
   - 保存 result.images（图表/内嵌图片）到本地，按 content_list 归因到页码
-  - 逐页重建 markdown → metadata.image_paths + metadata.mineru_images 支持检索溯源
+  - 逐页重建 markdown → metadata.image_paths 支持检索溯源
 """
 import json
 import os
@@ -258,8 +258,6 @@ async def process_scan_pdf_mineru(
             }
             if all_image_paths:
                 meta["image_paths"] = all_image_paths
-            if page_mineru_images.get(page_num):
-                meta["mineru_images"] = page_mineru_images[page_num]
 
             processed.append(Document(
                 page_content=markdown.strip(),
@@ -300,8 +298,6 @@ async def process_scan_pdf_mineru(
             }
             if all_image_paths:
                 meta["image_paths"] = all_image_paths
-            if page_mineru_images.get(page_num):
-                meta["mineru_images"] = page_mineru_images[page_num]
 
             processed.append(Document(
                 page_content=page_md.strip(),
