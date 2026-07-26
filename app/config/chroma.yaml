@@ -44,6 +44,7 @@ bm25_cache_size: 20
 # --- 文本切分 ---
 chunk_size: 500
 chunk_overlap: 50
+chunk_min_size: 5                               # 最小 chunk 字符数，过滤噪声片段
 separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
 enable_semantic_merge: false # 文本分块后是否进行语义合并
 semantic_merge_threshold: 0.7 # 进行语义合并的相似度阈值(到达该阈值进行合并)

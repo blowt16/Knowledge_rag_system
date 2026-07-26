@@ -188,6 +188,16 @@ class DocumentProcessor:
         if not documents:
             return []
 
+        # 过滤过短的噪声 chunk
+        min_size = int(get_config("chunk_min_size", 5))
+        before = len(documents)
+        documents = [d for d in documents if len(d.page_content.strip()) >= min_size]
+        if before > len(documents):
+            logger.info(
+                f"【文档处理】{original_filename}: 过滤 {before - len(documents)} 个过短 chunk"
+                f"（<{min_size} 字符）"
+            )
+
         digits = int(get_config("chunk_id_digits", 4))
         for i, doc in enumerate(documents):
             doc.metadata["chunk_index"] = i
