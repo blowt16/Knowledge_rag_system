@@ -19,10 +19,28 @@ def _get_magic_signatures() -> dict[bytes, tuple[str, str]]:
 
 
 def _remove_toc_lines(text: str) -> str:
-    """移除目录行（含省略号/制表符连接 + 尾部页码），保留章节标题行。"""
+    """移除目录行（含省略号/制表符/空白连接 + 尾部页码）。"""
     lines = text.split('\n')
     result = []
     in_toc_section = False
+
+    def _is_toc_line(s: str) -> bool:
+        # 1. 经典省略号 + 尾部页码
+        if re.search(r'[.…]{3,}\s*\d{1,4}\s*$', s):
+            return True
+        # 2. 制表符 + 尾部页码
+        if re.search(r'\t{1,3}\d{1,4}\s*$', s):
+            return True
+        # 3. 行尾括号页码
+        if re.search(r'[（(]\d{1,4}[）)]\s*$', s):
+            return True
+        # 4. 多空白 + 尾部页码（MinerU OCR 常见格式）
+        if re.search(r'\s{2,}\d{1,4}\s*$', s) and len(s) > 5:
+            return True
+        # 5. Markdown 链接 + 尾部页码
+        if re.search(r'\]\([^)]+\)\s*\d{1,4}\s*$', s):
+            return True
+        return False
 
     for line in lines:
         stripped = line.strip()
@@ -35,18 +53,14 @@ def _remove_toc_lines(text: str) -> str:
             in_toc_section = True
             continue
 
-        # 目录特征行：含省略号或制表符连接 + 行尾数字页码
-        if re.search(r'[.…]{3,}\s*\d{1,4}\s*$', stripped):
-            continue
-        if re.search(r'\t{1,3}\d{1,4}\s*$', stripped):
-            continue
-        # 行尾括号页码：第一章 引言(10) 或 第一章 引言（10）
-        if re.search(r'[（(]\d{1,4}[）)]\s*$', stripped):
-            continue
-
-        # 退出目录区域：遇到非目录特征行
-        if in_toc_section and not re.match(r'^[\d.\s]+$|^[第].*[节章]', stripped):
+        if in_toc_section:
+            if _is_toc_line(stripped):
+                continue  # 跳过目录行
+            # 遇到非目录行 → 退出目录区域
             in_toc_section = False
+
+        if _is_toc_line(stripped):
+            continue  # 不在目录区域但匹配目录特征，仍然跳过
 
         result.append(line)
 
