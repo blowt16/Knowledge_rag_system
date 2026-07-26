@@ -323,7 +323,7 @@ async def process_scan_pdf_mineru(
         )
 
         if on_batch:
-            await on_batch(batch_docs, batch_start, batch_end)
+            await on_batch(batch_docs, batch_start, batch_end, batch_idx, len(batches))
         else:
             processed.extend(batch_docs)
 

@@ -81,7 +81,8 @@ class SingleUploadTracker:
                 self.tasks[task_id]["stage"] = stage
                 self._push_event(task_id, {"event": "stage", "data": text, "stage": stage})
 
-            async def on_batch(batch_docs, batch_start: int, batch_end: int):
+            async def on_batch(batch_docs, batch_start: int, batch_end: int,
+                               batch_idx: int = 0, total_batches: int = 1):
                 """MinerU 分批回调：清洗 → 切分 → 缓冲 → 进度推送。"""
                 if not batch_docs:
                     return
@@ -91,10 +92,13 @@ class SingleUploadTracker:
                 if not chunks:
                     return
                 buffer.add(chunks, _ctx["md5_hex"], filename, str(file_path))
+                # 进度: 分类完成(10%) 到 清洗前(45%)，按批次比例分配
+                pct = 0.10 + (0.45 - 0.10) * ((batch_idx + 1) / total_batches)
                 self._push_event(task_id, {
                     "event": "stage",
-                    "data": f"MinerU 解析完成 (第{batch_start}-{batch_end}页), 已生成 {len(chunks)} chunks",
+                    "data": f"MinerU 第{batch_idx + 1}/{total_batches}批完成 (第{batch_start}-{batch_end}页), {len(chunks)} chunks",
                     "stage": "loading",
+                    "progress": pct,
                 })
 
             # 1. 文档加载 + 清洗 + 切分

@@ -84,12 +84,14 @@ if uploaded_file is not None:
 
                 elif ev_type == "stage":
                     stage_placeholder.info(event.get("data", "处理中…"))
-                    stage_map = {
-                        "hashing": 0.02, "checking": 0.05, "extracting": 0.08,
-                        "classifying": 0.12, "loading": 0.15, "cleaning": 0.45,
-                        "splitting": 0.55, "embedding": 0.70,
-                    }
-                    pct = stage_map.get(event.get("stage", ""), 0.3)
+                    pct = event.get("progress")
+                    if pct is None:
+                        stage_map = {
+                            "hashing": 0.02, "checking": 0.05, "extracting": 0.08,
+                            "classifying": 0.12, "loading": 0.15, "cleaning": 0.45,
+                            "splitting": 0.55, "embedding": 0.70,
+                        }
+                        pct = stage_map.get(event.get("stage", ""), 0.3)
                     bar.progress(pct, event.get("data", ""))
 
                 elif ev_type == "error":
