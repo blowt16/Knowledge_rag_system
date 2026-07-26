@@ -1,0 +1,30 @@
+# ============================================================
+# 前端统一配置文件
+# 环境变量可覆盖同名配置（大写 + FRONT_ 前缀）
+# 优先级: 环境变量 > front_config.yaml > 代码默认值
+# ============================================================
+
+# --- API 连接 ---
+api_base_url: http://127.0.0.1:8000           # 后端 API 地址，环境变量 RAG_API_BASE 可覆盖
+default_user_id: default_user                  # 默认用户标识
+
+# --- 文件上传 ---
+max_single_file_size: 104857600                # 单文件最大大小 (100MB)
+max_zip_file_size: 52428800                    # 压缩包最大大小 (50MB)
+allowed_single_extensions: ["txt", "pdf", "md", "pptx", "docx"]
+allowed_zip_extensions: ["zip", "tar", "gz"]
+
+# --- 分页 ---
+pagination_page_size: 20                       # 每页显示条数
+
+# --- 超时配置（秒），应与后端 chroma.yaml 对齐 ---
+timeout:
+  sse_upload: 1500              # 单文件/压缩包 SSE 进度流（需 > 后端 sse_stream_timeout + 缓冲）
+  sse_chat: 300                 # 对话 SSE 流
+  upload_sync: 300              # 旧同步上传接口
+  upload_async: 60              # 异步上传（仅获取 task_id）
+  default: 30                   # 普通请求
+  health: 3                     # 健康检查
+
+# --- 聊天 ---
+default_chat_mode: agent                       # 默认聊天模式: agent / rag

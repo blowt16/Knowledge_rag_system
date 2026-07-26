@@ -63,3 +63,12 @@ PAGE_SIZE = _get("pagination_page_size", 20)
 
 # 聊天
 DEFAULT_CHAT_MODE = _get("default_chat_mode", "agent")
+
+# 超时（秒），与环境变量 FRONT_TIMEOUT_SSE_UPLOAD 等可覆盖
+_timeout_cfg = _get("timeout", {}) or {}
+SSE_UPLOAD_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_SSE_UPLOAD", _timeout_cfg.get("sse_upload", 1500)))
+SSE_CHAT_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_SSE_CHAT", _timeout_cfg.get("sse_chat", 300)))
+UPLOAD_SYNC_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_UPLOAD_SYNC", _timeout_cfg.get("upload_sync", 300)))
+UPLOAD_ASYNC_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_UPLOAD_ASYNC", _timeout_cfg.get("upload_async", 60)))
+DEFAULT_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_DEFAULT", _timeout_cfg.get("default", 30)))
+HEALTH_TIMEOUT = int(os.getenv("FRONT_TIMEOUT_HEALTH", _timeout_cfg.get("health", 3)))
