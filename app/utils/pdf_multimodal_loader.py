@@ -618,6 +618,7 @@ async def _process_scan_pdf(
     md5_hex: str = "",
     progress_callback=None,
     page_filter: set | None = None,
+    on_batch=None,
 ) -> tuple[list[Document], dict]:
     """MinerU 扫描件解析管线 (替代 PaddleOCR)。
 
@@ -633,6 +634,7 @@ async def _process_scan_pdf(
         md5_hex=md5_hex,
         progress_callback=progress_callback,
         page_filter=page_filter,
+        on_batch=on_batch,
     )
 
 
@@ -652,6 +654,7 @@ async def load_pdf_async(
     md5_hex: str = "",
     original_filename: str = "",
     progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
+    on_batch: Callable[[list, int, int], Awaitable[None]] | None = None,
 ) -> tuple[list[Document], dict]:
     """PDF 多模态三分支统一入口（异步）。
 
@@ -729,6 +732,7 @@ async def load_pdf_async(
                     file_path, file_path, page_image_map,
                     user_id=user_id, md5_hex=md5_hex,
                     progress_callback=progress_callback, page_filter=page_nums,
+                    on_batch=on_batch,
                 )
                 _merge_degradation(degradation, d)
             else:
@@ -754,6 +758,7 @@ async def load_pdf_async(
             file_path, file_path, page_image_map,
             user_id=user_id, md5_hex=md5_hex,
             progress_callback=progress_callback,
+            on_batch=on_batch,
         )
     else:
         raise ValueError(f"未知 PDF 类型: {pdf_type}")

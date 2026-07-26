@@ -158,6 +158,41 @@ class DocumentProcessor:
         self._md5_store = MD5Store()
         self._splitter = AsyncTextSplitter()
 
+    async def _prepare_chunks(
+        self, documents: list, user_id: str, md5_hex: str,
+        original_filename: str, extension: str,
+    ) -> list:
+        """清洗 → 切分 → 元数据注入，返回处理好的 chunk 列表。
+
+        从 process_to_chunks 中抽取，供 MinerU 分批流水线复用。
+        """
+        documents = _clean_text(documents)
+        if not documents:
+            return []
+
+        documents = await self._splitter.async_split_documents(documents)
+        if not documents:
+            return []
+
+        digits = int(get_config("chunk_id_digits", 4))
+        for i, doc in enumerate(documents):
+            doc.metadata["chunk_index"] = i
+            doc.metadata["kb_id"] = user_id
+            doc.metadata["chunk_id"] = f"{user_id}_{md5_hex}_{i:0{digits}d}"
+            doc.metadata["user_id"] = user_id
+            doc.metadata["md5"] = md5_hex
+            doc.metadata["original_filename"] = original_filename
+            doc.metadata["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            doc.metadata["file_type"] = extension
+            doc.metadata["current_chapter"] = doc.metadata.get("current_chapter", "")
+            doc.metadata["chapter_level"] = doc.metadata.get("chapter_level", 0)
+
+        logger.info(
+            f"【文档处理】{original_filename}: "
+            f"{len(documents)} chunks (清洗+切分+元数据)"
+        )
+        return documents
+
     @staticmethod
     def _cleanup_images(user_id: str, md5_hex: str):
         """清理 PDF 解析失败后遗留的提取图片目录。"""
@@ -246,8 +281,12 @@ class DocumentProcessor:
 
     async def process_to_chunks(self, file_path: str | Path, user_id: str,
                                 original_filename: str = "",
-                                progress_callback=None) -> dict:
-        """只做切分 + 元数据注入，不嵌入不写库。返回 chunks 供批量缓冲池使用。"""
+                                progress_callback=None,
+                                on_batch=None) -> dict:
+        """只做切分 + 元数据注入，不嵌入不写库。返回 chunks 供批量缓冲池使用。
+
+        on_batch: 可选，MinerU 扫描件分批回调 (docs, start_page, end_page)
+        """
         file_path = Path(file_path)
         if not original_filename:
             original_filename = file_path.name
@@ -285,6 +324,7 @@ class DocumentProcessor:
                     str(file_path), user_id=user_id, md5_hex=md5_hex,
                     original_filename=original_filename,
                     progress_callback=progress_callback,
+                    on_batch=on_batch,
                 )
             else:
                 from app.utils.file_handler import load_file
@@ -331,35 +371,25 @@ class DocumentProcessor:
             # 有降级时继续处理文本内容，但暂缓清理图片（保留给后续重试复用）
             # 注意：不入库 MD5，允许用户重试
 
-        # 4. 清洗
+        # 4-6. 清洗 → 切分 → 元数据
+        if on_batch and not documents:
+            # 流水线模式：文档已通过 on_batch 逐批处理，直接返回成功
+            result = {
+                "status": "ok",
+                "chunks": [],
+                "md5": md5_hex,
+                "filename": original_filename,
+                "file_path": str(file_path),
+            }
+            return result
+
         await _push("cleaning", "文本清洗中…")
-        documents = _clean_text(documents)
+        documents = await self._prepare_chunks(
+            documents, user_id, md5_hex, original_filename, extension,
+        )
         if not documents:
             return {"status": "failed", "reason": "empty_content",
                     "filename": original_filename, "md5": md5_hex}
-
-        # 5. 切分
-        await _push("splitting", "文本切分中…")
-        documents = await self._splitter.async_split_documents(documents)
-        if not documents:
-            logger.debug(f"【向量数据库】文件 {original_filename} 切分内容为空，跳过")
-            return {"status": "failed", "reason": "empty_content",
-                    "filename": original_filename, "md5": md5_hex}
-
-        # 6. 元数据
-        for doc in documents:
-            chunk_idx = doc.metadata.get("chunk_index", 0)
-            doc.metadata["kb_id"] = user_id
-            doc.metadata["chunk_index"] = chunk_idx
-            digits = int(get_config("chunk_id_digits", 4))
-            doc.metadata["chunk_id"] = f"{user_id}_{md5_hex}_{chunk_idx:0{digits}d}"
-            doc.metadata["user_id"] = user_id
-            doc.metadata["md5"] = md5_hex
-            doc.metadata["original_filename"] = original_filename
-            doc.metadata["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-            doc.metadata["file_type"] = extension
-            doc.metadata["current_chapter"] = doc.metadata.get("current_chapter", "")
-            doc.metadata["chapter_level"] = doc.metadata.get("chapter_level", 0)
 
         result = {
             "status": "degraded" if degradation else "ok",

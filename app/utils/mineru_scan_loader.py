@@ -110,6 +110,86 @@ def _blocks_to_markdown(
 
 
 # ============================================================
+# 单批结果 → Document 列表
+# ============================================================
+
+def _build_documents(
+    content_list: list[dict],
+    images: list,
+    mineru_img_dir: Path,
+    file_path: str,
+    user_id: str,
+    md5_hex: str,
+    page_filter: set | None,
+) -> list[Document]:
+    """将一批 MinerU 结果转换为 Document 列表。"""
+    from app.utils.path_tool import get_data_path
+
+    # 按 page_idx 分组块
+    pages_blocks: dict[int, list[dict]] = {}
+    for block in content_list:
+        page_num = block.get("page_idx", 0) + 1
+        if page_filter is not None and page_num not in page_filter:
+            continue
+        pages_blocks.setdefault(page_num, []).append(block)
+
+    # 图片→页码映射
+    img_path_to_page: dict[str, int] = {}
+    for block in content_list:
+        if block.get("type") in ("image", "table"):
+            p = block.get("img_path", "")
+            if p:
+                img_path_to_page[p] = block.get("page_idx", 0) + 1
+
+    # 保存图片
+    image_map: dict[str, str] = {}
+    page_images: dict[int, list[str]] = {}
+    image_counts: dict[int, int] = {}
+
+    for idx, img in enumerate(images):
+        try:
+            ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "png"
+            page_num = img_path_to_page.get(img.path, 1)
+            local_name = f"p{page_num}_i{idx}.{ext}"
+            img_full_path = mineru_img_dir / local_name
+            img_full_path.write_bytes(img.data)
+            relative = img_full_path.relative_to(get_data_path()).as_posix()
+            image_map[img.path] = local_name
+            page_images.setdefault(page_num, []).append(relative)
+            image_counts[page_num] = image_counts.get(page_num, 0) + 1
+        except OSError as e:
+            logger.warning(f"【scan_pdf】图片{idx}({img.name})保存失败: {e}")
+
+    # 逐页组装 Document
+    documents: list[Document] = []
+    for page_num in sorted(pages_blocks.keys()):
+        blocks = pages_blocks[page_num]
+        markdown = _blocks_to_markdown(blocks, image_map, user_id, md5_hex)
+        if not markdown.strip():
+            logger.warning(f"【scan_pdf】第{page_num}页 content_list 无文本")
+            continue
+
+        mineru_paths = page_images.get(page_num, [])
+        meta = {
+            "source": file_path, "page": page_num,
+            "has_images": len(mineru_paths) > 0,
+            "ocr_engine": f"mineru_{MINERU_MODE}",
+            "scan_branch": "mineru", "toc": "[]", "chapter_count": 0,
+        }
+        if mineru_paths:
+            meta["image_paths"] = mineru_paths
+
+        documents.append(Document(page_content=markdown.strip(), metadata=meta))
+        imgs = image_counts.get(page_num, 0)
+        logger.info(
+            f"【scan_pdf】第{page_num}页 MinerU 成功"
+            + (f", 图片={imgs}" if imgs else "")
+        )
+
+    return documents
+
+
+# ============================================================
 # 主入口
 # ============================================================
 
@@ -121,10 +201,12 @@ async def process_scan_pdf_mineru(
     md5_hex: str = "",
     progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
     page_filter: set | None = None,
+    on_batch: Callable[[list[Document], int, int], Awaitable[None]] | None = None,
 ) -> tuple[list[Document], dict]:
     """MinerU 扫描件 PDF 解析入口，兼容 _process_scan_pdf 签名。
 
-    流程: 整份 PDF 一次提交 → content_list 按 page_idx 分组 → 保存图片 → 组装 Document。
+    流程: 分批提交 → content_list 按 page_idx 分组 → 保存图片 → 组装 Document。
+    若提供 on_batch 回调，每批完成后立即触发（不累积），实现流水线处理。
     """
     from mineru import MinerU
     from pypdf import PdfReader, PdfWriter
@@ -152,9 +234,8 @@ async def process_scan_pdf_mineru(
         end = min(start + batch_size - 1, total_pages)
         batches.append((start, end))
 
-    all_content_list: list[dict] = []
-    all_images: list = []
     all_markdown: str = ""  # flash 模式 fallback
+    processed: list[Document] = []  # 无 on_batch 回调时累积
 
     from tempfile import TemporaryDirectory
 
@@ -222,12 +303,12 @@ async def process_scan_pdf_mineru(
             f"images={len(result.images or [])} 张"
         )
 
-        # 合并 content_list，偏移 page_idx（MinerU 从 0 开始编号每批，需加上该批起始页码）
+        # 偏移 content_list 的 page_idx + 立即处理本批图片和文档
         page_offset = batch_start - 1
+        batch_content_list = []
         for block in (result.content_list or []):
             block["page_idx"] = block.get("page_idx", 0) + page_offset
-        all_content_list.extend(result.content_list or [])
-        all_images.extend(result.images or [])
+            batch_content_list.append(block)
 
         # flash 模式：拼接 markdown
         if all_markdown or result.markdown:
@@ -235,165 +316,63 @@ async def process_scan_pdf_mineru(
                 all_markdown += f"\n\n---\n\n"
             all_markdown += (result.markdown or "")
 
-    # ── 解析 content_list，按 page_idx 分组 ──
-    content_list = all_content_list
-    images = all_images
-    markdown_full = all_markdown
+        # 构建本批 Documents
+        batch_docs = _build_documents(
+            batch_content_list, result.images or [],
+            mineru_img_dir, file_path, user_id, md5_hex, page_filter,
+        )
 
-    # 按 page_idx 分组块
-    pages_blocks: dict[int, list[dict]] = {}
-    for block in content_list:
-        page_idx = block.get("page_idx", 0)  # 0-indexed
-        page_num = page_idx + 1  # 1-indexed
-        if page_filter is not None and page_num not in page_filter:
-            continue
-        pages_blocks.setdefault(page_num, []).append(block)
+        if on_batch:
+            await on_batch(batch_docs, batch_start, batch_end)
+        else:
+            processed.extend(batch_docs)
 
-    # ── 处理图片：建立 img_path → 本地文件映射 ──
-    # 如果 content_list 有 page_idx，用 content_list 归因图片到页码
-    # 否则所有图片归到最后一页（fallback）
-    image_map: dict[str, str] = {}          # MinerU原始路径 → 本地文件名
-    page_images: dict[int, list[str]] = {}  # 页码 → 图片相对路径列表
-    page_mineru_images: dict[int, list[dict]] = {}  # 页码 → mineru_images 详情
-
-    # 先从 content_list 中提取图片→页码映射
-    img_path_to_page: dict[str, int] = {}
-    for block in content_list:
-        block_type = block.get("type", "")
-        if block_type in ("image", "table"):
-            img_path = block.get("img_path", "")
-            page_idx = block.get("page_idx", 0)
-            if img_path:
-                img_path_to_page[img_path] = page_idx + 1
-
-    # 保存所有 MinerU 图片
-    for idx, img in enumerate(images):
-        try:
-            ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "png"
-            # 用 content_list 中的 page_idx 确定页码，fallback 用文件名推测
-            page_num = img_path_to_page.get(img.path, 1)
-            local_name = f"p{page_num}_i{idx}.{ext}"
-            img_full_path = mineru_img_dir / local_name
-            img_full_path.write_bytes(img.data)
-
-            relative = img_full_path.relative_to(get_data_path()).as_posix()
-
-            # 记录映射
-            image_map[img.path] = local_name
-            page_images.setdefault(page_num, []).append(relative)
-            page_mineru_images.setdefault(page_num, []).append({
-                "name": img.name,
-                "path": relative,
-                "idx": idx,
-                "original_ref": img.path,
-            })
-        except OSError as e:
-            logger.warning(f"【scan_pdf】图片{idx}({img.name})保存失败: {e}")
-            continue
-
-    # ── 逐页组装 Document ──
-    processed: list[Document] = []
-
-    if pages_blocks:
-        # 有 content_list → 逐页重建 markdown
-        for page_num in sorted(pages_blocks.keys()):
-            blocks = pages_blocks[page_num]
-            markdown = _blocks_to_markdown(blocks, image_map, user_id, md5_hex)
-
-            if not markdown.strip():
-                logger.warning(f"【scan_pdf】第{page_num}页 content_list 无文本")
-                continue
-
-            # 扫描件只保留 MinerU 提取的图片（PyMuPDF 提取的是整页扫描图，无用）
-            mineru_paths = page_images.get(page_num, [])
-            all_image_paths = mineru_paths
-
-            meta = {
-                "source": file_path,
-                "page": page_num,
-                "has_images": len(all_image_paths) > 0,
-                "ocr_engine": f"mineru_{MINERU_MODE}",
-                "scan_branch": "mineru",
-                "toc": "[]",
-                "chapter_count": 0,
-            }
-            if all_image_paths:
-                meta["image_paths"] = all_image_paths
-
-            processed.append(Document(
-                page_content=markdown.strip(),
-                metadata=meta,
-            ))
-
-            imgs = len(page_mineru_images.get(page_num, []))
-            logger.info(
-                f"【scan_pdf】第{page_num}页 MinerU 成功"
-                + (f", 图片={imgs}" if imgs else "")
-            )
-    else:
-        # 无 content_list（flash 模式）→ 尝试用 markdown 分页
+    # ── 无 on_batch 回调时的 fallback：flash 模式 markdown 分页 ──
+    if not on_batch and not processed and all_markdown:
         logger.info("【scan_pdf】无 content_list，使用 markdown 分页")
-        pages = _split_markdown_by_page(markdown_full)
-
+        pages = _split_markdown_by_page(all_markdown)
         for page_num, page_md in enumerate(pages, start=1):
             if page_filter is not None and page_num not in page_filter:
                 continue
             if not page_md.strip():
                 continue
-
-            # 扫描件只保留 MinerU 提取的图片
-            mineru_paths = page_images.get(page_num, [])
-            all_image_paths = mineru_paths
-
-            # 替换图片引用
-            page_md = _replace_images_in_text(page_md, image_map, user_id, md5_hex)
-
-            meta = {
-                "source": file_path,
-                "page": page_num,
-                "has_images": len(all_image_paths) > 0,
-                "ocr_engine": f"mineru_{MINERU_MODE}",
-                "scan_branch": "mineru",
-                "toc": "[]",
-                "chapter_count": 0,
-            }
-            if all_image_paths:
-                meta["image_paths"] = all_image_paths
-
             processed.append(Document(
                 page_content=page_md.strip(),
-                metadata=meta,
+                metadata={
+                    "source": file_path, "page": page_num,
+                    "has_images": False,
+                    "ocr_engine": f"mineru_{MINERU_MODE}",
+                    "scan_branch": "mineru", "toc": "[]", "chapter_count": 0,
+                },
             ))
 
-            logger.info(
-                f"【scan_pdf】第{page_num}页 MinerU 成功（markdown分页）"
+    if on_batch:
+        # 流水线模式：文档已通过回调逐批送出，无需检查
+        logger.info(f"【scan_pdf】MinerU 完成（流水线模式）")
+    else:
+        if not processed:
+            raise ValueError(f"【scan_pdf】MinerU 解析结果为空: {pdf_name}")
+
+        # OCR 文本提取失败检查（与旧管线一致）
+        failed_pages = [
+            d.metadata.get("page", "?") for d in processed
+            if not d.page_content.strip()
+        ]
+        if failed_pages:
+            raise ValueError(
+                f"【scan_pdf】{len(failed_pages)} 页文本提取完全失败: "
+                f"页码 {failed_pages[:10]}{'...' if len(failed_pages) > 10 else ''}. "
+                f"扫描件 OCR 解析不可靠，请检查文件后重新上传: {pdf_name}"
             )
 
-    if not processed:
-        raise ValueError(
-            f"【scan_pdf】MinerU 解析结果为空: {pdf_name}"
+        total_images = sum(
+            len(d.metadata.get("image_paths", [])) for d in processed
         )
-
-    # ── OCR 文本提取失败检查（与旧管线一致） ──
-    failed_pages = [
-        d.metadata.get("page", "?") for d in processed
-        if not d.page_content.strip()
-    ]
-    if failed_pages:
-        raise ValueError(
-            f"【scan_pdf】{len(failed_pages)} 页文本提取完全失败: "
-            f"页码 {failed_pages[:10]}{'...' if len(failed_pages) > 10 else ''}. "
-            f"扫描件 OCR 解析不可靠，请检查文件后重新上传: {pdf_name}"
+        logger.info(
+            f"【scan_pdf】MinerU 完成: {len(processed)} 页, "
+            f"图片={total_images} "
+            f"(mode={MINERU_MODE}, language={MINERU_LANGUAGE})"
         )
-
-    total_images = sum(
-        len(d.metadata.get("image_paths", [])) for d in processed
-    )
-    logger.info(
-        f"【scan_pdf】MinerU 完成: {len(processed)} 页, "
-        f"图片={total_images} "
-        f"(mode={MINERU_MODE}, language={MINERU_LANGUAGE})"
-    )
 
     return processed, {}
 

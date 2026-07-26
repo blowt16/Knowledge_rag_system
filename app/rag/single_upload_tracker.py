@@ -71,10 +71,31 @@ class SingleUploadTracker:
         import time
         t_start = time.time()
         processor = DocumentProcessor()
+        buffer = ChunkBatchBuffer(user_id)
+
+        # 通过闭包保存 process_to_chunks 计算的 MD5
+        _ctx = {"md5_hex": "", "extension": file_path.suffix.lower().lstrip(".")}
+
         try:
             async def on_progress(stage: str, text: str):
                 self.tasks[task_id]["stage"] = stage
                 self._push_event(task_id, {"event": "stage", "data": text, "stage": stage})
+
+            async def on_batch(batch_docs, batch_start: int, batch_end: int):
+                """MinerU 分批回调：清洗 → 切分 → 缓冲 → 进度推送。"""
+                if not batch_docs:
+                    return
+                chunks = await processor._prepare_chunks(
+                    batch_docs, user_id, _ctx["md5_hex"], filename, _ctx["extension"],
+                )
+                if not chunks:
+                    return
+                buffer.add(chunks, _ctx["md5_hex"], filename, str(file_path))
+                self._push_event(task_id, {
+                    "event": "stage",
+                    "data": f"MinerU 解析完成 (第{batch_start}-{batch_end}页), 已生成 {len(chunks)} chunks",
+                    "stage": "loading",
+                })
 
             # 1. 文档加载 + 清洗 + 切分
             result = await processor.process_to_chunks(
@@ -82,9 +103,11 @@ class SingleUploadTracker:
                 user_id=user_id,
                 original_filename=filename,
                 progress_callback=on_progress,
+                on_batch=on_batch,
             )
 
             status = result.get("status", "failed")
+            _ctx["md5_hex"] = result.get("md5", "")
 
             if status == "duplicate":
                 self.tasks[task_id]["status"] = "duplicate"
@@ -131,17 +154,22 @@ class SingleUploadTracker:
                 }})
                 return
 
-            chunks = result["chunks"]
             md5_hex = result["md5"]
             fp = result.get("file_path", "")
 
-            # 2. 批量嵌入
-            self._push_event(task_id, {
-                "event": "stage", "data": f"向量嵌入中 ({len(chunks)} chunks)…", "stage": "embedding",
-            })
-
-            buffer = ChunkBatchBuffer(user_id)
-            buffer.add(chunks, md5_hex, filename, fp)
+            # 2. 批量嵌入（流水线模式下 chunks 已在 on_batch 回调中缓冲）
+            chunks = result.get("chunks", [])
+            if not chunks:
+                # 流水线模式：chunks 已在 on_batch 中缓冲，直接刷尾批
+                self._push_event(task_id, {
+                    "event": "stage", "data": "向量嵌入中…", "stage": "embedding",
+                })
+            else:
+                # 传统模式：chunks 一次性加入缓冲池
+                self._push_event(task_id, {
+                    "event": "stage", "data": f"向量嵌入中 ({len(chunks)} chunks)…", "stage": "embedding",
+                })
+                buffer.add(chunks, md5_hex, filename, fp)
             buffer.final_flush()
 
             # 批量嵌入失败 → 进入文件解析失败处理流程
