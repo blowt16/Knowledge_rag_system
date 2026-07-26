@@ -140,6 +140,28 @@ class SingleUploadTracker:
             buffer.add(chunks, md5_hex, filename, fp)
             buffer.final_flush()
 
+            # 批量嵌入失败 → 进入文件解析失败处理流程
+            if buffer.has_failures:
+                from app.rag.chunk_batch_buffer import cleanup_failed_embedding
+                cleanup_failed_embedding(user_id, md5_hex)
+                logger.error(
+                    f"【单文件上传】向量嵌入失败: {filename} (md5={md5_hex[:12]}...), "
+                    f"失败批次={buffer.failed_batches}"
+                )
+                self.tasks[task_id]["status"] = "failed"
+                self._push_event(task_id, {
+                    "event": "error",
+                    "data": "向量嵌入失败，请稍后重试",
+                })
+                self._push_event(task_id, {"event": "done", "data": {
+                    "status": "failed",
+                    "filename": filename,
+                    "reason": "embedding_failed",
+                    "detail": "向量嵌入失败，请稍后重试",
+                    "suggestion": "请稍后重试，如持续失败请联系管理员",
+                }})
+                return
+
             HybridRetriever.invalidate_cache(user_id)
 
             is_degraded = status == "degraded"

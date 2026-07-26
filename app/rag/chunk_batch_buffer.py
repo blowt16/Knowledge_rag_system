@@ -31,6 +31,7 @@ class ChunkBatchBuffer:
 
         self._total_flushed = 0
         self._failed_batches = 0
+        self._failed_md5s: set[str] = set()  # 嵌入失败的 MD5 集合
         self._vector_store = VectorStoreService()
         self._md5_store = MD5Store()
 
@@ -50,14 +51,17 @@ class ChunkBatchBuffer:
             return self._flush(batch, batch_md5s)
         return False
 
-    def final_flush(self):
-        """强制刷出缓冲内所有剩余 chunk（尾批）。"""
+    def final_flush(self) -> bool:
+        """强制刷出缓冲内所有剩余 chunk（尾批）。返回 True 表示全部成功。"""
+        has_failure = False
         with self._lock:
             if not self._buffer:
-                return
+                return not self.has_failures
             batch, batch_md5s = self._extract_batch()
         if batch:
-            self._flush(batch, batch_md5s)
+            if not self._flush(batch, batch_md5s):
+                has_failure = True
+        return not self.has_failures and not has_failure
 
     def _should_flush(self) -> bool:
         return len(self._buffer) >= self._max_count or self._total_chars >= self._max_chars
@@ -91,6 +95,8 @@ class ChunkBatchBuffer:
                 else:
                     logger.error(f"【批量嵌入】刷批失败 ({self._max_retries} 次重试均失败): {e}")
                     self._failed_batches += 1
+                    for md5_hex, _, _ in batch_md5s:
+                        self._failed_md5s.add(md5_hex)
                     return False
 
         # 保存本批涉及的所有 MD5 记录
@@ -115,3 +121,32 @@ class ChunkBatchBuffer:
     @property
     def failed_batches(self) -> int:
         return self._failed_batches
+
+    @property
+    def failed_md5s(self) -> set[str]:
+        return self._failed_md5s
+
+    @property
+    def has_failures(self) -> bool:
+        return len(self._failed_md5s) > 0
+
+
+def cleanup_failed_embedding(user_id: str, md5_hex: str):
+    """向量嵌入失败后的清理：回滚 ChromaDB chunks + 删除提取的图片。
+
+    与 DocumentProcessor._cleanup_images 行为一致，用于批量嵌入路径的失败兜底。
+    """
+    import shutil
+    from app.utils.path_tool import get_image_dir
+
+    # 1. 回滚已嵌入的 chunks（ChromaDB 删除失败不阻塞图片清理）
+    try:
+        VectorStoreService().delete_by_md5(user_id, md5_hex)
+    except Exception as e:
+        logger.error(f"【批量嵌入】回滚 ChromaDB 失败 (md5={md5_hex[:12]}...): {e}")
+
+    # 2. 清理提取的图片目录
+    img_dir = get_image_dir(f"{user_id}/{md5_hex}")
+    if img_dir.exists():
+        shutil.rmtree(str(img_dir), ignore_errors=True)
+        logger.info(f"【批量嵌入】已清理嵌入失败的图片目录: {img_dir}")

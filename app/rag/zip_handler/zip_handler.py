@@ -159,6 +159,28 @@ class ZipTaskManager:
                 + (f", {buffer.failed_batches} 批失败" if buffer.failed_batches else "")
             )
 
+            # 3.6 嵌入失败 → 进入文件解析失败处理流程
+            if buffer.has_failures:
+                from app.rag.chunk_batch_buffer import cleanup_failed_embedding
+                failed_set = buffer.failed_md5s
+                for md5 in failed_set:
+                    cleanup_failed_embedding(user_id, md5)
+                # 将嵌入失败的文件标记为失败结果
+                for i, r in enumerate(results):
+                    if isinstance(r, dict) and r.get("md5") in failed_set:
+                        logger.error(
+                            f"【压缩包】向量嵌入失败: {r.get('file_path', '?')} "
+                            f"(md5={r['md5'][:12]}...)"
+                        )
+                        results[i] = {
+                            "status": "failed",
+                            "md5": r.get("md5", ""),
+                            "file_path": r.get("file_path", ""),
+                            "chunks": r.get("chunks", 0),
+                            "error_type": "embedding_failed",
+                            "reason": "向量嵌入失败，请稍后重试",
+                        }
+
             # 4. 聚合结果
             for result in results:
                 if isinstance(result, Exception):

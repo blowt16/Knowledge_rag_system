@@ -50,6 +50,22 @@ class KnowledgeService:
             if status in ("ok", "degraded"):
                 buffer.add(result["chunks"], result["md5"], result["filename"], result.get("file_path", ""))
                 buffer.final_flush()
+
+                # 批量嵌入失败 → 进入文件解析失败处理流程
+                if buffer.has_failures:
+                    from app.rag.chunk_batch_buffer import cleanup_failed_embedding
+                    cleanup_failed_embedding(user_id, result["md5"])
+                    logger.error(
+                        f"【知识库】向量嵌入失败: {filename} (md5={result['md5'][:12]}...), "
+                        f"失败批次={buffer.failed_batches}"
+                    )
+                    return {
+                        "status": "failed",
+                        "reason": "向量嵌入失败，请稍后重试",
+                        "filename": filename,
+                        "md5": result["md5"],
+                    }
+
                 HybridRetriever.invalidate_cache(user_id)
                 resp = {"status": status, "md5": result["md5"], "filename": filename, "chunks": len(result["chunks"])}
                 if status == "degraded":
