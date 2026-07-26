@@ -77,11 +77,12 @@ classify_image_min_h: 30                     # 图层判定: 忽略小于此高�
 render_resolution: 2                        # 页面渲染倍率 Matrix(N,N) (text_mix_pdf)
 sse_queue_maxsize: 64                       # SSE 事件队列最大容量
 
-# --- PDF 多模态 — MinerU (langchain-mineru) ---
-mineru_mode: precision                       # 解析模式: flash(免费,10MB/20页) | precision(需Token,200MB/600页)
+# --- PDF 多模态 — MinerU SDK ---
+mineru_mode: precision                       # 解析模式: flash(免费,10MB/20页) | precision(需Token,200MB/200页)
 mineru_language: ch                          # 文档语言代码
-mineru_token: ""                             # API Token (空则从环境变量 MINERU_TOKEN 读取)
+mineru_token: "eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiI2MTcwMDc5NiIsInJvbCI6IlJPTEVfUkVHSVNURVIiLCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc4Mjc0MDg3OCwiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIsInBob25lIjoiMTgyNzU3NjgxNDYiLCJvcGVuSWQiOm51bGwsInV1aWQiOiIxYjUzMzg0My04OTRjLTRjM2QtYjNlNS02Y2QzMjg5MGU0ZGYiLCJlbWFpbCI6IiIsImV4cCI6MTc5MDUxNjg3OH0.JuzLN_ZChmsT2SuuOfn_lI4623avgQGEG6JyrYsJYsz2BuFzfEOM3ngfMluS9NSoE-U4MJgc7iunSLiOCvLeAQ"                             # API Token (空则从环境变量 MINERU_TOKEN 读取)
 mineru_timeout: 1200                         # 请求超时秒数
+mineru_max_pages_per_batch: 200              # MinerU API 单次最大页数
 
 # --- 视觉服务 ---
 vision_default_prompt: "请详细描述这张图片的内容。如果是图表，请提取其中的数据和趋势；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"
@@ -117,7 +118,7 @@ log_filename: app.log                        # 日志文件名
 noisy_logger_prefixes: ["pdfminer", "watchfiles", "urllib3", "httpcore", "httpx", "PIL"]  # 抑制 DEBUG 的第三方库
 
 # --- SSE 流 ---
-sse_stream_timeout: 600                      # SSE 事件流超时（秒）
+sse_stream_timeout: 1200                      # SSE 事件流超时（秒）
 zip_sse_queue_maxsize: 256                   # 压缩包 SSE 队列容量
 token_queue_poll_timeout: 0.1                # Token 队列轮询间隔（秒）
 

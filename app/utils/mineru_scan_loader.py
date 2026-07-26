@@ -24,6 +24,8 @@ MINERU_MODE = get_config("mineru_mode", "precision")
 MINERU_LANGUAGE = get_config("mineru_language", "ch")
 MINERU_TOKEN = get_config("mineru_token", "") or os.getenv("MINERU_TOKEN", "")
 MINERU_TIMEOUT = int(get_config("mineru_timeout", 1200))
+MINERU_MAX_PAGES = int(os.getenv("MINERU_MAX_PAGES_PER_BATCH",
+    str(get_config("mineru_max_pages_per_batch", 200))))
 
 
 # ============================================================
@@ -125,13 +127,11 @@ async def process_scan_pdf_mineru(
     流程: 整份 PDF 一次提交 → content_list 按 page_idx 分组 → 保存图片 → 组装 Document。
     """
     from mineru import MinerU
+    from pypdf import PdfReader, PdfWriter
 
     from app.utils.path_tool import get_data_path, get_image_dir
 
     pdf_name = Path(pdf_path).name
-
-    if progress_callback:
-        await progress_callback("loading", f"MinerU 解析中 ({pdf_name})...")
 
     # ── 准备图片输出目录 ──
     mineru_img_dir = get_image_dir(f"{user_id}/{md5_hex}/mineru")
@@ -141,42 +141,89 @@ async def process_scan_pdf_mineru(
     _token = MINERU_TOKEN if MINERU_MODE == "precision" else None
     client = MinerU(token=_token)
 
-    # ── 提交整份 PDF（一次 API 调用） ──
-    if progress_callback:
-        await progress_callback("loading", f"MinerU 解析中 ({pdf_name})...")
+    # ── 分批提交 PDF（超过 MINERU_MAX_PAGES 页时自动拆分） ──
+    reader = PdfReader(str(pdf_path))
+    total_pages = len(reader.pages)
+    batch_size = MINERU_MAX_PAGES
 
-    try:
-        if MINERU_MODE == "flash":
-            result = client.flash_extract(
-                pdf_path,
-                language=MINERU_LANGUAGE,
-                timeout=MINERU_TIMEOUT,
-            )
-        else:
-            result = client.extract(
-                pdf_path,
-                language=MINERU_LANGUAGE,
-                timeout=MINERU_TIMEOUT,
-                formula=True,
-                table=True,
-            )
-    except Exception as e:
-        logger.error(f"【scan_pdf】MinerU API 异常: {e}")
-        raise ValueError(
-            f"【scan_pdf】MinerU 解析失败: {e}. "
-            f"请检查文件后重新上传: {pdf_name}"
-        ) from e
+    # 按 batch_size 分组页码: [(1, 200), (201, 400), ...]
+    batches: list[tuple[int, int]] = []
+    for start in range(1, total_pages + 1, batch_size):
+        end = min(start + batch_size - 1, total_pages)
+        batches.append((start, end))
 
-    if result.state != "done":
-        raise ValueError(
-            f"【scan_pdf】MinerU 解析失败: state={result.state}, "
-            f"error={result.error}. 文件: {pdf_name}"
-        )
+    all_content_list: list[dict] = []
+    all_images: list = []
+    all_markdown: str = ""  # flash 模式 fallback
+
+    from tempfile import TemporaryDirectory
+
+    for batch_idx, (batch_start, batch_end) in enumerate(batches):
+        if progress_callback:
+            if len(batches) > 1:
+                await progress_callback(
+                    "loading",
+                    f"MinerU 解析中 ({batch_start}-{batch_end}/{total_pages} 页)...",
+                )
+            else:
+                await progress_callback("loading", f"MinerU 解析中 ({pdf_name})...")
+
+        # 拆分该批次的 PDF
+        with TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            batch_pdf_path = tmpdir_path / f"batch_{batch_start}_{batch_end}.pdf"
+            writer = PdfWriter()
+            for pn in range(batch_start - 1, batch_end):
+                writer.add_page(reader.pages[pn])
+            with open(batch_pdf_path, "wb") as f:
+                writer.write(f)
+
+            # 调用 MinerU API
+            try:
+                if MINERU_MODE == "flash":
+                    result = client.flash_extract(
+                        str(batch_pdf_path),
+                        language=MINERU_LANGUAGE,
+                        timeout=MINERU_TIMEOUT,
+                    )
+                else:
+                    result = client.extract(
+                        str(batch_pdf_path),
+                        language=MINERU_LANGUAGE,
+                        timeout=MINERU_TIMEOUT,
+                        formula=True,
+                        table=True,
+                    )
+            except Exception as e:
+                logger.error(f"【scan_pdf】MinerU API 异常 (批次 {batch_start}-{batch_end}): {e}")
+                raise ValueError(
+                    f"【scan_pdf】MinerU 解析失败: {e}. "
+                    f"请检查文件后重新上传: {pdf_name}"
+                ) from e
+
+        if result.state != "done":
+            raise ValueError(
+                f"【scan_pdf】MinerU 解析失败 (批次 {batch_start}-{batch_end}): "
+                f"state={result.state}, error={result.error}. 文件: {pdf_name}"
+            )
+
+        # 合并 content_list，偏移 page_idx（MinerU 从 0 开始编号每批，需加上该批起始页码）
+        page_offset = batch_start - 1
+        for block in (result.content_list or []):
+            block["page_idx"] = block.get("page_idx", 0) + page_offset
+        all_content_list.extend(result.content_list or [])
+        all_images.extend(result.images or [])
+
+        # flash 模式：拼接 markdown
+        if all_markdown or result.markdown:
+            if all_markdown:
+                all_markdown += f"\n\n---\n\n"
+            all_markdown += (result.markdown or "")
 
     # ── 解析 content_list，按 page_idx 分组 ──
-    content_list = result.content_list or []
-    images = result.images or []
-    markdown_full = result.markdown or ""
+    content_list = all_content_list
+    images = all_images
+    markdown_full = all_markdown
 
     # 按 page_idx 分组块
     pages_blocks: dict[int, list[dict]] = {}
