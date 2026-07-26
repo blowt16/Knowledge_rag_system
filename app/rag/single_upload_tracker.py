@@ -78,6 +78,7 @@ class SingleUploadTracker:
             "md5_hex": "",
             "extension": file_path.suffix.lower().lstrip("."),
             "on_batch_triggered": False,
+            "chunk_offset": 0,  # 跨批次 chunk_id 累计偏移，防止 upsert 覆盖
         }
 
         # 预计算 MD5，确保 process_to_chunks 内部的 on_batch 回调能拿到正确 MD5
@@ -115,8 +116,9 @@ class SingleUploadTracker:
                         f"(第{batch_start}-{batch_end}页): batch_docs 为空，跳过"
                     )
                     return
-                chunks = await processor._prepare_chunks(
+                chunks, n = await processor._prepare_chunks(
                     batch_docs, user_id, _ctx["md5_hex"], filename, _ctx["extension"],
+                    chunk_offset=_ctx["chunk_offset"],
                 )
                 if not chunks:
                     logger.warning(
@@ -126,8 +128,10 @@ class SingleUploadTracker:
                     return
                 logger.info(
                     f"【单文件上传】MinerU 第{batch_idx + 1}/{total_batches}批完成 "
-                    f"(第{batch_start}-{batch_end}页): {len(batch_docs)} 文档 → {len(chunks)} chunks"
+                    f"(第{batch_start}-{batch_end}页): {len(batch_docs)} 文档 → {n} chunks "
+                    f"[offset={_ctx['chunk_offset']}]"
                 )
+                _ctx["chunk_offset"] += n
                 buffer.add(chunks, _ctx["md5_hex"], filename, str(file_path))
                 # 进度: 分类完成(10%) 到 清洗前(45%)，按批次比例分配
                 pct = 0.10 + (0.45 - 0.10) * ((batch_idx + 1) / total_batches)
@@ -254,8 +258,9 @@ class SingleUploadTracker:
             is_degraded = status == "degraded"
             self.tasks[task_id]["status"] = "degraded" if is_degraded else "done"
             elapsed = time.time() - t_start
+            total_chunks = buffer.total_flushed if not chunks else len(chunks)
             logger.info(
-                f"【上传完成】{filename}: {len(chunks)} chunks, "
+                f"【上传完成】{filename}: {total_chunks} chunks, "
                 f"耗时 {elapsed:.1f}s ({elapsed/60:.1f}min)"
                 + (" (降级模式)" if is_degraded else "")
             )
@@ -263,7 +268,7 @@ class SingleUploadTracker:
                 "status": "degraded" if is_degraded else "done",
                 "md5": md5_hex,
                 "filename": filename,
-                "chunks": len(chunks),
+                "chunks": total_chunks,
                 "elapsed_seconds": round(elapsed, 1),
             }
             if is_degraded:

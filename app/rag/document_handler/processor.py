@@ -175,10 +175,12 @@ class DocumentProcessor:
     async def _prepare_chunks(
         self, documents: list, user_id: str, md5_hex: str,
         original_filename: str, extension: str,
-    ) -> list:
-        """清洗 → 切分 → 元数据注入，返回处理好的 chunk 列表。
+        chunk_offset: int = 0,
+    ) -> tuple[list, int]:
+        """清洗 → 切分 → 元数据注入，返回 (chunk列表, 本批chunk数量)。
 
         从 process_to_chunks 中抽取，供 MinerU 分批流水线复用。
+        chunk_offset: 跨批次累计偏移，确保 chunk_id 全局唯一。
         """
         documents = _clean_text(documents)
         if not documents:
@@ -200,9 +202,10 @@ class DocumentProcessor:
 
         digits = int(get_config("chunk_id_digits", 4))
         for i, doc in enumerate(documents):
-            doc.metadata["chunk_index"] = i
+            global_i = chunk_offset + i
+            doc.metadata["chunk_index"] = global_i
             doc.metadata["kb_id"] = user_id
-            doc.metadata["chunk_id"] = f"{user_id}_{md5_hex}_{i:0{digits}d}"
+            doc.metadata["chunk_id"] = f"{user_id}_{md5_hex}_{global_i:0{digits}d}"
             doc.metadata["user_id"] = user_id
             doc.metadata["md5"] = md5_hex
             doc.metadata["original_filename"] = original_filename
@@ -213,9 +216,10 @@ class DocumentProcessor:
 
         logger.info(
             f"【文档处理】{original_filename}: "
-            f"{len(documents)} chunks (清洗+切分+元数据)"
+            f"{chunk_offset}→{chunk_offset + len(documents) - 1} "
+            f"({len(documents)} chunks, 清洗+切分+元数据)"
         )
-        return documents
+        return documents, len(documents)
 
     @staticmethod
     def _cleanup_images(user_id: str, md5_hex: str):
@@ -412,7 +416,7 @@ class DocumentProcessor:
         # 4-6. 清洗 → 切分 → 元数据
         await _push("cleaning", "文本清洗中…")
         try:
-            documents = await self._prepare_chunks(
+            documents, _ = await self._prepare_chunks(
                 documents, user_id, md5_hex, original_filename, extension,
             )
         except Exception as e:
