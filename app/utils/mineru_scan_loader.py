@@ -26,6 +26,8 @@ MINERU_TOKEN = get_config("mineru_token", "") or os.getenv("MINERU_TOKEN", "")
 MINERU_TIMEOUT = int(get_config("mineru_timeout", 1200))
 MINERU_MAX_PAGES = int(os.getenv("MINERU_MAX_PAGES_PER_BATCH",
     str(get_config("mineru_max_pages_per_batch", 200))))
+MINERU_IMAGE_MIN_SIZE = int(os.getenv("MINERU_IMAGE_MIN_SIZE",
+    str(get_config("mineru_image_min_size", 30))))
 
 
 # ============================================================
@@ -150,6 +152,19 @@ def _build_documents(
         try:
             ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "png"
             page_num = img_path_to_page.get(img.path, 1)
+
+            # 过滤 logo/无意义小图
+            try:
+                from io import BytesIO
+                from PIL import Image as PILImage
+                pil_img = PILImage.open(BytesIO(img.data))
+                w, h = pil_img.size
+                if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
+                    logger.debug(f"【scan_pdf】跳过小图: {img.name} ({w}x{h})")
+                    continue
+            except Exception:
+                pass  # 无法解析尺寸则保留
+
             local_name = f"p{page_num}_i{idx}.{ext}"
             img_full_path = mineru_img_dir / local_name
             img_full_path.write_bytes(img.data)

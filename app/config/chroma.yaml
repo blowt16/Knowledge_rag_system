@@ -83,6 +83,7 @@ mineru_language: ch                          # 文档语言代码
 mineru_token: "eyJ0eXBlIjoiSldUIiwiYWxnIjoiSFM1MTIifQ.eyJqdGkiOiI2MTcwMDc5NiIsInJvbCI6IlJPTEVfUkVHSVNURVIiLCJpc3MiOiJPcGVuWExhYiIsImlhdCI6MTc4Mjc0MDg3OCwiY2xpZW50SWQiOiJsa3pkeDU3bnZ5MjJqa3BxOXgydyIsInBob25lIjoiMTgyNzU3NjgxNDYiLCJvcGVuSWQiOm51bGwsInV1aWQiOiIxYjUzMzg0My04OTRjLTRjM2QtYjNlNS02Y2QzMjg5MGU0ZGYiLCJlbWFpbCI6IiIsImV4cCI6MTc5MDUxNjg3OH0.JuzLN_ZChmsT2SuuOfn_lI4623avgQGEG6JyrYsJYsz2BuFzfEOM3ngfMluS9NSoE-U4MJgc7iunSLiOCvLeAQ"                             # API Token (空则从环境变量 MINERU_TOKEN 读取)
 mineru_timeout: 1200                         # 请求超时秒数
 mineru_max_pages_per_batch: 100              # MinerU API 单次最大页数
+mineru_image_min_size: 30                     # MinerU 图片最小尺寸（像素），过滤 logo 等无意义小图
 
 # --- 视觉服务 ---
 vision_default_prompt: "请详细描述这张图片的内容。如果是图表，请提取其中的数据和趋势；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"
