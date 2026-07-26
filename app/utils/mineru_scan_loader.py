@@ -242,10 +242,9 @@ async def process_scan_pdf_mineru(
                 logger.warning(f"【scan_pdf】第{page_num}页 content_list 无文本")
                 continue
 
-            # 合并图片路径
-            embedded = page_image_map.get(page_num, [])
+            # 扫描件只保留 MinerU 提取的图片（PyMuPDF 提取的是整页扫描图，无用）
             mineru_paths = page_images.get(page_num, [])
-            all_image_paths = embedded + mineru_paths
+            all_image_paths = mineru_paths
 
             meta = {
                 "source": file_path,
@@ -280,9 +279,9 @@ async def process_scan_pdf_mineru(
             if not page_md.strip():
                 continue
 
-            embedded = page_image_map.get(page_num, [])
+            # 扫描件只保留 MinerU 提取的图片
             mineru_paths = page_images.get(page_num, [])
-            all_image_paths = embedded + mineru_paths
+            all_image_paths = mineru_paths
 
             # 替换图片引用
             page_md = _replace_images_in_text(page_md, image_map, user_id, md5_hex)
