@@ -25,8 +25,8 @@ def _remove_toc_lines(text: str) -> str:
     in_toc_section = False
 
     def _is_toc_line(s: str) -> bool:
-        # 1. 经典省略号 + 尾部页码
-        if re.search(r'[.…]{3,}\s*\d{1,4}\s*$', s):
+        # 1. 省略号/点号连接符 + 尾部页码（…… 或 ... 均可）
+        if re.search(r'[.…]{2,}\s*\d{1,4}\s*$', s):
             return True
         # 2. 制表符 + 尾部页码
         if re.search(r'\t{1,3}\d{1,4}\s*$', s):
