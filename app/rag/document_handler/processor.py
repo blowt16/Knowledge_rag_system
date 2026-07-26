@@ -360,6 +360,18 @@ class DocumentProcessor:
             logger.error(f"【文档加载】{extension.upper()} 加载失败: {e}")
 
         if not documents:
+            if on_batch:
+                # 流水线模式：文档已通过 on_batch 逐批送出，空列表是预期行为
+                logger.info(
+                    f"【向量数据库】文件 {original_filename} 流水线模式完成"
+                )
+                return {
+                    "status": "ok",
+                    "chunks": [],
+                    "md5": md5_hex,
+                    "filename": original_filename,
+                    "file_path": str(file_path),
+                }
             logger.error(f"【向量数据库】文件 {original_filename} 加载内容为空")
             # 加载失败时清理已提取的图片（pdf_multimodal_loader 在解析前已提取）
             self._cleanup_images(user_id, md5_hex)
@@ -396,17 +408,6 @@ class DocumentProcessor:
             # 注意：不入库 MD5，允许用户重试
 
         # 4-6. 清洗 → 切分 → 元数据
-        if on_batch and not documents:
-            # 流水线模式：文档已通过 on_batch 逐批处理，直接返回成功
-            result = {
-                "status": "ok",
-                "chunks": [],
-                "md5": md5_hex,
-                "filename": original_filename,
-                "file_path": str(file_path),
-            }
-            return result
-
         await _push("cleaning", "文本清洗中…")
         documents = await self._prepare_chunks(
             documents, user_id, md5_hex, original_filename, extension,
