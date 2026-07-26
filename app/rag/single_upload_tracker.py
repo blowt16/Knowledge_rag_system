@@ -110,12 +110,24 @@ class SingleUploadTracker:
                 """MinerU 分批回调：清洗 → 切分 → 缓冲 → 进度推送。"""
                 _ctx["on_batch_triggered"] = True
                 if not batch_docs:
+                    logger.warning(
+                        f"【单文件上传】MinerU 第{batch_idx + 1}/{total_batches}批 "
+                        f"(第{batch_start}-{batch_end}页): batch_docs 为空，跳过"
+                    )
                     return
                 chunks = await processor._prepare_chunks(
                     batch_docs, user_id, _ctx["md5_hex"], filename, _ctx["extension"],
                 )
                 if not chunks:
+                    logger.warning(
+                        f"【单文件上传】MinerU 第{batch_idx + 1}/{total_batches}批 "
+                        f"(第{batch_start}-{batch_end}页): 清洗/切分后无有效 chunk"
+                    )
                     return
+                logger.info(
+                    f"【单文件上传】MinerU 第{batch_idx + 1}/{total_batches}批完成 "
+                    f"(第{batch_start}-{batch_end}页): {len(batch_docs)} 文档 → {len(chunks)} chunks"
+                )
                 buffer.add(chunks, _ctx["md5_hex"], filename, str(file_path))
                 # 进度: 分类完成(10%) 到 清洗前(45%)，按批次比例分配
                 pct = 0.10 + (0.45 - 0.10) * ((batch_idx + 1) / total_batches)
@@ -208,6 +220,12 @@ class SingleUploadTracker:
                 })
                 buffer.add(chunks, md5_hex, filename, fp)
             buffer.final_flush()
+
+            logger.info(
+                f"【单文件上传】{filename}: 缓冲池刷批完成, "
+                f"累计 {buffer.total_flushed} chunks 已嵌入"
+                + (f", {buffer.failed_batches} 批失败" if buffer.failed_batches else "")
+            )
 
             # 批量嵌入失败 → 进入文件解析失败处理流程
             if buffer.has_failures:

@@ -763,10 +763,18 @@ async def load_pdf_async(
     else:
         raise ValueError(f"未知 PDF 类型: {pdf_type}")
 
-    logger.info(
-        f"【PDF解析】{original_filename or Path(file_path).name}: "
-        f"成功 {len(documents)} 页/{total_page} 页, "
-        f"降级 {sum(degradation.values()) if degradation else 0} 处, "
-        f"类型 {pdf_type}"
-    )
+    if on_batch:
+        logger.info(
+            f"【PDF解析】{original_filename or Path(file_path).name}: "
+            f"流水线模式（{total_page} 页已通过 on_batch 分批送出）, "
+            f"降级 {sum(degradation.values()) if degradation else 0} 处, "
+            f"类型 {pdf_type}"
+        )
+    else:
+        logger.info(
+            f"【PDF解析】{original_filename or Path(file_path).name}: "
+            f"成功 {len(documents)} 页/{total_page} 页, "
+            f"降级 {sum(degradation.values()) if degradation else 0} 处, "
+            f"类型 {pdf_type}"
+        )
     return documents, degradation
