@@ -150,25 +150,42 @@ def _build_documents(
 
     for idx, img in enumerate(images):
         try:
-            # 只保留 content_list 中引用的图片（image/table 块的 img_path），
-            # 过滤 MinerU 提取但未在文本中引用的背景图/装饰元素，节省磁盘空间
-            page_num = img_path_to_page.get(img.path)
-            if page_num is None:
-                continue
-
             ext = img.name.rsplit(".", 1)[-1] if "." in img.name else "png"
 
-            # 过滤 logo/无意义小图
+            # content_list 中是否引用了此图片
+            page_num = img_path_to_page.get(img.path)
+
+            # 检测是否为装饰元素（极小尺寸 + 极端宽高比 + 小文件）
+            # 仅跳过明确无意义的图片，保留可能有用的大图
+            is_decoration = False
+            w, h, size_kb = 0, 0, 0
             try:
                 from io import BytesIO
                 from PIL import Image as PILImage
                 pil_img = PILImage.open(BytesIO(img.data))
                 w, h = pil_img.size
+                size_kb = len(img.data) / 1024
+                ratio = w / max(h, 1)
+                # 装饰元素特征：极端宽高比 + 小文件 + 极小高度
+                if (ratio > 8 or ratio < 0.15) and size_kb < 8 and h < 80:
+                    is_decoration = True
+                # 极小尺寸
                 if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
-                    logger.debug(f"【scan_pdf】跳过小图: {img.name} ({w}x{h})")
-                    continue
+                    is_decoration = True
             except Exception:
-                pass  # 无法解析尺寸则保留
+                pass
+
+            if is_decoration:
+                logger.debug(f"【scan_pdf】跳过装饰图: {img.name} ({w}x{h} {size_kb:.0f}KB)")
+                continue
+
+            # 未引用但可能是有效内容 → 保留并记录警告
+            if page_num is None:
+                logger.warning(
+                    f"【scan_pdf】保留未引用图片: {img.name} ({w}x{h} {size_kb:.0f}KB)"
+                    f" - MinerU 未在 content_list 中引用但可能是有效内容"
+                )
+                page_num = 1  # 兜底，后续可优化为按文件名推测页码
 
             local_name = f"p{page_num}_i{idx}.{ext}"
             img_full_path = mineru_img_dir / local_name
@@ -182,10 +199,10 @@ def _build_documents(
 
     saved = len(image_map)
     skipped = len(images) - saved
-    if skipped > 0:
+    if skipped > 0 or saved < len(images):
         logger.info(
             f"【scan_pdf】图片过滤: {saved}/{len(images)} 张已保存"
-            + (f", 跳过 {skipped} 张未引用图片" if skipped else "")
+            + (f", 跳过 {skipped} 张装饰图" if skipped else "")
         )
 
     # 逐页组装 Document
