@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -14,6 +15,7 @@ logger = get_logger(__name__)
 
 # 单例
 _classifier: Optional["IntentClassifier"] = None
+_lock = threading.Lock()
 
 
 @dataclass
@@ -39,6 +41,8 @@ class IntentClassifier:
         self._model = None
         self._cache: dict[str, tuple[float, "IntentResult"]] = {}
         self._prompt_loader = PromptLoader()
+        self._cache_max_size = int(get_config("intent_cache_max_size", 500))
+        self._model_lock = threading.Lock()
 
     # ── 公开接口 ──────────────────────────────────────────
 
@@ -61,8 +65,13 @@ class IntentClassifier:
         if cache_key in self._cache:
             cached_at, result = self._cache[cache_key]
             if time.time() - cached_at < int(get_config("intent_cache_ttl", 300)):
-                logger.debug(f"【意图识别】缓存命中: intent={result.intent}")
+                logger.debug(f"【意图识别】缓存命中: intent={result.intent}, "
+                             f"cache_size={len(self._cache)}")
                 return result
+            else:
+                # 过期条目清理
+                del self._cache[cache_key]
+                logger.debug(f"【意图识别】缓存条目过期，已清理")
 
         # 3. 调用轻量 LLM
         try:
@@ -84,7 +93,16 @@ class IntentClassifier:
                 f"低置信度({result.confidence:.2f})",
             )
 
-        # 5. 缓存
+        # 5. 缓存（超过上限时淘汰最旧的一半条目）
+        if len(self._cache) >= self._cache_max_size:
+            stale_count = self._cache_max_size // 2
+            sorted_entries = sorted(self._cache.items(), key=lambda x: x[1][0])
+            for old_key, _ in sorted_entries[:stale_count]:
+                del self._cache[old_key]
+            logger.info(
+                f"【意图识别】缓存淘汰: removed={stale_count}, "
+                f"remaining={len(self._cache)}"
+            )
         self._cache[cache_key] = (time.time(), result)
 
         elapsed = time.time() - t_start
@@ -99,12 +117,17 @@ class IntentClassifier:
 
     def _get_model(self):
         if self._model is None:
-            from app.utils.factory import create_intent_model
-            self._model = create_intent_model()
+            with self._model_lock:
+                if self._model is None:
+                    from app.utils.factory import create_intent_model
+                    self._model = create_intent_model()
+                    logger.info("【意图识别】模型初始化完成")
         return self._model
 
     def _do_classify(self, query: str, history: list | None) -> Optional[IntentResult]:
         """执行 LLM 调用，解析 JSON 返回。"""
+        import concurrent.futures
+
         model = self._get_model()
         history_text = self._build_history_context(history)
         max_chars = int(get_config("intent_max_query_chars", 500))
@@ -119,8 +142,18 @@ class IntentClassifier:
             logger.warning("【意图识别】prompt 模板为空，降级")
             return None
 
-        response = model.invoke(prompt)
-        raw = response.content if hasattr(response, "content") else str(response)
+        # 带超时的 LLM 调用
+        timeout = int(get_config("intent_timeout", 5))
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(model.invoke, prompt)
+                response = future.result(timeout=timeout)
+            raw = response.content if hasattr(response, "content") else str(response)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"【意图识别】LLM 调用超时 ({timeout}s)，降级")
+            return None
+
+        logger.debug(f"【意图识别】LLM 原始响应: {raw[:300]}")
         return self._parse_response(raw, query)
 
     def _parse_response(self, raw: str, query: str) -> Optional[IntentResult]:

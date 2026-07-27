@@ -1,5 +1,5 @@
 """Agent 编排服务 — LangChain Tool Calling Agent + 消息历史。"""
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 from app.config.loader import get_config
 from app.utils.log_tool import get_logger
 from app.utils.prompt_loader import PromptLoader
@@ -219,7 +219,8 @@ class AgentService:
 
     async def stream_chat(self, query: str, session_id: str,
                           user_id: str = "default_user",
-                          intent_result=None) -> AsyncIterator[dict]:
+                          intent_result: Optional["IntentResult"] = None,
+                          ) -> AsyncIterator[dict]:
         """流式执行 Agent 对话，通过 SSE 推送事件。
 
         Args:
@@ -232,7 +233,7 @@ class AgentService:
         # 手动加载历史消息
         chat_history = memory_svc.load_context(session_id)
 
-        # 构建 agent_input（意图注入优先级 > 多轮注入）
+        # 构建 agent_input（意图注入 > 多轮注入 > 默认提醒）
         agent_input = query
         if intent_result and intent_result.action_directive:
             # 意图识别成功 → 注入精确的硬约束指令
@@ -247,6 +248,13 @@ class AgentService:
                 "[⚠️ 本轮必须调用 knowledge_search 检索知识库，"
                 "禁止基于历史对话中的内容直接作答]\n\n" + query
             )
+        else:
+            # 首轮对话 + 无意图识别 → 默认提醒检索
+            agent_input = (
+                "请基于用户问题判断是否需要调用 knowledge_search 检索知识库，"
+                "需要则先检索再作答。\n\n" + query
+            )
+            logger.debug("【Agent】首轮无意图，注入默认检索提醒")
 
         accumulated = ""
         done_sent = False

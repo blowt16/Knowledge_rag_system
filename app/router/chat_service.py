@@ -46,12 +46,17 @@ class ChatService:
             intent_result = None
             if get_config("intent_enabled", True):
                 try:
-                    from app.intent.intent_classifier import IntentClassifier
-                    classifier = IntentClassifier()
+                    from app.intent.intent_classifier import get_intent_classifier
+                    classifier = get_intent_classifier()
                     history = self._memory.load_context(session_id)
                     intent_result = classifier.classify(query, session_id, history)
+                    logger.info(
+                        f"【对话】意图识别完成: intent={intent_result.intent}, "
+                        f"confidence={intent_result.confidence:.2f}, "
+                        f"action_directive={'有' if intent_result.action_directive else '无'}"
+                    )
                 except Exception as e:
-                    logger.warning(f"【意图识别】分类失败，降级走默认 Agent 流程: {e}")
+                    logger.warning(f"【对话】意图识别失败，降级走默认 Agent 流程: {e}")
                     intent_result = None
 
             logger.info(f"【对话】路由 → Agent工具链: session={session_id[:8]}...")
