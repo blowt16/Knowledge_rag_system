@@ -181,13 +181,15 @@ class ChatService:
         logger.info(f"【RAG直通】本轮耗时: {time.time() - t_start:.1f}s")
 
     async def _handle_agent_stream(self, query: str, session_id: str,
-                                   user_id: str) -> AsyncIterator[str]:
+                                   user_id: str,
+                                   intent_result=None) -> AsyncIterator[str]:
         """Agent 工具链模式。持久化由 AgentService.stream_chat 的 finally 块保证。"""
         t_start = time.time()
         logger.info(f"【Agent】开始处理: session={session_id[:8]}..., query_len={len(query)}")
         try:
             async for event in self._agent_svc.stream_chat(
-                query=query, session_id=session_id, user_id=user_id
+                query=query, session_id=session_id, user_id=user_id,
+                intent_result=intent_result,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
