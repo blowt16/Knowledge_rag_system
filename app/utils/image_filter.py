@@ -282,9 +282,9 @@ class ImageFilter:
         except Exception as e:
             logger.debug(f"【图片过滤】条码检测异常: {e}")
 
-        # ② 启发式兜底: 接近正方形 + QR码典型尺寸 + 小文件
-        # 命中 MinerU 压缩后 pyzbar 无法解码的低质量二维码
-        if 0.8 < ratio < 1.25 and 50 < w < 250 and 50 < h < 250:
+        # ② 启发式兜底: 近正方形 + 小文件（低质量二维码/条码）
+        # MinerU 压缩后 pyzbar 可能无法解码，用尺寸+比例兜底
+        if 0.7 < ratio < 1.4 and 50 < w < 400 and 50 < h < 400:
             return True, f"疑似二维码 ({w}x{h})"
 
         # ③ 条形码兜底: 极宽极矮
