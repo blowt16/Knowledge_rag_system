@@ -149,22 +149,22 @@ class ImageFilter:
             size_kb = len(img_data) / 1024
             ratio = w / max(h, 1)
 
-            # ── 尺寸过滤（全局：已引用也检查基本尺寸） ──
+            # ── ① 尺寸过滤（全局：极小尺寸跳过) ──
             skip, reason = self._check_size(w, h, area, ratio, size_kb, is_referenced)
             if skip:
                 return True, reason
 
-            # 已引用图片只做基本尺寸检查，不做内容分析
-            if is_referenced:
-                return False, ""
-
-            # ── 颜色特征过滤 ──
-            skip, reason = self._check_color(img, w, h)
+            # ── ② 条码检测（全局：条码/二维码一律跳过，含已引用） ──
+            skip, reason = self._check_barcode(img, img_name, w, h)
             if skip:
                 return True, reason
 
-            # ── 条码检测 ──
-            skip, reason = self._check_barcode(img, img_name, w, h)
+            # 已引用图片不再检查以下条件
+            if is_referenced:
+                return False, ""
+
+            # ── ③ 颜色特征过滤（仅未引用） ──
+            skip, reason = self._check_color(img, w, h)
             if skip:
                 return True, reason
 
