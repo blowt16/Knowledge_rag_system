@@ -150,7 +150,7 @@ class AgentService:
                 if image_paths:
                     img_md = RAGService._build_image_markdown([doc])
                     if img_md:
-                        line += "\n\n--- 该段资料包含以下图片（必须在回答中引用） ---\n"
+                        line += "\n\n--- 该段资料包含以下图片（如使用本段内容则须引用） ---\n"
                         line += "\n".join(img_md)
 
                 lines.append(line)
