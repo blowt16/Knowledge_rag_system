@@ -58,7 +58,12 @@ batch_max_retries: 3      # 单批失败最大重试次数
 batch_retry_backoff: [1, 2, 4]  # 重试退避间隔（秒）
 
 # --- 查询改写 ---
-pure_keyword_max_length: 10
+# pure_keyword_max_length: 纯关键词判定字符数阈值（≤此值 → bm25_only，>此值 → hybrid）
+#   测试: "虚拟存储器的特征"(8字) > 5 → 走混合检索 ✅
+#   "虚拟存储"(4字) ≤ 5 → 走 bm25_only
+pure_keyword_max_length: 5
+# hyde_min_length: HyDE 改写最小字符数（生成结果 ≤ 此值视为无效，回退原始查询）
+#   测试: HyDE 生成 ≤ 3 字 → 退化使用原始查询
 hyde_min_length: 3
 llm_history_turns: 5           # 输入 LLM 的最近对话轮次（替代字符截断，保留完整消息语义）
 query_words: ["什么", "怎么", "如何", "为什么", "哪", "谁", "多少", "吗", "呢", "？", "?", "能不能", "可不可以"]
