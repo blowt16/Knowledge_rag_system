@@ -226,6 +226,14 @@ class AgentService:
         # 手动加载历史消息
         chat_history = memory_svc.load_context(session_id)
 
+        # 多轮对话时，在用户消息前注入检索提醒（recency bias 强制触发 tool call）
+        agent_input = query
+        if chat_history:
+            agent_input = (
+                "[⚠️ 本轮必须调用 knowledge_search 检索知识库，"
+                "禁止基于历史对话中的内容直接作答]\n\n" + query
+            )
+
         accumulated = ""
         done_sent = False
         tool_call_counts: dict[str, int] = {}
@@ -238,7 +246,7 @@ class AgentService:
         try:
             async for event in agent.astream_events(
                 {
-                    "input": query,
+                    "input": agent_input,
                     "chat_history": chat_history or [],
                 },
                 version="v2",
