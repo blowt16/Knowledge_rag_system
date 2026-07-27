@@ -155,8 +155,8 @@ def _build_documents(
             # content_list 中是否引用了此图片
             page_num = img_path_to_page.get(img.path)
 
-            # 检测是否为装饰元素（极小尺寸 + 极端宽高比 + 小文件）
-            # 仅跳过明确无意义的图片，保留可能有用的大图
+            # 检测装饰元素，仅跳过明确无意义的图片
+            # 策略：已引用图片一律保留；未引用图片按特征分级过滤
             is_decoration = False
             w, h, size_kb = 0, 0, 0
             try:
@@ -166,12 +166,19 @@ def _build_documents(
                 w, h = pil_img.size
                 size_kb = len(img.data) / 1024
                 ratio = w / max(h, 1)
-                # 装饰元素特征：极端宽高比 + 小文件 + 极小高度
-                if (ratio > 8 or ratio < 0.15) and size_kb < 8 and h < 80:
-                    is_decoration = True
-                # 极小尺寸
+
+                # 极小尺寸（无论是否引用都跳过）
                 if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
                     is_decoration = True
+
+                if page_num is None:
+                    # 以下条件仅对未引用图片生效（已引用的一律保留）
+                    # ① 装饰线/页眉页脚：极端宽高比 + 小文件 + 矮
+                    if (ratio > 5 or ratio < 0.2) and size_kb < 10 and h < 100:
+                        is_decoration = True
+                    # ② 正方形图标/二维码：接近正方形 + 中小尺寸 + 未引用
+                    if 0.7 < ratio < 1.4 and 40 < w < 400 and 40 < h < 400:
+                        is_decoration = True
             except Exception:
                 pass
 
