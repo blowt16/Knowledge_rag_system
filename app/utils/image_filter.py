@@ -283,9 +283,18 @@ class ImageFilter:
             logger.debug(f"【图片过滤】条码检测异常: {e}")
 
         # ② 启发式兜底: 近正方形 + QR 码典型尺寸
-        # 命中 MinerU 压缩后 pyzbar 无法解码的低质量二维码
+        # 小尺寸(50-220px): 无条件过滤 (159-168px 全是 QR 码)
+        # 中等尺寸(220-400px): 需边缘密度佐证 (区分 QR/条码 vs 正常内容图)
         if 0.7 < ratio < 1.4 and 50 < w < 400 and 50 < h < 400:
-            return True, f"疑似二维码 ({w}x{h})"
+            if w <= 220 and h <= 220:
+                return True, f"疑似二维码 ({w}x{h})"
+            else:
+                edge = _compute_edge_density(img)
+                # 极低边缘密度: 大面积纯色 → QR码(简单黑白图案)
+                # 极高边缘密度: 密集条纹 → 条码
+                if edge < 0.05 or edge > 0.35:
+                    tag = "二维码" if edge < 0.05 else "条形码"
+                    return True, f"疑似{tag} ({w}x{h} edge={edge:.2f})"
 
         # ③ 条形码兜底: 极宽极矮 + 高边缘密度（密集黑白交替条纹）
         # 用边缘密度区分真条码 vs 宽图表/装饰线，避免误杀
