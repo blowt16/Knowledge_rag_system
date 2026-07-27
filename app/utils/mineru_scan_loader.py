@@ -112,6 +112,55 @@ def _blocks_to_markdown(
 
 
 # ============================================================
+# 图片过滤 — 识别并跳过无意义的装饰/图标/码图
+# ============================================================
+
+def _should_skip_image(img_data: bytes, img_name: str, is_referenced: bool) -> tuple[bool, str]:
+    """判断图片是否应跳过（装饰图/图标/条码/二维码等无意义元素）。
+
+    Args:
+        img_data: 图片原始字节
+        img_name: MinerU 图片文件名 (如 images/img_0.png)
+        is_referenced: content_list 中是否有 image/table 块引用了此图片
+
+    Returns:
+        (skip, reason): 是否跳过 + 跳过原因
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        pil_img = PILImage.open(BytesIO(img_data))
+        w, h = pil_img.size
+        size_kb = len(img_data) / 1024
+        ratio = w / max(h, 1)
+
+        # ── 全局条件（无论是否引用） ──
+        # ① 极小尺寸: 追踪像素/占位符
+        if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
+            return True, f"极小尺寸 ({w}x{h})"
+
+        # ── 仅未引用图片 ──
+        if not is_referenced:
+            # ② 装饰线/页眉页脚: 极端宽高比 + 小文件 + 矮
+            if (ratio > 5 or ratio < 0.2) and size_kb < 10 and h < 100:
+                return True, f"装饰线 ({w}x{h} {size_kb:.0f}KB ratio={ratio:.1f})"
+
+            # ③ 正方形图标/二维码: 接近正方形 + 中小尺寸
+            if 0.7 < ratio < 1.4 and 40 < w < 400 and 40 < h < 400:
+                return True, f"正方形图标 ({w}x{h} {size_kb:.0f}KB)"
+
+            # ④ 条形码: 极宽极矮 + 一定宽度
+            if ratio > 6 and h < 120 and w > 200 and size_kb < 60:
+                return True, f"条形码 ({w}x{h} {size_kb:.0f}KB ratio={ratio:.1f})"
+
+    except Exception:
+        pass
+
+    return False, ""
+
+
+# ============================================================
 # 单批结果 → Document 列表
 # ============================================================
 
@@ -155,41 +204,18 @@ def _build_documents(
             # content_list 中是否引用了此图片
             page_num = img_path_to_page.get(img.path)
 
-            # 检测装饰元素，仅跳过明确无意义的图片
-            # 策略：已引用图片一律保留；未引用图片按特征分级过滤
-            is_decoration = False
-            w, h, size_kb = 0, 0, 0
-            try:
-                from io import BytesIO
-                from PIL import Image as PILImage
-                pil_img = PILImage.open(BytesIO(img.data))
-                w, h = pil_img.size
-                size_kb = len(img.data) / 1024
-                ratio = w / max(h, 1)
-
-                # 极小尺寸（无论是否引用都跳过）
-                if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
-                    is_decoration = True
-
-                if page_num is None:
-                    # 以下条件仅对未引用图片生效（已引用的一律保留）
-                    # ① 装饰线/页眉页脚：极端宽高比 + 小文件 + 矮
-                    if (ratio > 5 or ratio < 0.2) and size_kb < 10 and h < 100:
-                        is_decoration = True
-                    # ② 正方形图标/二维码：接近正方形 + 中小尺寸 + 未引用
-                    if 0.7 < ratio < 1.4 and 40 < w < 400 and 40 < h < 400:
-                        is_decoration = True
-            except Exception:
-                pass
-
-            if is_decoration:
-                logger.debug(f"【scan_pdf】跳过装饰图: {img.name} ({w}x{h} {size_kb:.0f}KB)")
+            # 图片过滤：跳过装饰图/图标/条码等无意义元素
+            skip, reason = _should_skip_image(
+                img.data, img.name, is_referenced=(page_num is not None),
+            )
+            if skip:
+                logger.debug(f"【scan_pdf】跳过图片: {img.name} - {reason}")
                 continue
 
-            # 未引用但可能是有效内容 → 保留并记录警告
+            # 未引用但保留的 → 记录警告供人工检查
             if page_num is None:
                 logger.warning(
-                    f"【scan_pdf】保留未引用图片: {img.name} ({w}x{h} {size_kb:.0f}KB)"
+                    f"【scan_pdf】保留未引用图片: {img.name}"
                     f" - MinerU 未在 content_list 中引用但可能是有效内容"
                 )
                 page_num = 1  # 兜底，后续可优化为按文件名推测页码
