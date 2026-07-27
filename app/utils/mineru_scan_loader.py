@@ -142,17 +142,17 @@ def _should_skip_image(img_data: bytes, img_name: str, is_referenced: bool) -> t
 
         # ── 仅未引用图片 ──
         if not is_referenced:
-            # ② 装饰线/页眉页脚: 极端宽高比 + 小文件 + 矮
+            # ② 条码/二维码: pyzbar 精确检测（一行代码，性能极高）
+            try:
+                from pyzbar.pyzbar import decode as pyzbar_decode
+                if pyzbar_decode(pil_img):
+                    return True, f"条码/二维码 ({w}x{h})"
+            except Exception:
+                pass
+
+            # ③ 装饰线/页眉页脚: 极端宽高比 + 小文件 + 矮
             if (ratio > 5 or ratio < 0.2) and size_kb < 10 and h < 100:
                 return True, f"装饰线 ({w}x{h} {size_kb:.0f}KB ratio={ratio:.1f})"
-
-            # ③ 正方形图标/二维码: 接近正方形 + 中小尺寸
-            if 0.7 < ratio < 1.4 and 40 < w < 400 and 40 < h < 400:
-                return True, f"正方形图标 ({w}x{h} {size_kb:.0f}KB)"
-
-            # ④ 条形码: 极宽极矮 + 一定宽度
-            if ratio > 6 and h < 120 and w > 200 and size_kb < 60:
-                return True, f"条形码 ({w}x{h} {size_kb:.0f}KB ratio={ratio:.1f})"
 
     except Exception:
         pass
