@@ -208,8 +208,11 @@ class IntentClassifier:
                 "[SYSTEM OVERRIDE — 本次对话硬约束]\n"
                 f"意图判定: 无需检索知识库\n"
                 f"原因: {reason}\n"
-                "执行指令: 跳过 knowledge_search，根据当前 query "
-                "直接作答或调用其他工具。"
+                "执行指令:\n"
+                "  跳过 knowledge_search。根据 query 性质决定后续行为：\n"
+                "  - 需要实时/外部/最新信息（天气、新闻、股价、最新动态等）"
+                "→ 必须调用 web_search 获取后作答\n"
+                "  - 闲聊、问候、能力问询、纯常识问题 → 直接作答"
             )
 
     def _build_history_context(self, history: list | None) -> str:
