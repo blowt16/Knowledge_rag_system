@@ -9,16 +9,8 @@ logger = get_logger(__name__)
 class WebSearchService:
     """联网搜索服务。使用 DuckDuckGo 搜索，无需 API Key。
 
-    默认仅启用国内可访问的后端（mojeek, yandex），
-    可通过 web_search_backends 环境变量覆盖。
+    所有配置项均可通过环境变量覆盖，参考 .env 中 web_search_* 配置段。
     """
-
-    _DEFAULT_RESULTS = 5
-    _DEFAULT_TIMEOUT = 8
-    _MIN_BODY_LENGTH = 30
-    _MAX_BODY_LENGTH = 200
-    # 国内网络可稳定访问的搜索引擎
-    _DEFAULT_BACKENDS = "mojeek,yandex"
 
     # 低质量域名模式（钓鱼/垃圾站）
     _SPAM_DOMAIN_RE = re.compile(
@@ -33,9 +25,11 @@ class WebSearchService:
         Returns:
             搜索结果文本，包含标题、摘要、URL。
         """
-        max_results = int(get_config("web_search_max_results", self._DEFAULT_RESULTS))
-        timeout = int(get_config("web_search_timeout", self._DEFAULT_TIMEOUT))
-        backends = get_config("web_search_backends", self._DEFAULT_BACKENDS)
+        max_results = int(get_config("web_search_max_results", 5))
+        min_body_len = int(get_config("web_search_min_body_length", 30))
+        max_body_len = int(get_config("web_search_max_body_length", 200))
+        timeout = int(get_config("web_search_timeout", 8))
+        backends = get_config("web_search_backends", "mojeek,yandex")
         # 多取一些原始结果，过滤后保证输出数量
         raw_limit = max_results * 2 + 3
 
@@ -72,7 +66,7 @@ class WebSearchService:
             body = (r.get("body") or "").strip()
             href = (r.get("href") or "").strip()
             # 跳过空内容、过短内容、垃圾域名
-            if len(body) < self._MIN_BODY_LENGTH:
+            if len(body) < min_body_len:
                 continue
             if self._SPAM_DOMAIN_RE.search(href):
                 logger.debug(f"【联网搜索】过滤垃圾域名: {href}")
@@ -93,7 +87,7 @@ class WebSearchService:
             title = (r.get("title") or "无标题").strip()
             body = (r.get("body") or "").strip()
             href = (r.get("href") or "").strip()
-            body_trimmed = body[:self._MAX_BODY_LENGTH]
+            body_trimmed = body[:max_body_len]
             lines.append(f"[{i}] {title}\n    {body_trimmed}\n    URL: {href}\n")
 
         return "\n".join(lines)
