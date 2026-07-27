@@ -7,12 +7,18 @@ logger = get_logger(__name__)
 
 
 class WebSearchService:
-    """联网搜索服务。使用 DuckDuckGo 搜索，无需 API Key。"""
+    """联网搜索服务。使用 DuckDuckGo 搜索，无需 API Key。
 
-    _DEFAULT_MAX_RESULTS = 5
-    _DEFAULT_TIMEOUT = 10
+    默认仅启用国内可访问的后端（mojeek, yandex），
+    可通过 web_search_backends 环境变量覆盖。
+    """
+
+    _DEFAULT_RESULTS = 5
+    _DEFAULT_TIMEOUT = 8
     _MIN_BODY_LENGTH = 30
     _MAX_BODY_LENGTH = 200
+    # 国内网络可稳定访问的搜索引擎
+    _DEFAULT_BACKENDS = "mojeek,yandex"
 
     # 低质量域名模式（钓鱼/垃圾站）
     _SPAM_DOMAIN_RE = re.compile(
@@ -27,11 +33,16 @@ class WebSearchService:
         Returns:
             搜索结果文本，包含标题、摘要、URL。
         """
-        max_results = int(get_config("web_search_max_results", self._DEFAULT_MAX_RESULTS))
+        max_results = int(get_config("web_search_max_results", self._DEFAULT_RESULTS))
+        timeout = int(get_config("web_search_timeout", self._DEFAULT_TIMEOUT))
+        backends = get_config("web_search_backends", self._DEFAULT_BACKENDS)
         # 多取一些原始结果，过滤后保证输出数量
         raw_limit = max_results * 2 + 3
 
-        logger.info(f"【联网搜索】查询: {query[:100]}")
+        logger.info(
+            f"【联网搜索】查询: {query[:100]}, backends={backends}, "
+            f"max_results={max_results}, timeout={timeout}s"
+        )
 
         # 1. 搜索
         try:
@@ -40,7 +51,12 @@ class WebSearchService:
             except ImportError:
                 from duckduckgo_search import DDGS
             with DDGS() as ddgs:
-                raw_results = list(ddgs.text(query, max_results=raw_limit, timelimit="y"))
+                raw_results = list(ddgs.text(
+                    query,
+                    max_results=raw_limit,
+                    timelimit="y",
+                    backend=backends,
+                ))
         except Exception as e:
             logger.error(f"【联网搜索】搜索失败: {e}")
             return (
