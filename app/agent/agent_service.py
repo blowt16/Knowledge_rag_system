@@ -366,10 +366,9 @@ class AgentService:
             }
         finally:
             saved_answer = accumulated or ""
-            if agent_references:
-                agent_references.sort(key=lambda r: (r.get("source", ""), int(r["page"]) if r["page"] else 0))
-                ref_text = "\n\n---\n**📚 参考来源：**\n" + "\n".join(f"- {r['label']}" for r in agent_references)
-                saved_answer += ref_text
+            # 📚 参考来源 改由 LLM 在回答中自行生成（仅当检索结果被实际引用时），
+            # 避免 knowledge_search 返回无关结果时也强制拼接来源。
+            # SSE references 事件保留，前端可独立展示。
             logger.debug(f"【Agent】准备持久化: session={session_id}, query_len={len(query)}, answer_len={len(saved_answer)}")
             if memory_svc.append_messages(session_id, query, saved_answer):
                 logger.info(f"【Agent】消息持久化成功: session={session_id}")
