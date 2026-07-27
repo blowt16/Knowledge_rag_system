@@ -106,7 +106,7 @@ class AgentService:
                         if relative not in img_seen:
                             img_seen.add(relative)
                             img_refs_list.append(f"{src} → {base_url}/images/{relative}")
-            # 格式化原始文档内容
+            # 格式化原始文档内容（图片紧跟对应文档，确保 LLM 能关联图文）
             lines = []
             for i, doc in enumerate(docs):
                 src = doc.metadata.get("original_filename", "未知")
@@ -118,14 +118,18 @@ class AgentService:
                 if chapter:
                     header += f", {chapter}"
                 header += "]"
-                lines.append(f"{header}\n{doc.page_content[:max_chars]}")
-            answer = "\n\n".join(lines)
-            # 将图片 Markdown 注入工具返回结果，让 Agent LLM 可以在回答中引用图片
-            from app.rag.rag_service import RAGService
-            img_md_lines = RAGService._build_image_markdown(docs)
-            if img_md_lines:
-                answer += "\n\n=== 附：检索结果含以下图片（只能引用这些URL，严禁修改或编造） ===\n"
-                answer += "\n".join(img_md_lines)
+                line = f"{header}\n{doc.page_content[:max_chars]}"
+
+                # 将该文档关联的图片紧跟其后注入——而非集中堆放在末尾
+                image_paths = doc.metadata.get("image_paths", [])
+                if image_paths:
+                    img_md = RAGService._build_image_markdown([doc])
+                    if img_md:
+                        line += "\n\n--- 附：该段资料含以下图片（只能引用这些URL，严禁修改或编造） ---\n"
+                        line += "\n".join(img_md)
+
+                lines.append(line)
+            answer = "\n\n---\n\n".join(lines)
             return answer
 
         from app.rag.web_search_service import WebSearchService

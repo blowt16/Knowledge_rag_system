@@ -240,5 +240,15 @@ class RAGService:
             if chapter:
                 header += f", {chapter}"
             header += "]"
-            lines.append(f"{header}\n{doc.page_content[:max_chars]}")
+            line = f"{header}\n{doc.page_content[:max_chars]}"
+
+            # 将该文档关联的图片紧跟其后注入——而非集中堆放在末尾
+            image_paths = doc.metadata.get("image_paths", [])
+            if image_paths:
+                img_md = RAGService._build_image_markdown([doc])
+                if img_md:
+                    line += "\n\n--- 附：该段资料含以下图片（只能引用这些URL，严禁修改或编造） ---\n"
+                    line += "\n".join(img_md)
+
+            lines.append(line)
         return "\n\n---\n\n".join(lines)
