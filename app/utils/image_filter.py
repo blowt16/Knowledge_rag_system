@@ -123,6 +123,12 @@ class ImageFilter:
             "barcode_types", _cfg("image_filter_barcode_types", ["QRCODE"])
         )
 
+        # 统计计数器
+        self._stats: dict[str, int] = {
+            "total": 0, "saved": 0, "skipped_size": 0,
+            "skipped_barcode": 0, "skipped_color": 0,
+        }
+
         if not self._enabled:
             logger.info("【图片过滤】已禁用 (image_filter_enabled=false)")
 
@@ -139,7 +145,10 @@ class ImageFilter:
         Returns:
             (skip: bool, reason: str)
         """
+        self._stats["total"] += 1
+
         if not self._enabled:
+            self._stats["saved"] += 1
             return False, ""
 
         try:
@@ -152,26 +161,63 @@ class ImageFilter:
             # ── ① 尺寸过滤（全局：极小尺寸跳过) ──
             skip, reason = self._check_size(w, h, area, ratio, size_kb, is_referenced)
             if skip:
+                self._stats["skipped_size"] += 1
                 return True, reason
 
             # ── ② 条码检测（全局：条码/二维码一律跳过，含已引用） ──
             skip, reason = self._check_barcode(img, img_name, w, h)
             if skip:
+                self._stats["skipped_barcode"] += 1
                 return True, reason
 
             # 已引用图片不再检查以下条件
             if is_referenced:
+                self._stats["saved"] += 1
                 return False, ""
 
             # ── ③ 颜色特征过滤（仅未引用） ──
             skip, reason = self._check_color(img, w, h)
             if skip:
+                self._stats["skipped_color"] += 1
                 return True, reason
 
         except Exception:
             pass
 
+        self._stats["saved"] += 1
         return False, ""
+
+    # ---- 统计 ----
+
+    def get_stats(self) -> dict[str, int]:
+        """返回当前累计统计。"""
+        return dict(self._stats)
+
+    def reset_stats(self) -> None:
+        """重置统计计数器（新文件上传前调用）。"""
+        self._stats = {k: 0 for k in self._stats}
+
+    def log_summary(self) -> None:
+        """输出图片过滤汇总日志。"""
+        s = self._stats
+        skipped = s["skipped_size"] + s["skipped_barcode"] + s["skipped_color"]
+        if s["total"] == 0:
+            return
+        parts = [
+            f"总数={s['total']}",
+            f"保存={s['saved']}",
+            f"跳过={skipped}",
+        ]
+        details = []
+        if s["skipped_barcode"]:
+            details.append(f"条码/二维码={s['skipped_barcode']}")
+        if s["skipped_size"]:
+            details.append(f"尺寸/比例={s['skipped_size']}")
+        if s["skipped_color"]:
+            details.append(f"颜色单一={s['skipped_color']}")
+        if details:
+            parts.append("(" + ", ".join(details) + ")")
+        logger.info("【图片过滤】汇总: " + " ".join(parts))
 
     # ---- 子检测 ----
 

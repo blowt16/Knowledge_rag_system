@@ -88,6 +88,10 @@ class SingleUploadTracker:
         except Exception:
             pass
 
+        # 重置图片过滤统计（每个文件独立计数）
+        from app.utils.image_filter import get_image_filter
+        get_image_filter().reset_stats()
+
         try:
             def _cleanup_on_failure():
                 """文件解析失败时清理所有残留数据：ChromaDB + 图片 + MD5。"""
@@ -254,6 +258,7 @@ class SingleUploadTracker:
                 return
 
             HybridRetriever.invalidate_cache(user_id)
+            get_image_filter().log_summary()
 
             is_degraded = status == "degraded"
             self.tasks[task_id]["status"] = "degraded" if is_degraded else "done"
@@ -277,6 +282,7 @@ class SingleUploadTracker:
 
         except Exception as e:
             logger.error(f"【单文件上传】处理失败 {filename}: {e}")
+            get_image_filter().log_summary()
             _cleanup_on_failure()
             self.tasks[task_id]["status"] = "failed"
             self._push_event(task_id, {"event": "error", "data": str(e)})

@@ -67,6 +67,8 @@ class KnowledgeService:
                     }
 
                 HybridRetriever.invalidate_cache(user_id)
+                from app.utils.image_filter import get_image_filter
+                get_image_filter().log_summary()
                 resp = {"status": status, "md5": result["md5"], "filename": filename, "chunks": len(result["chunks"])}
                 if status == "degraded":
                     resp["degradation"] = result.get("degradation", {})
