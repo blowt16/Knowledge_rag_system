@@ -257,28 +257,39 @@ class ImageFilter:
     def _check_barcode(
         self, img: PILImage.Image, img_name: str, w: int, h: int,
     ) -> tuple[bool, str]:
-        """条码/二维码检测。"""
+        """条码/二维码检测。
+
+        pyzbar 精确检测 + 启发式兜底（低质量二维码 pyzbar 可能漏检）。
+        """
         if not self._barcode_enabled:
             return False, ""
 
+        ratio = w / max(h, 1)
+
+        # ① pyzbar 精确检测（优先）
         try:
             from pyzbar.pyzbar import decode as pyzbar_decode
 
             codes = pyzbar_decode(img)
-            if not codes:
-                return False, ""
-
-            # 按配置的码型过滤
-            if self._barcode_types:
-                codes = [c for c in codes if c.type in self._barcode_types]
-
             if codes:
-                types = ", ".join(sorted(set(c.type for c in codes)))
-                return True, f"条码/二维码 ({types} {w}x{h})"
+                if self._barcode_types:
+                    codes = [c for c in codes if c.type in self._barcode_types]
+                if codes:
+                    types = ", ".join(sorted(set(c.type for c in codes)))
+                    return True, f"条码/二维码 ({types} {w}x{h})"
         except ImportError:
-            logger.debug("【图片过滤】pyzbar 未安装，跳过条码检测")
+            logger.debug("【图片过滤】pyzbar 未安装，使用启发式兜底")
         except Exception as e:
             logger.debug(f"【图片过滤】条码检测异常: {e}")
+
+        # ② 启发式兜底: 接近正方形 + QR码典型尺寸 + 小文件
+        # 命中 MinerU 压缩后 pyzbar 无法解码的低质量二维码
+        if 0.8 < ratio < 1.25 and 50 < w < 250 and 50 < h < 250:
+            return True, f"疑似二维码 ({w}x{h})"
+
+        # ③ 条形码兜底: 极宽极矮
+        if ratio > 6 and h < 100 and w > 200:
+            return True, f"疑似条形码 ({w}x{h} ratio={ratio:.1f})"
 
         return False, ""
 
