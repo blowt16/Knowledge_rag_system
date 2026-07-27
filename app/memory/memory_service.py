@@ -1,5 +1,6 @@
 """会话记忆服务 — SQLite 持久化，使用持久连接消除重复 connect/close 开销。"""
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime
@@ -9,6 +10,12 @@ from app.utils.log_tool import get_logger
 
 logger = get_logger(__name__)
 _shared_instance = None
+
+# 匹配 AIMessage 末尾的 📚 参考来源 块，用于 load_context 时剥离
+# 格式: \n\n---\n**📚 参考来源：**\n- label1\n- label2\n...
+_REF_SUFFIX_RE = re.compile(
+    r'\n\n---\n\*\*📚 参考来源：\*\*\n(?:- [^\n]*\n?)*$'
+)
 
 
 def _title_max_len() -> int:
@@ -140,7 +147,9 @@ class ConversationMemoryService:
             if msg_type == "human":
                 messages.append(HumanMessage(content=content))
             elif msg_type == "ai":
-                messages.append(AIMessage(content=content))
+                # 剥离参考来源块，避免 LLM 将历史上标注了"来源"的答案视为伪知识库
+                stripped = _REF_SUFFIX_RE.sub('', content).rstrip()
+                messages.append(AIMessage(content=stripped))
         return messages
 
     def append_messages(self, session_id: str, human_msg: str, ai_msg: str) -> bool:

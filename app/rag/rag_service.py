@@ -181,7 +181,7 @@ class RAGService:
                 if image_paths:
                     img_md = self._build_image_markdown([doc])
                     if img_md:
-                        ctx += "\n\n--- 附：该段资料含以下图片（只能引用这些URL，严禁修改或编造） ---\n" + "\n".join(img_md)
+                        ctx += "\n\n--- 该段资料包含以下图片（必须在回答中引用） ---\n" + "\n".join(img_md)
                 contexts.append(ctx)
             context_text = "\n\n---\n\n".join(contexts)
 
@@ -247,7 +247,7 @@ class RAGService:
             if image_paths:
                 img_md = RAGService._build_image_markdown([doc])
                 if img_md:
-                    line += "\n\n--- 附：该段资料含以下图片（只能引用这些URL，严禁修改或编造） ---\n"
+                    line += "\n\n--- 该段资料包含以下图片（必须在回答中引用） ---\n"
                     line += "\n".join(img_md)
 
             lines.append(line)
