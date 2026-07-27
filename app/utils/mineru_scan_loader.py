@@ -112,54 +112,6 @@ def _blocks_to_markdown(
 
 
 # ============================================================
-# 图片过滤 — 识别并跳过无意义的装饰/图标/码图
-# ============================================================
-
-def _should_skip_image(img_data: bytes, img_name: str, is_referenced: bool) -> tuple[bool, str]:
-    """判断图片是否应跳过（装饰图/图标/条码/二维码等无意义元素）。
-
-    Args:
-        img_data: 图片原始字节
-        img_name: MinerU 图片文件名 (如 images/img_0.png)
-        is_referenced: content_list 中是否有 image/table 块引用了此图片
-
-    Returns:
-        (skip, reason): 是否跳过 + 跳过原因
-    """
-    try:
-        from io import BytesIO
-        from PIL import Image as PILImage
-
-        pil_img = PILImage.open(BytesIO(img_data))
-        w, h = pil_img.size
-        size_kb = len(img_data) / 1024
-        ratio = w / max(h, 1)
-
-        # ── 全局条件（无论是否引用） ──
-        # ① 极小尺寸: 追踪像素/占位符
-        if w < MINERU_IMAGE_MIN_SIZE and h < MINERU_IMAGE_MIN_SIZE:
-            return True, f"极小尺寸 ({w}x{h})"
-
-        # ── 仅未引用图片 ──
-        if not is_referenced:
-            # ② 条码/二维码: pyzbar 精确检测（一行代码，性能极高）
-            try:
-                from pyzbar.pyzbar import decode as pyzbar_decode
-                if pyzbar_decode(pil_img):
-                    return True, f"条码/二维码 ({w}x{h})"
-            except Exception:
-                pass
-
-            # ③ 装饰线/页眉页脚: 极端宽高比 + 小文件 + 矮
-            if (ratio > 5 or ratio < 0.2) and size_kb < 10 and h < 100:
-                return True, f"装饰线 ({w}x{h} {size_kb:.0f}KB ratio={ratio:.1f})"
-
-    except Exception:
-        pass
-
-    return False, ""
-
-
 # ============================================================
 # 单批结果 → Document 列表
 # ============================================================
@@ -205,7 +157,8 @@ def _build_documents(
             page_num = img_path_to_page.get(img.path)
 
             # 图片过滤：跳过装饰图/图标/条码等无意义元素
-            skip, reason = _should_skip_image(
+            from app.utils.image_filter import should_skip_image
+            skip, reason = should_skip_image(
                 img.data, img.name, is_referenced=(page_num is not None),
             )
             if skip:

@@ -86,6 +86,17 @@ mineru_timeout: 1200                         # 请求超时秒数
 mineru_max_pages_per_batch: 100              # MinerU API 单次最大页数
 mineru_image_min_size: 30                     # MinerU 图片最小尺寸（像素），过滤 logo 等无意义小图
 
+# --- 扫描件图片过滤 ---
+image_filter_enabled: true                    # 总开关，关闭则保存所有图片
+image_filter_min_width: 30                    # 最小宽度 px（小于此值 && 高度也小于 min_height 则跳过）
+image_filter_min_height: 30                   # 最小高度 px
+image_filter_max_aspect_ratio: 20             # 最大宽高比（超出视为装饰线）
+image_filter_min_area: 900                    # 最小面积 px²（=30x30）
+image_filter_min_color_variance: 0.005        # 最小颜色方差（0~1，低于此值视为单色装饰）
+image_filter_max_edge_density: 0.95           # 最大边缘密度（0~1，保留接口）
+image_filter_enable_barcode_detection: true   # 条码/二维码检测开关（需 pyzbar）
+image_filter_barcode_types: ["QRCODE", "DATAMATRIX", "CODE128", "EAN13", "EAN8", "CODE39", "CODE93", "ITF", "PDF417"]  # 要过滤的码型
+
 # --- 视觉服务 ---
 vision_default_prompt: "请详细描述这张图片的内容。如果是图表，请提取其中的数据和趋势；如果是文档截图，请识别其中的文字；如果是图片，请描述其主要内容。"
 vision_max_concurrent: 3                     # VL 并发调用上限（Semaphore 限流），避免 API 被限频
