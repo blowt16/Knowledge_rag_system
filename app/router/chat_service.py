@@ -42,8 +42,20 @@ class ChatService:
             async for sse in self._handle_rag_stream(query, user_id, session_id):
                 yield sse
         else:
+            # Agent 模式：先进行意图识别
+            intent_result = None
+            if get_config("intent_enabled", True):
+                try:
+                    from app.intent.intent_classifier import IntentClassifier
+                    classifier = IntentClassifier()
+                    history = self._memory.load_context(session_id)
+                    intent_result = classifier.classify(query, session_id, history)
+                except Exception as e:
+                    logger.warning(f"【意图识别】分类失败，降级走默认 Agent 流程: {e}")
+                    intent_result = None
+
             logger.info(f"【对话】路由 → Agent工具链: session={session_id[:8]}...")
-            async for sse in self._handle_agent_stream(query, session_id, user_id):
+            async for sse in self._handle_agent_stream(query, session_id, user_id, intent_result):
                 yield sse
 
     async def _handle_rag_stream(self, query: str, user_id: str,

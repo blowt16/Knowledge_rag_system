@@ -4,3 +4,4 @@ templates:
   summary: app/config/prompts/summary.txt
   vision: app/config/prompts/vision.txt
   rag_answer: app/config/prompts/rag_answer.txt
+  intent_classifier: app/config/prompts/intent_classifier.txt

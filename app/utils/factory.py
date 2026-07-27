@@ -138,6 +138,69 @@ def create_embedding_model():
 # Vision Model
 # ============================================================
 
+# ============================================================
+# Intent Classification Model（意图识别专用轻量模型）
+# ============================================================
+
+def create_intent_model():
+    """创建意图识别专用轻量模型。
+
+    独立于主 LLM，使用 DeepSeek 小版本降低延迟和成本。
+    通过 INTENT_MODEL_TYPE 环境变量切换。
+    """
+    intent_type = os.getenv("INTENT_MODEL_TYPE", "DEEPSEEK").upper()
+
+    from langchain_openai import ChatOpenAI
+
+    # 意图分类使用 temperature=0，确保输出稳定
+    _T = 0.0
+
+    if intent_type == "DEEPSEEK":
+        deepseek_key = _env("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            primary = ChatOpenAI(
+                model=_env("INTENT_MODEL_NAME", "deepseek-chat"),
+                openai_api_key=deepseek_key,
+                openai_api_base=_env(
+                    "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
+                ),
+                temperature=_T,
+            )
+        else:
+            # 回退到阿里云 DashScope 兼容端点
+            primary = ChatOpenAI(
+                model=_env("INTENT_MODEL_NAME", "deepseek-v4-pro"),
+                openai_api_key=get_api_key(),
+                openai_api_base=_env(
+                    "ALIYUN_BASE_URL",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                ),
+                temperature=_T,
+            )
+
+        # 降级：阿里云通义千问轻量版
+        from langchain_community.chat_models import ChatTongyi
+        fallback = ChatTongyi(
+            model_name=_env("INTENT_FALLBACK_MODEL", "qwen3-turbo"),
+            dashscope_api_key=get_api_key(),
+            temperature=_T,
+        )
+        return primary.with_fallbacks([fallback])
+
+    elif intent_type == "QWEN":
+        from langchain_community.chat_models import ChatTongyi
+        return ChatTongyi(
+            model_name=_env("INTENT_MODEL_NAME", "qwen3-turbo"),
+            dashscope_api_key=get_api_key(),
+            temperature=_T,
+        )
+
+    else:
+        raise ValueError(
+            f"不支持的 INTENT_MODEL_TYPE: {intent_type}，可选值: DEEPSEEK / QWEN"
+        )
+
+
 def create_vision_model():
     """创建视觉模型 — 仅支持阿里云百炼多模态。
 

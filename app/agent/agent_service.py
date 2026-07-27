@@ -218,17 +218,31 @@ class AgentService:
         )
 
     async def stream_chat(self, query: str, session_id: str,
-                          user_id: str = "default_user") -> AsyncIterator[dict]:
-        """流式执行 Agent 对话，通过 SSE 推送事件。"""
+                          user_id: str = "default_user",
+                          intent_result=None) -> AsyncIterator[dict]:
+        """流式执行 Agent 对话，通过 SSE 推送事件。
+
+        Args:
+            intent_result: IntentResult | None，意图分类结果。
+                           非 None 且 action_directive 非空时注入到 agent_input。
+        """
         from app.memory.memory_service import ConversationMemoryService
         memory_svc = ConversationMemoryService.get_shared()
 
         # 手动加载历史消息
         chat_history = memory_svc.load_context(session_id)
 
-        # 多轮对话时，在用户消息前注入检索提醒（recency bias 强制触发 tool call）
+        # 构建 agent_input（意图注入优先级 > 多轮注入）
         agent_input = query
-        if chat_history:
+        if intent_result and intent_result.action_directive:
+            # 意图识别成功 → 注入精确的硬约束指令
+            agent_input = intent_result.action_directive + "\n\n" + query
+            logger.info(
+                f"【Agent】注入意图指令: intent={intent_result.intent}, "
+                f"confidence={intent_result.confidence:.2f}"
+            )
+        elif chat_history:
+            # 无意图识别结果 + 多轮对话 → 使用原有逻辑（recency bias 兜底）
             agent_input = (
                 "[⚠️ 本轮必须调用 knowledge_search 检索知识库，"
                 "禁止基于历史对话中的内容直接作答]\n\n" + query

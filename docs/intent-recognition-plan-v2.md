@@ -76,7 +76,7 @@ handle_chat() [chat_service.py]
   │                    AgentService.stream_chat(intent_result)
   │                      ├── 动态拼接 system_prompt:
   │                      │    NEED_RAG → [SYSTEM OVERRIDE] 必须调用 knowledge_search
-  │                      │    NO_RAG   → [SYSTEM OVERRIDE] 禁止调用任何工具
+  │                      │    NO_RAG   → [SYSTEM OVERRIDE] 跳过知识库检索
   │                      ├── 创建 AgentExecutor
   │                      └── astream_events() 流式输出
 ```
@@ -172,9 +172,9 @@ class IntentResult:
 当 `NO_RAG` 时：
 ```
 [SYSTEM OVERRIDE — 本次对话硬约束]
-意图判定: 闲聊/能力问询
+意图判定: 无需检索知识库
 原因: 用户在进行社交问候
-执行指令: 直接作答，禁止调用 knowledge_search、web_search 等任何工具。
+执行指令: 跳过 knowledge_search，根据当前 query 直接作答或调用其他工具。
 ```
 
 **为什么比现有方案更可靠：**
@@ -183,7 +183,7 @@ class IntentResult:
 |------|-------------|-------------|
 | 信息来源 | 仅判断"有历史"就注入 | 独立 LLM 分析语义后注入 |
 | 措辞 | 统一的模糊警告 | 区分 NEED_RAG/NO_RAG 的精确指令 |
-| NO_RAG 处理 | 不存在（所有多轮都强制检索） | 明确告知"禁止调用工具" |
+| NO_RAG 处理 | 不存在（所有多轮都强制检索） | 明确告知"跳过知识库检索" |
 | 覆盖范围 | 仅多轮对话 | 首轮 + 多轮全覆盖 |
 
 ---
@@ -248,7 +248,7 @@ INTENT_CONFIDENCE_THRESHOLD = float(get_config("intent_confidence_threshold", 0.
 
 # 历史配置
 INTENT_HISTORY_TURNS = int(get_config("intent_history_turns", 2))
-INTENT_MAX_HISTORY_CHARS = int(get_config("intent_max_history_chars", 200))
+INTENT_MAX_HISTORY_CHARS = int(get_config("intent_max_history_chars", 500))
 INTENT_MAX_QUERY_CHARS = int(get_config("intent_max_query_chars", 500))
 
 # 总开关
@@ -440,9 +440,10 @@ class IntentClassifier:
         else:
             return (
                 "[SYSTEM OVERRIDE — 本次对话硬约束]\n"
-                f"意图判定: 闲聊/能力问询\n"
+                f"意图判定: 无需检索知识库\n"
                 f"原因: {reason}\n"
-                "执行指令: 直接作答，禁止调用 knowledge_search、web_search 等任何工具。"
+                "执行指令: 跳过 knowledge_search，根据当前 query "
+                "直接作答或调用其他工具。"
             )
 
     def _build_history_context(self, history: list | None) -> str:
@@ -450,7 +451,7 @@ class IntentClassifier:
         if not history:
             return "（无历史对话，这是首轮对话）"
 
-        max_chars = int(get_config("intent_max_history_chars", 200))
+        max_chars = int(get_config("intent_max_history_chars", 500))
         turns = int(get_config("intent_history_turns", 2))
         recent = history[-(turns * 2):]  # 每轮 user+assistant 两条
 
@@ -581,7 +582,7 @@ INTENT_TIMEOUT=5
 INTENT_CACHE_TTL=300
 INTENT_CONFIDENCE_THRESHOLD=0.7
 INTENT_HISTORY_TURNS=2
-INTENT_MAX_HISTORY_CHARS=200
+INTENT_MAX_HISTORY_CHARS=500
 ```
 
 ---
@@ -634,7 +635,7 @@ else:
         yield sse
 ```
 
-**注意：v1 plan 中的 `_handle_direct_answer()` 新增方法暂不引入。** NO_RAG 场景仍走 Agent 流程，但 system prompt 中会注入 "禁止调用工具" 的硬约束。这样做的好处是：
+**注意：v1 plan 中的 `_handle_direct_answer()` 新增方法暂不引入。** NO_RAG 场景仍走 Agent 流程，但 system prompt 中会注入 "跳过 knowledge_search" 的硬约束，主 LLM 仍可根据 query 调用其他工具或直接作答：
 - 改动范围更小，`chat_service.py` 不需要新增方法
 - NO_RAG 场景依然有对话历史管理、持久化等完整能力
 - 如果意图分类误判，主 LLM 仍有调用工具的能力（比完全跳过 Agent 更安全）
@@ -714,7 +715,7 @@ async def stream_chat(self, query: str, session_id: str,
 + ## 2. 工具调用规则
 + 收到 [SYSTEM OVERRIDE] 指令时，严格按照指令执行工具调用：
 + - NEED_RAG → 必须首先调用 knowledge_search
-+ - NO_RAG → 禁止调用任何工具，直接作答
++ - NO_RAG → 跳过 knowledge_search，根据 query 直接作答或调用其他工具
 + 未收到 [SYSTEM OVERRIDE] 时，默认需要调用 knowledge_search 检索后再作答。
 
 - 3. **每轮必须检索**：无论对话历史中已有多少相关内容，每轮对话都必须重新调用 `knowledge_search`
