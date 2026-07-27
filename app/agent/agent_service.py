@@ -73,7 +73,7 @@ class AgentService:
                 return "知识库中未找到相关内容。"
             docs = result.get("documents", [])
             max_chars = get_config("chunk_size", 500)
-            # 收集文档来源供 references 事件使用（含图片溯源）
+            # 收集文档来源供日志使用（含图片溯源）
             if refs_list is not None:
                 from app.utils.path_tool import get_server_url
                 base_url = get_server_url()
@@ -322,7 +322,6 @@ class AgentService:
                     done_sent = True
                     if agent_references:
                         self._log_agent_refs(agent_references, agent_img_refs)
-                        yield {"event": "references", "data": agent_references}
                     yield {
                         "event": "done",
                         "data": answer,
@@ -342,7 +341,6 @@ class AgentService:
                         done_sent = True
                         if agent_references:
                             self._log_agent_refs(agent_references, agent_img_refs)
-                            yield {"event": "references", "data": agent_references}
                         yield {
                             "event": "done",
                             "data": answer,
@@ -352,7 +350,6 @@ class AgentService:
             if not done_sent and accumulated:
                 if agent_references:
                     self._log_agent_refs(agent_references, agent_img_refs)
-                    yield {"event": "references", "data": agent_references}
                 yield {
                     "event": "done",
                     "data": accumulated,
@@ -366,9 +363,8 @@ class AgentService:
             }
         finally:
             saved_answer = accumulated or ""
-            # 📚 参考来源 改由 LLM 在回答中自行生成（仅当检索结果被实际引用时），
+            # 📚 参考来源 由 LLM 在回答中自行生成（仅当检索结果被实际引用时）。
             # 避免 knowledge_search 返回无关结果时也强制拼接来源。
-            # SSE references 事件保留，前端可独立展示。
             logger.debug(f"【Agent】准备持久化: session={session_id}, query_len={len(query)}, answer_len={len(saved_answer)}")
             if memory_svc.append_messages(session_id, query, saved_answer):
                 logger.info(f"【Agent】消息持久化成功: session={session_id}")
