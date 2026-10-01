@@ -437,7 +437,8 @@ class RAGState(TypedDict):
     skipped_resolve: bool        # 是否跳过了消解（供观测）
     route: str                   # chat | clarify | knowledge
     last_route: str              # 上一轮路由结果，用于多轮分类稳定（见节点 2）
-    clarify_question: str
+    clarify_question: str        # 澄清问句
+    clarify_facets: list[str]    # 候选意图，前端渲染为可点选项（见节点 4）
 
     # 检索
     retrieval_queries: list[RetrievalQuery]   # 三类检索查询，见 3.5.3 节点 5
@@ -646,14 +647,50 @@ resolved_query → 短提示词 → 流式生成 → END
 ```
 resolved_query + history
         ↓
-  LLM 生成反问（引导明确意图）
+  LLM 生成澄清（结构化输出）
+        ↓
+ ┌──────┴───────┐
+ ↓              ↓
+facets        question
+候选意图列表    澄清问句
+ └──────┬───────┘
         ↓
   流式输出 + 标记 route=clarify
         ↓
-       END
+   interrupt() 挂起
+        ↓
+   用户回答 → 从中断点恢复
+        ↓
+   新问题重新走 resolve
 ```
 
-反问需满足：**具体到可选项**（"你是想问缓考申请条件，还是缓考的考试安排？"），而非泛泛的"请详细说明"。
+**输出结构：facets + question**
+
+澄清不能是泛泛的「请详细说明」，而要**先产出结构化的候选意图，再据此提问**：
+
+```json
+{
+  "facets": ["缓考的申请条件", "缓考的考试安排", "缓考的申请流程"],
+  "question": "你是想问哪一方面？"
+}
+```
+
+| 字段 | 作用 |
+|---|---|
+| `facets` | 结构化候选意图。前端可渲染成**可点选项**，用户点一下即可，不必手打 |
+| `question` | 澄清问句本身 |
+
+> 参考个人项目 AskBeforeAnswer（chrisjcc）的双动作设计——它用 `Action: Clarify|Answer` 加 `Facets` 字段区分「该问」和「该答」。它印证了一点：**这个判断靠提示词不稳定，该项目是专门做了 SFT + DPO 微调的**。本项目不训模型，因此触发条件必须收严。
+
+**恢复机制：LangGraph `interrupt()`**
+
+节点内调用 `interrupt()` 挂起图执行，把澄清内容交给前端；用户回答后从中断点恢复，新问题重新走 `resolve`。
+
+> LangGraph 官方对该原语的描述：*"pausing graph execution and surfacing a value to the client"*。状态由检查点保存，无需自建「等待用户输入」状态。
+
+**触发边界**
+
+仅两种（详见 3.5.3 节点 2）：指代无法消解、问题过短且无法定位主题。**该直接回答时反问用户，是体验最差的失败模式。**
 
 ---
 
@@ -951,7 +988,7 @@ DELETE /api/conversations/{id}
 |---|---|---|
 | `session_created` | `session_id` | 新会话 |
 | `resolved` | `resolved_query` | 消解补全结果，前端可展示 |
-| `route` | `route` | 路由类别 |
+| `route` | `route, clarify_facets?` | 路由类别；`clarify` 时附候选意图列表 |
 | `token` | `text` | 逐字回答 |
 | `citations` | `Citation[]` | 引用列表 |
 | `refused` | `reason` | 触发拒答 |
@@ -1044,7 +1081,7 @@ frontend/web/
 | 引用回跳 | 点击引用 → 跳转原文视图，定位到页码 + 字符偏移 |
 | 拒答展示 | 收到 `refused` → 差异化样式 + 提示补充咨询渠道 |
 | 断线重连 | SSE 断开自动重连 + 轮询兜底 |
-| 澄清交互 | 收到 `route=clarify` → 反问作为普通助手消息展示 |
+| 澄清交互 | 收到 `route=clarify` → 反问作为助手消息展示，**`facets` 渲染为可点选项**，点击即作为下一轮输入发出 |
 
 ### 4.3 管理端
 
@@ -1098,6 +1135,16 @@ frontend/web/
 ### 5.2 指标
 
 ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相关性）、`Context Precision`、`Context Recall`。
+
+**ragas 之外的自定义指标**（前两项需人工标注，规模可小，但必须有）
+
+| 指标 | 定义 | 为什么需要 |
+|---|---|---|
+| **澄清误报率** | 本该直接回答、却触发了 clarify 的比例 | 澄清分支**唯一能自证的指标**；误报是体验最差的失败模式 |
+| **澄清命中率** | 触发 clarify 的问题中，用户回答后确实收敛到明确问题的比例 | 衡量澄清是否真的有效，避免"问了也白问" |
+| 路由准确率 | 三分类判对的比例 | 路由是所有后续步骤的前提，错在最前面损失最大 |
+
+> 澄清相关的两项参考 AskBeforeAnswer 的 `ActionScorer` 做法——它专门追踪澄清动作的误报率。
 
 ### 5.3 消融实验
 
@@ -1156,11 +1203,11 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 |---|---|---|---|---|
 | **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、最简 Vue 聊天页 | 8–12 | **端到端跑通**：传文档 → 提问 → 流式作答 + 引用 |
 | **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样 | 12–16 | 检索指标有基线数据 |
-| **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（含 last_route 稳定 + 向量降级）、clarify 分支、三类查询扩展、加权 RRF、机制化拒答 | 11–15 | 多轮指代场景通过 |
+| **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（含 last_route 稳定 + 向量降级）、clarify 分支（facets 结构 + interrupt 恢复）、三类查询扩展、加权 RRF、机制化拒答 | 12–16 | 多轮指代场景通过 |
 | **M3** | 生成与引用 | 上下文组装、答案生成、引用统一、页码/章节/偏移定位、原文回跳 | 10–14 | 点击引用可跳转原文 |
 | **M4** | Vue 两端 | User 端完整、管理端、仪表盘 | 18–24 | 全功能可用 |
 | **M5** | 评测与打磨 | 测试集构建、ragas 接入、消融实验、测试补齐、可观测性、部署配置 | 12–18 | 消融实验表产出 + 测试通过 |
-| | **合计** | 原始估算 | **71–99** | 含 30% 返工余量约 **92–129 人天** |
+| | **合计** | 原始估算 | **72–100** | 含 30% 返工余量约 **94–130 人天** |
 
 **顺序理由**：M1 排在检索优先，因为检索质量是整个系统的天花板——检索不对，后续提示词优化无从发挥。且 M1 结束即可产出第一批可量化数据。
 
