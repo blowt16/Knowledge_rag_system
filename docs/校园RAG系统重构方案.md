@@ -214,10 +214,10 @@ core/deps.py      构造 UserContext
 | 类型 | 落地方式 | 用途 |
 |---|---|---|
 | 结构化日志 | JSON 格式，含 trace_id / session_id / node | 出问题能按会话串联 |
-| 节点耗时 | 每个 LangGraph 节点自动记录耗时与召回数 | 仪表盘"检索性能"数据源 |
-| **规则命中率** | 路由层 `route_source` 统计 | **衡量规则前置省下多少 LLM 调用** |
-| 降级事件 | 重排超时、**路由降级**、BM25 索引失效等 | 仪表盘可见，面试可讲 |
-| 问答日志 | `qa_logs` 表 | 评测与统计的原始数据 |
+| 节点耗时 | 每个 LangGraph 节点记录耗时与召回数 → `qa_logs.node_timings` | 仪表盘"检索性能"数据源 |
+| **规则命中率** | 路由层 `route_source` → 落 `qa_logs.route_source` | **衡量规则前置省下多少 LLM 调用** |
+| 降级事件 | 重排超时、**路由降级**、BM25 索引失效等 → 落 `degradation_events` 表 | 仪表盘"降级次数"的**数据源** |
+| 问答日志 | `qa_logs` 表 | 评测与统计的原始数据；拒答/规则命中/token 用量都在这里 |
 
 ---
 
@@ -327,21 +327,36 @@ core/deps.py      构造 UserContext
 | message | TEXT | 当前阶段说明 |
 | error | TEXT | 失败原因 |
 | document_id | TEXT FK | 完成后回填 |
+| **uploader_id** | TEXT FK | 谁传的（管理端展示） |
 | created_at / updated_at | DATETIME | |
 
 **回滚语义**：任一步失败 → 按 `document_id` **反向删除三个存储**（Chroma → BM25S → SQLite），不是事务回滚（跨异构存储做不到原子，只能补偿删除）。
 
 **version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。
 
-**`conversations`** — 沿用现有设计。
+**`conversations`**
 
-**`messages`** — 在现有基础上**新增三列**：
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | 即 `session_id` |
+| user_id | TEXT FK | 归属 |
+| title | TEXT | 会话标题——**取首问前 20 字**（零成本；后续若需更贴切可换 LLM 摘要，属可选优化） |
+| is_top | INTEGER | 0/1 置顶 |
+| delete_flag | INTEGER | 0/1 软删除 |
+| last_chat_time | DATETIME | 列表排序用 |
+| created_at | DATETIME | |
 
-| 字段 | 说明 |
-|---|---|
-| **citations** | JSON，本条助手消息的引用列表 |
-| **route** | 本条的用户消息被路由到哪一类 ← **`last_route` 的来源**（见 3.5.1） |
-| ~~内容剥离标记~~ | 见下方说明 |
+**`messages`**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| conversation_id | TEXT FK | |
+| role | TEXT | user / assistant |
+| content | TEXT | **原文**——助手消息含 `[n]` 标记，落库**不剥离** |
+| **citations** | TEXT(JSON) | 助手消息的引用列表（用户消息为空） |
+| **route** | TEXT | 用户消息被路由到哪一类 ← **`last_route` 的来源**（见 3.5.1） |
+| created_at | DATETIME | |
 
 > **落库时机很重要**：**存原始答案（含 `[n]` 标记）+ 独立的 `citations` 列**。若在落库时就剥掉标记，用户重新打开会话时回答里既没角标也没引用，**与验收标准「引用可点击跳原文」冲突**。
 >
@@ -361,9 +376,62 @@ core/deps.py      构造 UserContext
 | **is_refused** | 是否拒答 ← 拒答率统计的数据源 |
 | **refusal_reason** | 取值见下方词表 —— qa_logs / SSE / 前端**共用同一套** |
 | **verify_report** | JSON，`cite` 节点的校验报告（见节点 10） |
+| **route_source** | `rule` / `llm` ← **规则命中率统计的数据源**（见 3.2.3） |
+| **degraded** | 0/1，本轮是否发生过降级（明细见 `degradation_events`） |
 | latency_ms | 总耗时 |
 | node_timings | JSON，各节点耗时 |
+| **token_usage** | JSON，输入/输出 token（成本统计） |
 | created_at | |
+
+**`degradation_events`** — 降级事件（仪表盘"降级次数"的数据源）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| session_id | TEXT FK | 关联本轮问答 |
+| node | TEXT | 发生降级的节点（rerank / route / bm25 …） |
+| kind | TEXT | 降级类型（timeout / oom / model_load_failed / index_invalid …） |
+| detail | TEXT | 补充信息 |
+| created_at | DATETIME | |
+
+> 单独建表而不是塞进 `qa_logs.node_timings`：后者是**节点耗时**字段，把降级事件混进去会让仪表盘解析要特判。独立表还能直接 `COUNT(*) GROUP BY kind` 出"降级次数"。
+
+**`eval_cases`** — 测试集
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| question | TEXT | 问题 |
+| ground_truth | TEXT | 标准答案 |
+| expected_doc_ids | TEXT(JSON) | 相关文档标注 |
+| expected_chunk_ids | TEXT(JSON) | 相关 chunk 标注 |
+| **case_type** | TEXT | `factual` / `cross_paragraph` / `doc_number` / `refusal` / `multi_turn`（对应 5.1 的分层） |
+| created_at | DATETIME | |
+
+**`eval_runs`** — 每次评测运行
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| name | TEXT | 运行名称 |
+| **config** | TEXT(JSON) | 本轮配置，如 `{"bm25": false, "rerank": true}` ← **消融实验的对照依据** |
+| status | TEXT | pending / running / done / failed |
+| **metrics** | TEXT(JSON) | 汇总指标（ragas 四指标 + 自定义指标） |
+| started_at / finished_at | DATETIME | |
+
+**`eval_case_results`** — 单题结果（下钻用）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| run_id | TEXT FK | |
+| case_id | TEXT FK | |
+| retrieved_ids | TEXT(JSON) | 实际召回的 chunk |
+| answer | TEXT | 实际回答 |
+| metrics | TEXT(JSON) | 该题的指标 |
+| created_at | DATETIME | |
+
+> 这三张表支撑 `POST /eval/run`、`GET /eval/runs`、`GET /eval/runs/{id}` 三个接口，以及 5.3 消融实验表的产出。**`eval_runs.config` 是消融对照的关键**——没有它就无法说明两次运行的差异来自哪个开关。
 
 #### 3.3.2 向量库 metadata 设计
 
@@ -965,6 +1033,8 @@ BM25 侧**全量打分 → 按文档粒度过滤 → 取 K**，不做过采样�
 **但 BM25S 没有 metadata**——它返回的是自身语料库里的**下标**，不是 `document_id`。因此索引旁边必须持久化一份**下标 → `document_id` 的映射表**（与索引同生共死），过滤时靠它查出每个命中属于哪个文档，再回 `documents` 表判 `status` / `effective_date` / 可见性。
 
 > 这份映射表是 BM25 侧实现过滤的前提，**漏了它整个过滤无从落地**。
+
+**存储形式**：索引与映射表**一起落盘在同一目录**（BM25S 索引文件 + 同名 `.json` 映射），**同生共死**——重建索引必须同时重建映射，删除文档必须同步更新两者。目录路径与失效策略由 `services/index_service.py` 统一管理。
 
 **动态过采样**（见 3.3.4）。
 
