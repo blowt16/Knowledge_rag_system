@@ -263,7 +263,7 @@ core/deps.py      构造 UserContext
 | md5 | TEXT | 文件内容指纹，用于去重 |
 | **version** | INTEGER | 版本号，同组内递增 |
 | **effective_date** | DATE | 施行日期 |
-| **status** | TEXT | active / superseded / disabled |
+| **status** | TEXT | active / disabled（**不含 `superseded`**——版本新旧由检索期解析，见下） |
 | **visibility** | TEXT | public / restricted |
 | **visible_roles** | TEXT(JSON) | restricted 时生效，如 `["admin"]` |
 | **source_path** | TEXT | **原文件**在服务器上的存储路径（原文回跳用） |
@@ -309,9 +309,12 @@ core/deps.py      构造 UserContext
 **实现方式**：不要在 Chroma 里表达"同组最大版本"（它做不到），改为**两段式**——
 
 1. Chroma 检索（带 `status` / `effective_date` / ACL 过滤，含过采样）
-2. **应用层按 `doc_group_id` 分组，只保留 version 最大的一条**，再取 Top-K
+2. **拿候选里的 `doc_group_id` 回查 SQLite**，得到每组「active 且 effective_date ≤ 今天」的 `max(version)`
+3. **丢弃 version ≠ 该最大值的 chunk**，再取 Top-K
 
-代价是过期版本会暂时占用部分召回槽位；但由于同组多版本的情况很少，且过采样已经覆盖了"过滤后不足"的场景，实际影响可忽略。
+> ⚠️ **第 2 步必须回查 SQLite，不能在召回集内取最大。** 若现行版 v5 的措辞与 query 不相似、而已废止的 v4 相似，Top-N 里只有 v4——在召回集内折叠会把 **v4 当成现行版本**返回，用户拿到已废止的政策，界面还按「当前生效」展示。**这会让亮点①的版本隔离彻底失效。**
+
+**代价与补偿**：过期版本会占用召回槽位（某制度有 8 个历史版本时，Top-30 可能被占满）。因此**版本折叠后的条数要纳入 3.3.4 的重试判据**——折叠后不足 K 条时同样触发放大重试。
 
 **`ingestion_tasks`** — 上传任务（支撑 M0 的上传进度条）
 
@@ -330,7 +333,19 @@ core/deps.py      构造 UserContext
 
 **version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。
 
-**`conversations`** / **`messages`** — 沿用现有设计，字段不变。
+**`conversations`** — 沿用现有设计。
+
+**`messages`** — 在现有基础上**新增三列**：
+
+| 字段 | 说明 |
+|---|---|
+| **citations** | JSON，本条助手消息的引用列表 |
+| **route** | 本条的用户消息被路由到哪一类 ← **`last_route` 的来源**（见 3.5.1） |
+| ~~内容剥离标记~~ | 见下方说明 |
+
+> **落库时机很重要**：**存原始答案（含 `[n]` 标记）+ 独立的 `citations` 列**。若在落库时就剥掉标记，用户重新打开会话时回答里既没角标也没引用，**与验收标准「引用可点击跳原文」冲突**。
+>
+> 剥离只发生在**拼 `history` 时**（见 3.5.1 历史清洗规则）——入库是完整的，入 prompt 才是干净的。
 
 **`qa_logs`** — 新增
 
@@ -344,7 +359,8 @@ core/deps.py      构造 UserContext
 | reranked_chunk_ids | JSON 数组 |
 | answer | 最终答案 |
 | **is_refused** | 是否拒答 ← 拒答率统计的数据源 |
-| refusal_reason | 证据不足 / 无命中 |
+| **refusal_reason** | 取值见下方词表 —— qa_logs / SSE / 前端**共用同一套** |
+| **verify_report** | JSON，`cite` 节点的校验报告（见节点 10） |
 | latency_ms | 总耗时 |
 | node_timings | JSON，各节点耗时 |
 | created_at | |
@@ -354,11 +370,20 @@ core/deps.py      构造 UserContext
 Chroma 的 chunk metadata **必须冗余存一份过滤字段**：
 
 ```
-document_id, doc_group_id, status, effective_date,
-visibility, visible_roles, current_chapter, chapter_level,
+document_id, doc_group_id, status, effective_date, version,
+visibility, vis_admin, vis_staff,
+current_chapter, chapter_level,
 chunk_index, char_start, char_end,     ← 原文回跳必需
 page, image_paths
 ```
+
+> **`vis_admin` / `vis_staff` 是布尔字段，不是 `visible_roles` 数组。**
+>
+> SQLite 侧 `documents.visible_roles` 仍是 `TEXT(JSON)`（管理端写入的源），但**进 Chroma 时必须展开成"每个角色一个布尔字段"**——因为 Chroma 的 `where` 只能在标量上做 `$eq`/`$in`，**对 JSON 字符串做不了成员判断**。布尔字段配 `$or` 兼容性最好，不依赖较新版本才有的数组 + `$contains` 能力。
+>
+> 新增角色（如 `teacher`）时需同步加字段，这是该编码的代价。
+
+> **`version` 必须冗余进 Chroma**——应用层的"同组取最大版本"折叠需要它（见 3.3.1）。
 
 > **`chunk_index` / `char_start` / `char_end` 是亮点③的落地基础**，缺了它们，「字符偏移」无从谈起。
 >
@@ -371,11 +396,10 @@ page, image_paths
 #### 3.3.3 检索期过滤条件（亮点①）
 
 ```
-属于该知识库
-  AND status = "active"                    ← 状态过滤
+status = "active"                          ← 状态过滤
   AND effective_date <= 今天                ← 生效日期过滤
   AND (visibility = "public"
-       OR 用户角色 ∈ visible_roles)         ← ACL
+       OR vis_<角色> = true)                ← ACL（角色布尔字段，见 3.3.2）
 ```
 
 > **「同组取最高 version」不在这里表达**——Chroma 做不到跨条目的聚合。它由应用层在检索后完成，见 3.3.1 的「当前生效版本解析」。
@@ -384,13 +408,17 @@ page, image_paths
 
 **问题**：Chroma 是「先按向量相似度取 Top-N，再按 metadata 过滤」。若 Top-N 中大部分被权限过滤掉，实际可用结果可能只剩一两条——而库中明明存在相关内容，只是没进 Top-N。
 
+**术语**：本文中 **K = 每路召回数 = 10**（见节点 6 参数策略）。3.3.4 的放大倍率均基于它。
+
 **方案**：**固定过采样 + 一次重试**
 
 ```
-第一次：取 3 × K
-过滤后若仍不足 K 条 → 取 6 × K 再试一次
+第一次：取 3 × K（=30）
+「Chroma 过滤 + 版本折叠」后仍不足 K 条 → 取 6 × K（=60）再试一次
 仍不足 → 按实际条数返回（库里确实没有，交给 generate 判拒答）
 ```
+
+> **判据必须包含版本折叠后的条数**，不能只看 Chroma 过滤结果。某制度有 8 个历史版本时，Top-30 可能被占满，折叠后只剩 2–3 条——但"Chroma 过滤后条数够"，不会触发重试，结果进 rerank 的候选远少于 K。
 
 不做倍率推导、不做多轮循环。**真正决定召回的是"过滤后可见文档占比"，而这个占比推导不出来，只能试**——两次足够：再不足就说明库里确实没有相关内容。
 
@@ -425,7 +453,7 @@ page, image_paths
         ↓
   ┌─ 版本判定 ────────────────────────┐
   │ 是否同 doc_group 已有文档？        │
-  │  是 → version +1，旧版 → superseded│
+  │  是 → version +1（旧版状态不变）   │
   │  否 → 新建 group，version = 1      │
   └───────────────┬───────────────────┘
                   ↓
@@ -457,12 +485,12 @@ page, image_paths
 ```
 新文档上传
     ↓
-按 (title + 归属知识库) 匹配已有文档组
+按 **title 精确匹配**已有文档组
     ↓
 ┌── 匹配到 ──┐          ┌── 未匹配到 ──┐
 ↓            ↓          ↓              ↓
 version =   同组旧版     新建 group
-  旧版+1     → superseded  version = 1
+  旧版+1     状态不变       version = 1
 ↓            ↓          ↓
 沿用同一 doc_group_id
     ↓
@@ -532,7 +560,9 @@ class RAGState(TypedDict):
 | **禁止把结构化输出原文写入历史** | 否则下一轮模型会看到 `decision` 字段，模仿 JSON 格式作答 |
 | 截断策略：最近 N 轮纯文本 | 同时解决 token 预算 |
 
-> **状态字段的生命周期**：`RAGState` 每轮**新建**，不是跨轮复用——上一轮的 `refused` / `verify_report` / `citations` 必须为空，否则前端可能收到上一轮的事件。跨轮保留的只有 `session_id` 和从 `messages` 加载的 `history`。
+> **状态字段的生命周期**：`RAGState` 每轮**新建**，不是跨轮复用——上一轮的 `refused` / `verify_report` / `citations` 必须为空，否则前端可能收到上一轮的事件。
+>
+> **跨轮保留的只有三样**：`session_id`、从 `messages` 加载的 `history`、以及 **`last_route`（读自 `messages.route`——即上一条用户消息被路由到哪一类）**。
 
 其中 `RetrievalQuery` 是多查询扩展的核心结构：
 
@@ -575,7 +605,7 @@ route ────────────────── 三分类（条件�
 
    移除 interrupt（见节点 4）后，checkpointer 已经没有任何必要用途——每轮请求本身就是一次独立、完整、可重放的图执行。
 
-3. **resolve 可跳过**：命中问候词表，或**无历史**、**无代词**时直接透传，闲聊场景不浪费 LLM 调用。
+3. **resolve 可跳过**：命中无信息量词表，或**无历史**，或（**无代词且无省略特征**）时直接透传，闲聊场景不浪费 LLM 调用。
 
 #### 3.5.3 节点设计
 
@@ -698,7 +728,7 @@ END      END   继续检索链路
 | 类别 | 判定 | 去向 |
 |---|---|---|
 | `chat` | 问候、寒暄、与知识库无关 | 直接生成简短回复 |
-| `clarify` | 意图模糊、指代无法消解、问题过于宽泛 | LLM 生成反问，引导明确意图 |
+| `clarify` | **仅当**指代无法消解、或问题过短且无法定位主题 | LLM 生成反问，引导明确意图 |
 | `knowledge` | 需要查知识库 | 进入检索链路 |
 
 ---
@@ -740,6 +770,10 @@ END      END   继续检索链路
   > 连续对话时，如果分类不明确，且用户未变更话题，则保持上一轮分类结果不变。
 
   解决的问题：多轮里用户只是补充信息（「那 2025 级的呢？」），单独看会被误判成别的类别。
+
+  **来源**：`last_route` 读自 `messages.route`（上一条用户消息的路由结果，见 3.3.1）。写入时机是本轮路由完成后。
+
+  > ⚠️ **若满足 `clarify` 触发条件，优先归 `clarify`，不受上轮分类约束**——否则「上一轮 knowledge + 本轮『那个呢？』」会被拉回 knowledge 直接检索，**澄清分支永远触发不了**。
 
 - **异常兜底**：LLM 超时或失败 → 直接归入 `knowledge`
 
@@ -866,10 +900,11 @@ retrieval_queries: list[RetrievalQuery]
 **三类查询的分工**
 
 | source | 生成方式 | 送哪路 | 权重 | 理由 |
+| （权重**一律 1.0**，暂不做调优——见节点 6 参数策略） |||||
 |---|---|---|---|---|
-| `verbatim` | **原样**使用 resolved_query | BM25 + Vector | 高 | 保文号精度——「桂电教〔2025〕28号」一个字都不能改 |
-| `keywords` | LLM 抽取关键词 | BM25 | 高 | BM25 对短查询敏感，长句会被稀释 |
-| `hyde` | LLM 生成假设答案 | Vector | 中 | 补口语化问法与正式文本的鸿沟 |
+| `verbatim` | **原样**使用 resolved_query | BM25 + Vector | 1.0 | 保文号精度——「桂电教〔2025〕28号」一个字都不能改 |
+| `keywords` | LLM 抽取关键词 | BM25 | 1.0 | BM25 对短查询敏感，长句会被稀释 |
+| `hyde` | LLM 生成假设答案 | Vector | 1.0 | 补口语化问法与正式文本的鸿沟 |
 
 **设计要点**
 
@@ -908,7 +943,7 @@ BM25+Vector  BM25       Vector
        candidates
 ```
 
-**BM25 改造**（批准项 1）
+**BM25 改造**
 
 | 项 | 现状 | 改造后 |
 |---|---|---|
@@ -925,9 +960,13 @@ BM25+Vector  BM25       Vector
 | **向量** | 检索器内部（先 Top-N 再过滤） | ✅ 需要（见 3.3.4） |
 | **BM25** | **全量打分 → 按文档粒度过滤 → 取 K** | ❌ 不需要 |
 
-BM25 侧按 `document_id` 过滤即可（`documents` 表已有 `status` / `effective_date` / `visibility` / `visible_roles`），**不需要把过滤字段冗余进 BM25 索引**——BM25S 本身也没有 metadata 机制。
+BM25 侧**全量打分 → 按文档粒度过滤 → 取 K**，不做过采样。
 
-**动态过采样**（批准项 4，见 3.3.4）。
+**但 BM25S 没有 metadata**——它返回的是自身语料库里的**下标**，不是 `document_id`。因此索引旁边必须持久化一份**下标 → `document_id` 的映射表**（与索引同生共死），过滤时靠它查出每个命中属于哪个文档，再回 `documents` 表判 `status` / `effective_date` / 可见性。
+
+> 这份映射表是 BM25 侧实现过滤的前提，**漏了它整个过滤无从落地**。
+
+**动态过采样**（见 3.3.4）。
 
 **加权 RRF 融合**
 
@@ -935,7 +974,7 @@ BM25 侧按 `document_id` 过滤即可（`documents` 表已有 `status` / `effec
 score(d) = Σ   w_i / (k + rank_i(d))
         i ∈ 所有 (查询 × 检索器) 组合
 
-w_i 取自 RetrievalQuery.weight（verbatim / keywords 高，hyde 中）
+w_i 一律取 1.0（**暂不做权重调优**，见下方参数策略）
 k = 60（可配置，消融实验的调参对象）
 ```
 
@@ -947,7 +986,7 @@ k = 60（可配置，消融实验的调参对象）
 |---|---|---|
 | 每路召回数 | **10** | 固定 |
 | 融合后进入 rerank | **截断 40 条** | 固定 |
-| RRF 权重 `w_i` | **一律 1.0** | 不做权重调优 |
+| RRF 权重 `w_i` | **一律 1.0** | 不做权重调优——若各类权重不等，消融表里 verbatim/keywords/hyde 三行的增益会混入权重差异，**证明不了单个查询类型的价值** |
 | RRF 的 `k` | 60 | **唯一例外**——消融实验的调参对象 |
 
 > 原设计列了 8–9 个待定参数（三档权重、每路 k、上限、过采样倍率、长度阈值…），但**没有一个有数据来源，也没有调参计划**。参数多 + 无计划 = 上线全靠拍脑袋，出问题说不清是哪个的锅。**先全部写死，用消融实验证明整体有效，再考虑逐个调。**
@@ -963,25 +1002,34 @@ rerank 在 GPU 上分批串行（`batch_size=10`），候选数直接决定耗�
 ```
 candidates (加权 RRF 融合后，截断至上限条数)
         ↓
-  Cross-Encoder (BGE-reranker-v2-m3)
-        ↓
-  ┌─── 超时/显存不足? ───┐
-  │ 是 → 降级：直接用 RRF 结果  │
-  │      记降级事件             │
-  └───────────┬─────────────┘
-              ↓
-        reranked (Top-K)
-+ retrieval_confidence = 最高分
+   ┌── 候选为空？──┐
+   │是            │否
+   ↓              ↓
+ refuse      Cross-Encoder
+ (零成本)     (BGE-reranker-v2-m3)
+                 ↓
+           ┌─ 任何异常？─┐
+           │是           │否
+           ↓             ↓
+     降级：用 RRF 顺序   正常精排
+           └─────┬───────┘
+                 ↓
+           reranked (Top-K)
+       retrieval_confidence = ?
 ```
 
-**降级策略**（必须有，否则 GPU 一挂整个问答失败）：
+**本节点负责「候选为空」的短路**——判定后走条件边到 `refuse`。这是全链路唯一的零成本拒答入口（不调模型）。
 
-| 异常 | 处理 |
+**降级策略**：**任何异常（超时 / 显存不足 / 模型加载失败）→ 同一条路径**：跳过精排、按 RRF 顺序返回、记降级事件到 `trace`。分三种情况写不增加任何实现。
+
+**`retrieval_confidence` 的取值**（仅观测用）：
+
+| 路径 | 取值 |
 |---|---|
-| 推理超时（> 阈值） | 跳过精排，用 RRF 顺序 |
-| 显存不足 | 降级到 CPU，或跳过 |
-| 模型加载失败 | 跳过精排 |
-| 以上任一 | 记录降级事件到 `trace`，仪表盘可见 |
+| 正常精排 | cross-encoder 最高分 |
+| 降级 | **`null`** + `rerank_degraded = true` |
+
+> **不能填 RRF 分值**——RRF 分与 cross-encoder 分**量纲不同**，混在同一字段里会让仪表盘的分布图失去意义。
 
 ---
 
@@ -1139,11 +1187,18 @@ answer（含 [n] 标记）+ reranked + chunk 溯源
 
 **产出 2：`verify_report`**
 
+```json
+{
+  "total_claims": 3,
+  "cited_claims": 2,
+  "invalid_markers": [7],          // 越界标记，如只有 5 条候选却写了 [7]
+  "uncited_claims": [              // 无标记的结论句 —— 带定位信息
+    {"sentence": "申请材料需提前一周提交。", "char_start": 42, "char_end": 55}
+  ]
+}
 ```
-{ total_claims, cited_claims,
-  invalid_markers: [...],    ← 越界标记
-  uncited_claims:  [...] }   ← 无标记的结论句
-```
+
+> **`uncited_claims` 必须带 `char_start` / `char_end`**——前端要把对应句子置灰，答案经 markdown-it 渲染后**无法靠字符串查找可靠定位**（重复句子、渲染后文本变化）。偏移相对**渲染前的原始答案文本**。
 
 | 检查 | 判定 |
 |---|---|
@@ -1205,7 +1260,7 @@ refused = true, refusal_reason = "no_candidate"
 
 #### 3.5.4 LLM 判定的约束与残余风险
 
-节点 10 把「证据是否充分」的判定交给了模型。**这个判定本身可能出错**，本节说明如何约束，以及哪些错误约束不住。
+节点 9 `generate` 把「证据是否充分」的判定交给了模型。**这个判定本身可能出错**，本节说明如何约束，以及哪些错误约束不住。
 
 **先承认：存在理论下限**
 
@@ -1232,6 +1287,19 @@ refused = true, refusal_reason = "no_candidate"
 | `ANSWERED` 正文至少含一个合法标记 | 无依据作答 |
 | `REFUSED` 时正文不含标记 | 语义矛盾 |
 | 校验失败 → 稳定错误码，**不返回模型原文、不泄露提示词** | 信息泄露 |
+
+> **校验要按"流前可判"和"流后只能补救"分两类**——见下方。
+
+**按"能不能在流中判定"分两类**
+
+| 类型 | 何时可判 | 处理 |
+|---|---|---|
+| **流中可判** | 标记越界（`[7]` 出现时就能发现） | 可在 SSE 出口拦截 |
+| **流后只能补救** | `ANSWERED` 正文一个标记都没有 | **正文已全部到达用户，无法"不返回"** |
+
+对第二类，**实际行为**是：保留已流出的正文 + 追加一条 `verify` 事件标注 + 记入 `qa_logs`，**不追加 error 事件**（error 会误导前端以为整条消息失败）。
+
+> 原表述「校验失败 → 不返回模型原文」在流式路径上**做不到**——token 一旦下发就已到达用户。上面的分类是对该表述的修正。
 
 **为什么这层有效**：它把「编造」的成本抬高了。模型要编答案，必须**同时编一个合法范围内的引用编号**——写自由文本容易，写「结构化 + 合法编号」难。
 
@@ -1278,7 +1346,7 @@ refused = true, refusal_reason = "no_candidate"
 | Vector | `retrieval/vector.py` | Chroma 封装，含动态过采样逻辑 |
 | Fusion | `retrieval/fusion.py` | **加权 RRF**：融合 N 路（三类查询 × 两种检索器）结果，权重取自 `RetrievalQuery.weight`；融合后按上限截断 |
 | Reranker | `retrieval/reranker.py` | Cross-Encoder，含降级链 |
-| Filters | `retrieval/filters.py` | 把 UserContext + 日期拼装成过滤条件（**唯一入口**） |
+| Filters | `retrieval/filters.py` | 把 UserContext + 日期拼装成过滤条件（**唯一入口**）。ACL 部分产出 `vis_<角色> = true` 的 `$or` 条件，见 3.3.2 |
 
 **`filters.py` 是唯一入口**：过滤条件只在这里生成，向量检索和 BM25 都调它。避免"两条路过滤规则不一致"导致越权——这是安全相关的强约束。
 
@@ -1410,7 +1478,7 @@ frontend/web/
 | 引用回跳 | 点击引用 → 跳转原文视图，定位到页码 + 字符偏移 |
 | **后校验标注** | 收到 `verify` 事件 → 把 `uncited_claims` / `invalid_markers` 对应的句子**置灰并加提示**（如「此结论未在资料中找到依据」） |
 | 拒答展示 | 收到 `refused` → 差异化样式 + 提示补充咨询渠道 |
-| 断线重连 | SSE 断开自动重连 + 轮询兜底 |
+| 断线处理 | 提示「连接中断，请重新发送」——**不自动重连**（SSE 无 event id/重放，重连拿不到内容，见 3.2.4） |
 | 澄清交互 | 收到 `route=clarify` → 反问作为助手消息展示，**`facets` 渲染为可点选项**，点击即作为下一轮输入发出 |
 
 ### 4.3 管理端
@@ -1453,7 +1521,7 @@ frontend/web/
 
 | 类型 | 占比 | 题量 | 考察 |
 |---|---|---|---|
-| 事实型（单文档可答） | 40% | 60–80 | 基础能力 |
+| 事实型（单文档可答） | 55% | 82–110 | 基础能力 |
 | 跨段落事实型 | 5% | 8–10 | 融合与精排（**见下方注**） |
 | **文号 / 专有名词型** | 20% | 30–40 | **直接验证 BM25 的价值** |
 | 拒答型（库中确实没有） | 10% | 15–20 | 幻觉抑制 |
@@ -1479,6 +1547,15 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | **澄清误报率** | 本该直接回答、却触发了 clarify 的比例 | 澄清分支**唯一能自证的指标**；误报是体验最差的失败模式 |
 | **澄清命中率** | 触发 clarify 的问题中，用户回答后确实收敛到明确问题的比例 | 衡量澄清是否真的有效，避免"问了也白问" |
 | 路由准确率 | 三分类判对的比例 | 路由是所有后续步骤的前提，错在最前面损失最大 |
+
+> **拒答原因取值表（唯一来源，三处共用）**
+>
+> | 值 | 含义 | 产生位置 |
+> |---|---|---|
+> | `no_candidate` | 检索候选为空 | `rerank` 后的条件边 → `refuse` 节点 |
+> | `insufficient_evidence` | 模型判定证据不足以作答 | `generate` 返回 `REFUSED_NO_EVIDENCE` |
+>
+> `qa_logs.refusal_reason`、SSE `refused` 事件的 `reason`、前端展示分支**都用这张表**。
 
 > 参考 AskBeforeAnswer 的 `ActionScorer` 做法——它专门追踪澄清动作的误报率。
 
@@ -1526,7 +1603,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 问题类型 | 纯向量 Recall | 完整链路 Recall | 增益 |
 |---|---|---|---|
 | 事实型 | | | |
-| 多跳型 | | | |
+| 跨段落事实型 | | | |
 | 文号 / 专有名词型 | | | |
 | 多轮指代型 | | | |
 
@@ -1585,7 +1662,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 3 | intent 分类器配置项在两个 YAML 中均不存在，静默使用代码默认值 | `intent_classifier.py` | 新项目配置项与代码严格对应 |
 | 4 | `mode="auto"` 声明但未实现，静默降级为 agent | `chat_service.py` | 新项目无此参数（模式由架构决定） |
 | 5 | 知识库接口存在两套命名空间 | `/knowledge` 与 `/api/knowledge` | 统一为 `/api/admin/documents` |
-| 6 | 引用机制两套并存（代码计算 vs LLM 自写） | `chat_service.py` / `agent.txt` | 统一为代码计算，见 3.5.3 节点 11 |
+| 6 | 引用机制两套并存（代码计算 vs LLM 自写） | `chat_service.py` / `agent.txt` | 统一为代码计算，见 3.5.3 节点 10 |
 | 7 | 上下文组装逻辑在两个文件中重复 | `rag_service.py` / `agent_service.py` | 收敛为单一 `build_context` 节点 |
 | 8 | 零测试、无 CI | 全项目 | 见第六章 |
 
