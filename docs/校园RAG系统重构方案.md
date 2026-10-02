@@ -2260,28 +2260,107 @@ Agent 模式已废弃（决策 #3），剩下的是**线性管道 + 两个条件
 
 ---
 
-#### C.2.2 虚胖依赖清理
+#### C.2.2 虚胖依赖清理（已核验）
 
-**实测结果**（对照 `pyproject.toml` 与 `app/` 的实际 import）：
+**核验方式**：对照 `pyproject.toml` × 全仓 `import` × Loader 使用 × 支持格式配置，四项交叉验证。
 
-| 依赖 | 实测 | 说明 |
-|---|---|---|
-| `unstructured>=0.23.0` | ❌ 全项目零 import | **很重的文档解析库**，声明了没用 |
-| `openpyxl` | ❌ 零 import | Excel 解析，未使用 |
-| `aiofiles` | ❌ 零 import | 未使用 |
-| `markdown` | ❌ 零 import | 未使用 |
-| `langchain`（总包） | ❌ 零 import | 只用了各子包 |
-| `jieba` | ❌ 零 import | **这个是真 bug，不是虚胖**（见 C.1.1） |
-
-**另有重量级依赖需明确取舍**
+**实测体积账**
 
 ```
-torch  4.4 GB   ← 为本地 reranker 引入（见 C.1.4）
-```
+venv 总计       6.4 GB
+├─ torch        4.4 GB
+├─ rapid_doc    753 MB   ← 被 modelscope / unstructured 拉进来（意外发现）
+├─ llvmlite     103 MB
+├─ scipy         98 MB
+├─ spacy         85 MB
+├─ pyarrow       83 MB
+├─ kubernetes    42 MB   ← 被 chromadb 拉进来
+└─ 其他         ~800 MB
 
-**处理建议**：清理零调用依赖；`torch` **保留但要在文档里写明理由**（它是环境体积的最大单项，且决定部署是否必须带 GPU）。
+（模型文件另计：bge-reranker-v2-m3  2.2 GB）
+```
 
 ---
+
+##### 类别 A：确定删除（5 个）
+
+| 包 | 实测证据 | 为什么安全 |
+|---|---|---|
+| `unstructured>=0.23.0` | 全仓零 import；无 `Unstructured*Loader`；实际 Loader 是 `TextLoader` + `Docx2txtLoader` | 它是**通用解析库**（`python-docx`/`python-pptx` 的替代方案之一），但本项目走**原生解析路径**，没用它 |
+| `markdown` | 全仓零 import | 它是「Markdown → HTML 转换」库；**md 解析用的是 `mistune`**（`md_parser.py:67`）。两者名字像、功能不同 |
+| `openpyxl` | 全仓零 import；配置里无 xlsx | 它解析 **Excel**——而支持格式是 `txt / pdf / md / pptx / docx`（决策 #6），**没有 xlsx** |
+| `aiofiles` | 全仓零 import | 未使用 |
+| `langchain`（总包） | 全仓零 import | 只用了各子包（`-core` / `-community` / `-classic` / `-chroma` / `-openai`） |
+
+> **一次性说明「看着相关其实不相关」的疑虑**（施工时容易被质疑）：
+>
+> | 格式 | 实际用的库 | 与待删包的关系 |
+> |---|---|---|
+> | **md** | **`mistune`** | 与 `markdown` 是**两个不同的库** |
+> | **pptx** | **`python-pptx`** | 与 `unstructured` 无关 |
+> | **docx** | **`python-docx`** | 与 `unstructured` 无关 |
+>
+> **`unstructured` 是"另一条没走的路"，装着只占地方。**
+
+---
+
+##### 类别 B：换实现（`modelscope` → `huggingface_hub`）
+
+**不是删，是换。** `modelscope` 在全项目只用于一件事：
+
+```python
+# reorder_service.py:83
+from modelscope import snapshot_download
+model_dir = snapshot_download(scope_name, cache_dir=...)
+```
+
+**而 `huggingface_hub` 已在环境里**（`transformers` 的依赖），API 等价：
+
+```python
+from huggingface_hub import snapshot_download
+model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
+```
+
+**连带收益**：`rapid_doc`（753MB）+ `spacy`（85MB）+ 部分 `numba/llvmlite` 随之消失。
+
+> **注意**：若校园网络访问 HuggingFace 不通，用 `HF_ENDPOINT` 指向国内镜像；或保留 modelscope 但**移出主环境**（放进独立的下载脚本）。
+
+---
+
+##### 类别 C：要补装（不是清理，是修 BUG）
+
+`docx2txt` —— `Docx2txtLoader` 依赖它，但**未安装**（见附录 B.1.1）。
+
+> **别和 `unstructured` 搞混**：
+> - `unstructured`（待删）→ 项目**没用**
+> - `docx2txt`（缺失）→ 项目**用了但装不上** → **要补**
+
+---
+
+##### 必须执行的回归验证
+
+依赖清理属于「编译期看不出、运行时才炸」的类型。**删完必须跑一遍所有支持格式**：
+
+```
+□ txt   上传 → 解析正常、有 chunk
+□ md    上传 → 解析正常、TOC 正常
+□ pdf   上传 → 三种分支（纯文本 / 图文混排 / 扫描件）至少覆盖两种
+□ docx  上传 → 解析正常，且**确认表格没丢**（同时验证 docx2txt 补齐后的效果）
+□ pptx  上传 → 解析正常（**注意 pptx 包当前是坏的，见 B.1.1**）
+□ 删完 unstructured 后，以上全部重跑一遍
+```
+
+**任何一项失败 → 立刻回滚该依赖。** 隐式运行时依赖只有实测能发现。
+
+**预期效果**
+
+| 项 | 现在 | 清理后 |
+|---|---|---|
+| venv | 6.4 GB | **约 5.5 GB**（保留 CUDA torch） |
+| 依赖条目 | 30 | 约 22 |
+
+---
+
 
 #### C.2.3 一个补充说明：不做的选型
 
