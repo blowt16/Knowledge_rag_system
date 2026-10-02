@@ -1885,7 +1885,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 ---
 
-## 附：现有项目需同步处理的问题
+## 附录 A：现有项目需同步处理的问题
 
 重构时一并解决，避免带入新项目：
 
@@ -1899,6 +1899,212 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 6 | 引用机制两套并存（代码计算 vs LLM 自写） | `chat_service.py` / `agent.txt` | 统一为代码计算，见 3.5.3 节点 10 |
 | 7 | 上下文组装逻辑在两个文件中重复 | `rag_service.py` / `agent_service.py` | 收敛为单一 `build_context` 节点 |
 | 8 | 零测试、无 CI | 全项目 | 见第六章 |
+
+---
+
+## 附录 B：索引构建链路的修复清单（施工检查项）
+
+> **为什么单独列一节**：新项目虽是全量重写，但**文档加载层（PDF 三路解析、扫描件 OCR、图片处理）会被复用**——这部分重写成本过高。**以下问题必须在搬运时同步修复，否则会原样带进新项目。**
+>
+> 每条都给出**位置 / 问题 / 修复方案**。标注 `【已实测】` 的是我亲自验证过的，其余来自代码审查，**施工时请先复现再修**。
+
+---
+
+### B.1 上线阻断（必须修）
+
+#### B.1.1 依赖缺失 —— 两个格式完全不可用 【已实测】
+
+实测结果（在项目 `.venv` 中）：
+
+| 依赖 | 实测 | 影响 |
+|---|---|---|
+| `pptx` | ❌ `ModuleNotFoundError` | **PPTX 上传 100% 失败** |
+| `docx2txt` | ❌ `ModuleNotFoundError` | **DOCX 主路径永远走不通** |
+| `pyzbar` | ❌ 未安装 | 图片条码检测永远走启发式兜底 |
+| `magic` | ⚠️ 抛 `OSError`（access violation） | 见下 |
+| `docx` / `fitz` / `pdfplumber` / `jieba` | ✅ 正常 | — |
+
+> **`pptx` 的病理**：`.venv/Lib/site-packages/` 下**只有 `python_pptx-1.0.2.dist-info/`，没有 `pptx/` 目录**——包装坏了，`pyproject.toml` 里声明了也没用。
+>
+> **`docx2txt` 未安装**导致 `Docx2txtLoader` 每次上传都失败 → 静默走 python-docx 兜底，而兜底 `"
+".join(p.text for p in doc.paragraphs)` **丢弃所有表格内容**。制度文档里的表格全部丢失。
+>
+> **`magic` 这条我没验证完**——只测到它抛 `OSError`，且测试命令挂起未返回，**未在应用运行环境完整确认**。需要你跑一次。
+
+**修复**
+
+1. 重建 venv，或改用替代实现（`python-pptx` 重装 / 用 `python-docx` 直接处理 DOCX 表格）
+2. `knowledge_service.py:107` 的异常捕获**必须放宽**：
+
+```python
+except ImportError:      # ← 只捕获 ImportError
+    pass
+```
+
+实测抛的是 `OSError`，**`except ImportError` 捕获不到** → MIME 校验会直接崩。应改为 `except Exception`，并记录一次降级事件。
+
+---
+
+#### B.1.2 扫描件空页静默丢失，且"失败页检查"是死代码
+
+**位置**：`mineru_scan_loader.py:199`（空页 `continue`）、`:388`（`failed_pages` 检查）
+
+**问题**：空页只打 warning 就跳过；而 `:388` 的检查扫描的是**已生成的 documents**——里面**不可能含空内容页**，所以**这段报错永远不触发**。
+
+**最坏情况**：MinerU 整份返回空 → 上层判定 `status="ok", chunks=[]` → **前端显示「上传成功」（0 chunks）**，用户以为可检索。
+
+**修复**
+
+- 空页记录成**显式缺失清单**，随上传结果一起上报，前端可见
+- 上层的成功判定要覆盖「`on_batch` 被调用过、但内容为空」这种情况
+
+---
+
+#### B.1.3 VL 关闭时必然误报"降级" → 用户死循环重传
+
+**位置**：`pdf_multimodal_loader.py:462-467`、`:505-509`
+
+**问题**：配置 `vl_include_embedded_images: false`（**默认值**）时 VL 不调用，但候选图**仍被计入 `page_degraded_images`** → 产出 `degradation` → 返回 `status="degraded"` → 前端弹窗「文档解析不完整，建议删除后重新上传」。
+
+**重传必然复现同一结果 → 用户陷入死循环。**
+
+**触发条件低得惊人**：只要页面里存在**面积 > 5000px² 的矩形**——中文公文里的**表格框线极常见**。
+
+**修复**
+
+- VL 关闭时**不计入 degraded**
+- 该分支的裁图链路（写盘 → 重新读盘算 pHash → 最后删除）在 VL 关闭时**整体短路**——它本来就是无消费者的空转
+
+---
+
+#### B.1.4 单页无文本 → 整份文件失败
+
+**位置**：`pdf_multimodal_loader.py:212-217`（text_pdf）、`:316-317`（text_mix）
+
+**问题**：某页 pdfplumber 与 PyMuPDF 都取不到文本就 `raise`。而**文末空白页、纯图片页在真实公文里很常见**。
+
+**自相矛盾**：同一个文件里，`text_mix` 的组装阶段对同类情况却是 `continue`（`:480-481`）——**同一问题两种相反策略**。
+
+**修复**：统一为 `continue` + 把缺失页记入 B.1.2 那份缺失清单。
+
+---
+
+### B.2 影响质量
+
+#### B.2.1 章节信息失真 —— 直接影响亮点③的引用可信度 ⚠️
+
+**位置**：`file_handler.py:83`（取值）→ `processor.py:214`（注入）
+
+**问题**：`current_chapter` 取的是**全文档的第一个标题**：
+
+```python
+doc.metadata["current_chapter"] = doc.metadata.get("current_chapter", "")
+```
+
+这个 doc 级的值被**原样复制到该文件的每一个 chunk**。
+
+**后果**：一份制度文档的所有片段，在 prompt 和引用里**都显示成「第一章 xxx」**。
+
+> **这比没有章节更糟**——没有章节用户知道信息缺失，章节错的会误导用户以为找对了地方。亮点③（引用溯源到章节）的**可信度直接归零**。
+
+**修复**：改为按 chunk 计算所属章节。项目里已经解析出了完整 TOC（`md_parser` 的 `path` 字段），**算了却没用**——把它接到 chunk 级即可。
+
+---
+
+#### B.2.2 `ChunkBatchBuffer` 失败标记范围错误
+
+**位置**：`chunk_batch_buffer.py:90`
+
+**问题**：
+
+```python
+batch_md5s = list(self._md5_records)   # ← 拿的是【全部】记录，不是本批的
+```
+
+失败时：
+
+```python
+for md5_hex, _, _ in batch_md5s:
+    self._failed_md5s.add(md5_hex)      # ← 把所有文件都标记为失败
+```
+
+**任何一批嵌入失败，所有已上传文件（包括成功入库的）都被标记为失败** → 失败统计失真。
+
+**修复**：按本批 chunk 反查它们属于哪些 md5，而不是取全部。
+
+---
+
+#### B.2.3 死代码清理清单
+
+以下均经全仓检索确认**零调用**，且多数还在给每个 chunk 增加 Chroma 存储：
+
+| 死代码 | 位置 | 说明 |
+|---|---|---|
+| `toc` / `chapter_count` / `chapter_level` | 多个加载器 + `processor.py:214-215` | **只有写入，无任何读取**；每个 chunk 多存一份（`toc` 可能是几百字符的 JSON） |
+| `ocr_engine` / `scan_branch` / `degraded` / `degraded_images` | `mineru_scan_loader.py:207-208, 375-376` | 写了但无人读 |
+| `_replace_images_in_text()` | `mineru_scan_loader.py:435-449` | 功能已被 `_blocks_to_markdown` 取代 |
+| `MINERU_IMAGE_MIN_SIZE` + `chroma.yaml:87` | `mineru_scan_loader.py:29-30` | 定义后从未使用 |
+| `_max_edge_density` + `chroma.yaml:96` | `image_filter.py:116-118` | 赋值后类内无引用（实际用的是硬编码值） |
+| `_get_allow_types()` | `file_handler.py:9-10` | 零调用；`knowledge_service.py:18` 与 `zip_handler.py:15` 各复制了一份 |
+| `page_image_map` 参数 | `pdf_multimodal_loader.py:616` → `mineru_scan_loader.py:230` | 传入后从未使用；连带 `extract_images_from_pdf` 对纯扫描件是 100% 空转 |
+| `pdf_loader.py` 整个文件 | 27 行 | 纯转发，调用栈因此多一层 |
+
+**流水线层**（我在核心代码里查到的）：
+
+| 死代码 | 位置 | 说明 |
+|---|---|---|
+| `kb_id` 与 `user_id` **完全同值** | `processor.py:207, 209` | 两行紧挨着存同一个值 |
+| **语义合并**（~80 行 + 一个 SentenceTransformer 模型） | `text_spliter.py:11-43, 96-131, 148-173` | 配置 `enable_semantic_merge: false`，**从未启用** |
+| `chunk_index` 重复赋值 | `text_spliter.py:92` | 被 `processor.py:206` 覆盖，前者是死代码 |
+
+---
+
+#### B.2.4 重复实现合并
+
+| 重复项 | 位置 | 说明 |
+|---|---|---|
+| **编码回退链** | `file_handler.py:37-48`（txt）与 `:57-71`（md） | 同一份 `_get_encodings()`、同一逻辑，写了两遍；md 的降级路径又读了第三次 |
+| **TOC 层级算法** | `md_parser.py:106-111` 与 `file_handler.py:168-175` | 逐字重复的同一段算法 |
+| **图片落盘 + 相对路径计算** | `file_handler.py:196-203`、`image_extractor.py:59-64`、`mineru_scan_loader.py:176-181`、`pdf_multimodal_loader.py:596-603` | **四份**，且**过滤策略各不相同**——只有 MinerU 分支接了 `image_filter`，PDF 内嵌图完全不过滤 |
+| **DOCX 重复解析** | `file_handler.py:131-148, 151-178, 181-212, 244, 256-259` | **同一份文件最多解析 5 次**；前两个函数（章、目录）是纯重复解析，且由 `toc[0]` 即可得出 |
+
+---
+
+### B.3 性能
+
+#### B.3.1 同一个 PDF 被打开 3–4 次
+
+**位置**：`judge_pdf_type`（`:52`）→ `extract_images_from_pdf`（`image_extractor.py:41`）→ `_process_text_pdf`（`:196, 198`）/ `_process_text_mix_pdf`（`:279, 298`）
+
+每次 `fitz.open` 都要重建 xref 与页树。**修复**：一次打开、多处复用（把打开的 Document 往下传），或在一次遍历里同时完成类型判定与图片提取。
+
+#### B.3.2 `judge_pdf_type` 为拿宽高把每张图完整提取一遍
+
+**位置**：`pdf_multimodal_loader.py:63-67`
+
+```python
+# 对每页每图调用 doc.extract_image(xref) —— 只为拿宽高
+```
+
+**但 `page.get_images(full=True)` 的元组本来就包含宽高**（索引 2/3 即 width/height）：
+
+```
+(14, 0, 153, 153, 8, 'DeviceRGB', '', 'IM14', 'DCTDecode', 0)
+        ↑    ↑
+      width height
+```
+
+**修复**：直接从元组取，省掉整个提取过程。**这是图片密集 PDF 上纯浪费的主要来源。**
+
+#### B.3.3 同步阻塞事件循环
+
+**位置**：`load_pdf_async` 里的 `judge_pdf_type`（`:687`）与 `extract_images_from_pdf`（`:701`）；`mineru_scan_loader.py:351-354` 的 `_build_documents`（含纯 Python 逐像素的 `image_filter`）
+
+**问题**：这些**同步调用直接跑在事件循环里**——大文件时（秒级到分钟级）**整个进程的 SSE 与其它请求全部停摆**。
+
+**内部不一致**：`_process_text_pdf` 走了 `run_in_executor`（`:745-747`），而上面这些没有。
+
+**修复**：统一挪进 executor。这是"上线标准"要求的——**一个用户传大文件不能让所有人卡住**。
 
 ---
 
