@@ -142,7 +142,6 @@ backend/
 │   ├── graph/                   LangGraph 编排
 │   │   ├── state.py             RAGState 定义
 │   │   ├── builder.py           图装配
-│   │   ├── checkpointer.py      SqliteSaver 配置
 │   │   └── nodes/               见 3.5
 │   ├── retrieval/
 │   │   ├── bm25.py              BM25S + jieba
@@ -222,6 +221,22 @@ core/deps.py      构造 UserContext
 
 ---
 
+#### 3.2.4 并发、超时与幂等
+
+全链路默认**没有失败语义**——原先只有 `rerank` 有超时。以下是最小必需集合：
+
+| 问题 | 处理 |
+|---|---|
+| **总超时** | 每请求设总超时（建议 60s）；超时 → SSE 发 `error` 事件并关闭 |
+| **流式中断** | 生成到一半失败：已输出的 token 保留，追加「回答中断，请重试」；**不自动续写** |
+| **同会话并发** | 同一 `session_id` 同时只允许一个请求——前端禁用发送按钮，后端按 session 加锁 |
+| **GPU 并发** | `rerank` 加**信号量**（如同时 2 个请求）。节点内的「显存不足 → 降级」是**单请求内判断**，跨请求没有信号量会直接 OOM |
+| **幂等** | 客户端生成 `request_id`，服务端在 session 内去重，防双击重复提交 |
+
+> **「断线自动重连」不做。** 原设计写了「SSE 断开自动重连 + 轮询兜底」，但 SSE 没有 event id / 重放机制，3.7.2 也没有可轮询的查询接口——**那是一句实现不了的承诺**。改为：断线后前端提示「连接中断，请重新发送」。
+
+---
+
 ### 3.3 数据层
 
 #### 3.3.1 SQLite 表结构
@@ -251,6 +266,8 @@ core/deps.py      构造 UserContext
 | **status** | TEXT | active / superseded / disabled |
 | **visibility** | TEXT | public / restricted |
 | **visible_roles** | TEXT(JSON) | restricted 时生效，如 `["admin"]` |
+| **source_path** | TEXT | **原文件**在服务器上的存储路径（原文回跳用） |
+| **normalized_text_path** | TEXT | **清洗后规范化文本**的路径（偏移的参照系） |
 | uploader_id | TEXT FK | |
 | chunk_count | INTEGER | |
 | created_at / updated_at | DATETIME | |
@@ -258,24 +275,60 @@ core/deps.py      构造 UserContext
 **状态机**：
 
 ```
-      上传新版本文档
-            ↓
-   ┌────────────────┐
-   │ 旧版(同组其它)  │
-   └───────┬────────┘
-           ↓
-    status: active → superseded   （自动，不可逆除非手动）
+上传新版本
+    ↓
+同组内 version 递增，**不改动旧版状态**
 
-             管理员手动操作
-                   ↓
-        active ⇄ disabled
+        管理员手动操作
+              ↓
+      active ⇄ disabled
 ```
 
-| 状态 | 是否参与检索 |
-|---|---|
-| `active` | ✅ 是（还需满足生效日期条件） |
-| `superseded` | ❌ 否（保留供管理端查看历史） |
-| `disabled` | ❌ 否（管理员手动停用） |
+| 状态 | 含义 | 参与检索 |
+|---|---|---|
+| `active` | 正常 | ✅ 需同时满足下方「当前生效」解析 |
+| `disabled` | 管理员手动停用 | ❌ |
+
+**检索期如何解析「当前生效版本」**（关键设计）
+
+```
+同一 doc_group_id 内，同时满足：
+  status = "active"
+  AND effective_date <= 今天
+  AND version = 该组内满足上述条件的最大 version
+→ 这一条才是"当前生效"
+```
+
+**为什么不在写入时翻转状态**：学校 8 月提前上传 9 月 1 日生效的新版——若上传时就把旧版标成 `superseded`，**8 月这一整月该制度在库里彻底消失**，学生问到直接拒答（**政策真空期**）。
+
+改成检索期解析后，「新版自动取代旧版」的观感不变，且顺带解决两个问题：
+
+- **传错文件**：删掉新版即可，旧版自动恢复生效，不用手工 enable
+- 管理端的「历史版本」列表仍按 version 正常展示
+
+**实现方式**：不要在 Chroma 里表达"同组最大版本"（它做不到），改为**两段式**——
+
+1. Chroma 检索（带 `status` / `effective_date` / ACL 过滤，含过采样）
+2. **应用层按 `doc_group_id` 分组，只保留 version 最大的一条**，再取 Top-K
+
+代价是过期版本会暂时占用部分召回槽位；但由于同组多版本的情况很少，且过采样已经覆盖了"过滤后不足"的场景，实际影响可忽略。
+
+**`ingestion_tasks`** — 上传任务（支撑 M0 的上传进度条）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | 即 `task_id`，**持久化**（服务重启后仍可查） |
+| doc_group_id | TEXT | 目标文档组 |
+| status | TEXT | pending / parsing / chunking / embedding / done / failed |
+| progress | INTEGER | 0–100 |
+| message | TEXT | 当前阶段说明 |
+| error | TEXT | 失败原因 |
+| document_id | TEXT FK | 完成后回填 |
+| created_at / updated_at | DATETIME | |
+
+**回滚语义**：任一步失败 → 按 `document_id` **反向删除三个存储**（Chroma → BM25S → SQLite），不是事务回滚（跨异构存储做不到原子，只能补偿删除）。
+
+**version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。
 
 **`conversations`** / **`messages`** — 沿用现有设计，字段不变。
 
@@ -303,8 +356,15 @@ Chroma 的 chunk metadata **必须冗余存一份过滤字段**：
 ```
 document_id, doc_group_id, status, effective_date,
 visibility, visible_roles, current_chapter, chapter_level,
-page, page_start, page_end, image_paths
+chunk_index, char_start, char_end,     ← 原文回跳必需
+page, image_paths
 ```
+
+> **`chunk_index` / `char_start` / `char_end` 是亮点③的落地基础**，缺了它们，「字符偏移」无从谈起。
+>
+> **偏移的参照系必须明确**：`char_start/char_end` 是相对 `documents.normalized_text_path` 那份**清洗后的规范化文本**的偏移，**不是原始 PDF 的字节偏移**（清洗会删除页眉页脚，两者对不上）。前端跳转时先取规范化文本定位，再映射到阅读器。
+>
+> `page` 与 `page_start/page_end` 冗余，**统一保留 `page`**。
 
 **为什么要冗余**：Chroma 只能按自身 metadata 过滤，无法 join SQLite。若改为"先查 SQLite 拿合法文档 ID，再用 ID 列表查 Chroma"，文档一多该列表会超出查询上限。
 
@@ -312,11 +372,13 @@ page, page_start, page_end, image_paths
 
 ```
 属于该知识库
-  AND status = "active"                    ← 版本过滤
+  AND status = "active"                    ← 状态过滤
   AND effective_date <= 今天                ← 生效日期过滤
   AND (visibility = "public"
        OR 用户角色 ∈ visible_roles)         ← ACL
 ```
+
+> **「同组取最高 version」不在这里表达**——Chroma 做不到跨条目的聚合。它由应用层在检索后完成，见 3.3.1 的「当前生效版本解析」。
 
 #### 3.3.4 后过滤召回不足问题（面试深度点）
 
@@ -507,8 +569,13 @@ route ────────────────── 三分类（条件�
 **三个关键设计**：
 
 1. **拒答的两道机制**（亮点④）：**候选为空**由 `rerank` 之后的条件边做零成本短路；**充分性判定**并入 `generate` 的单次结构化调用。不再用分数阈值判充分性——**实测证明阈值无法分离有据/无据**（数据见 3.5.4）。代价与残余风险同见 3.5.4。
-2. **检查点即记忆**：使用 LangGraph 自带 `SqliteSaver`，多轮状态、断点续跑由框架保证，无需自建消息表。
-3. **resolve 可跳过**（决策批准项 3）：无历史对话，或问题无代词/省略且长度足够时直接透传，闲聊场景不浪费 LLM 调用。
+2. **图是无状态的**：`messages` 表是历史的**唯一权威**，每轮从库里加载最近 N 轮灌进 state，图作为无状态函数执行。
+
+   **不使用 LangGraph 的 checkpointer**（`SqliteSaver`）。原设计写"检查点即记忆、无需自建消息表"，与 3.3.1 保留 `messages` 表的做法**互相矛盾**——会导致三个问题：删了会话但 checkpoint 的 thread 还在，下一轮上下文"复活"；同一份答案在库里存 2–3 份、各有各的生命周期；跨轮复用 state 时上一轮的 `refused` / `verify_report` 串到本轮。
+
+   移除 interrupt（见节点 4）后，checkpointer 已经没有任何必要用途——每轮请求本身就是一次独立、完整、可重放的图执行。
+
+3. **resolve 可跳过**：命中问候词表，或**无历史**、**无代词**时直接透传，闲聊场景不浪费 LLM 调用。
 
 #### 3.5.3 节点设计
 
@@ -814,7 +881,16 @@ BM25+Vector  BM25       Vector
 | 库 | rank_bm25（内存、每次全量重建） | **BM25S**（稀疏矩阵、磁盘持久化、快 100+ 倍） |
 | 更新 | 无 | 增量索引 + 索引失效检测 |
 
-**过滤条件**（亮点①，见 3.3.3）：拼装后同时作用于向量检索与 BM25 索引构建。
+**过滤条件**（亮点①，见 3.3.3）
+
+两路的过滤**位置不同**，不能当成同一套机制：
+
+| | 过滤位置 | 是否需要过采样 |
+|---|---|---|
+| **向量** | 检索器内部（先 Top-N 再过滤） | ✅ 需要（见 3.3.4） |
+| **BM25** | **全量打分 → 按文档粒度过滤 → 取 K** | ❌ 不需要 |
+
+BM25 侧按 `document_id` 过滤即可（`documents` 表已有 `status` / `effective_date` / `visibility` / `visible_roles`），**不需要把过滤字段冗余进 BM25 索引**——BM25S 本身也没有 metadata 机制。
 
 **动态过采样**（批准项 4，见 3.3.4）。
 
@@ -1192,6 +1268,11 @@ POST /api/conversations
 GET  /api/conversations/{id}/messages
 PATCH /api/conversations/{id}
 DELETE /api/conversations/{id}
+
+# 原文回跳（亮点③）
+GET  /api/documents/{id}/text           规范化文本 + 偏移索引
+GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层定位；
+                                        其它格式跳文档预览页）
 ```
 
 **SSE 事件协议**
