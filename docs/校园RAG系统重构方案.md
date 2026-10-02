@@ -2,7 +2,16 @@
 
 > 版本：v1.1 ｜ 日期：2026-10-02 ｜ 状态：待审批
 >
-> **v1.1 变更**：新增**附录 E**（PDF 链路实测复核 + 简化方案）；修正附录 **B.1.1**（`magic` 已实测确认）、**B.2.3**（`pdf_loader.py` 被误判为死代码）。
+> **v1.1 变更（两轮）**：
+>
+> 1. **新增附录 E**（PDF 链路实测复核 + 简化方案）；修正 **B.1.1**（`magic` 已实测确认）、**B.2.3**（`pdf_loader.py` 被误判为死代码）。
+> 2. **全文口径对齐**（消除歧义与自相矛盾，共 30 余处）。其中会**影响施工实现**的几条：
+>    - **SSE 协议补 `decision` 事件**，并钉死**两条拒答路径**如何区分（原先前端被要求收一个协议里不存在的事件）
+>    - **`K` 与最终返回条数拆开**（原先同一个字母两个含义，照 K 实现会返回 10 条而非 5 条）
+>    - **`[n]` 标记剥离时机统一**为「拼 history 时剥」（3.5.1 原写作"落库前"，与 3.3.1 / 3.8.4 相反）
+>    - **PDF 解析沿用正文 3.4.2 的三路分支**（附录 E.4 的"按文字层分路"标为未采纳备选）
+>    - **依赖条目数订正**为 35（原写 30）；**旧 metadata 字段表订正**（原含不存在的 `document_id`）
+>    - **章节正则口径订正**：`第X章` 需按宽松口径匹配（原先的严格口径会造成"四份文档没有章"的假象）
 
 ---
 
@@ -163,7 +172,10 @@ backend/
 │   │   ├── conversation_service.py
 │   │   ├── stats_service.py     仪表盘聚合
 │   │   └── index_service.py     BM25/向量索引的构建与失效
-│   └── prompts/                 提示词模板
+│   └── config/                  配置与提示词（详见 3.2.1）
+│       ├── app.yaml             应用配置
+│       ├── security.yaml        密钥引用
+│       └── prompts/             提示词模板
 └── tests/
     ├── unit/
     ├── integration/
@@ -179,7 +191,7 @@ backend/
 #### 3.2.1 配置管理
 
 ```
-config/
+app/config/          ← 位于 app/ 下（与 3.1 的工程结构一致）
 ├── app.yaml        应用配置（分块参数、检索参数、阈值）
 ├── security.yaml   密钥引用（只存环境变量名，不存值）
 └── prompts/        提示词
@@ -312,7 +324,7 @@ core/deps.py      构造 UserContext
 
 1. Chroma 检索（带 `status` / `effective_date` / ACL 过滤，含过采样）
 2. **拿候选里的 `doc_group_id` 回查 SQLite**，得到每组「active 且 effective_date ≤ 今天」的 `max(version)`
-3. **丢弃 version ≠ 该最大值的 chunk**，再取 Top-K
+3. **丢弃 version ≠ 该最大值的 chunk**，再取最终返回的 5 条（见下方术语）
 
 > ⚠️ **第 2 步必须回查 SQLite，不能在召回集内取最大。** 若现行版 v5 的措辞与 query 不相似、而已废止的 v4 相似，Top-N 里只有 v4——在召回集内折叠会把 **v4 当成现行版本**返回，用户拿到已废止的政策，界面还按「当前生效」展示。**这会让亮点①的版本隔离彻底失效。**
 
@@ -378,7 +390,7 @@ core/deps.py      构造 UserContext
 | reranked_chunk_ids | JSON 数组 |
 | answer | 最终答案 |
 | **is_refused** | 是否拒答 ← 拒答率统计的数据源 |
-| **refusal_reason** | 取值见下方词表 —— qa_logs / SSE / 前端**共用同一套** |
+| **refusal_reason** | 取值见 **5.2 的「拒答原因取值表」**（本表下方无词表）—— qa_logs / SSE / 前端**共用同一套** |
 | **verify_report** | JSON，`cite` 节点的校验报告（见节点 10） |
 | **route_source** | `rule` / `llm` ← **规则命中率统计的数据源**（见 3.2.3） |
 | **degraded** | 0/1，本轮是否发生过降级（明细见 `degradation_events`） |
@@ -435,7 +447,7 @@ core/deps.py      构造 UserContext
 | metrics | TEXT(JSON) | 该题的指标 |
 | created_at | DATETIME | |
 
-> 这三张表支撑 `POST /eval/run`、`GET /eval/runs`、`GET /eval/runs/{id}` 三个接口，以及 5.3 消融实验表的产出。**`eval_runs.config` 是消融对照的关键**——没有它就无法说明两次运行的差异来自哪个开关。
+> 这三张表支撑 `POST /api/admin/eval/run`、`GET /api/admin/eval/runs`、`GET /api/admin/eval/runs/{id}` 三个接口（路径以 3.7.3 为准），以及 5.3 消融实验表的产出。**`eval_runs.config` 是消融对照的关键**——没有它就无法说明两次运行的差异来自哪个开关。
 
 #### 3.3.2 向量库 metadata 设计
 
@@ -480,7 +492,11 @@ status = "active"                          ← 状态过滤
 
 **问题**：Chroma 是「先按向量相似度取 Top-N，再按 metadata 过滤」。若 Top-N 中大部分被权限过滤掉，实际可用结果可能只剩一两条——而库中明明存在相关内容，只是没进 Top-N。
 
-**术语**：本文中 **K = 每路召回数 = 10**（见节点 6 参数策略）。3.3.4 的放大倍率均基于它。
+**术语（务必分清）**：本文中 **K = 每路召回数 = 10**（单个「查询 × 检索器」组合取多少条，见节点 6 参数策略）。本节的放大倍率均基于 **K**。
+
+**最终返回条数 = 5 条**（精排后进入 `build_context` 的条数，沿用现有配置 `k: 5`）。**全文不用字母缩写指代它**——节点 7 / 节点 8 写作 `Top-5`。
+
+> **v1.1 订正**：原文此处只定义了 `K = 10`，而 3.3.1、节点 7、节点 8 又用 `Top-K` 指代最终返回条数——**同一个字母两个含义**，照 K 实现会返回 10 条而非 5 条。现改为显式写 `Top-5`，不再引入第二个字母缩写（`N` 在本文档中另有泛指用法，见本节开头）。
 
 **方案**：**固定过采样 + 一次重试**
 
@@ -608,7 +624,8 @@ class RAGState(TypedDict):
     retrieval_queries: list[RetrievalQuery]   # 三类检索查询，见 3.5.3 节点 5
     candidates: list[Chunk]      # RRF 融合后
     reranked: list[Chunk]        # 精排后
-    retrieval_confidence: float  # 仅观测用，不参与判定
+    retrieval_confidence: float | None  # 仅观测用，不参与判定；降级时为 None（见节点 7）
+    rerank_degraded: bool        # 精排是否降级（见节点 7）
 
     # 生成
     context: str
@@ -628,7 +645,7 @@ class RAGState(TypedDict):
 
 | 规则 | 为什么 |
 |---|---|
-| **落库前剥掉助手消息里的 `[n]` 标记** | 上一轮答案带着 `[1][2]` 进历史，模型会模仿旧编号；而本轮证据可能只有 2 条，写出 `[3]` 立刻变成无效标记（`cite` 记幻觉、服务端校验拒绝） |
+| **拼 history 时剥掉助手消息里的 `[n]` 标记**（**落库保留原文**，见 3.3.1） | 上一轮答案带着 `[1][2]` 进历史，模型会模仿旧编号；而本轮证据可能只有 2 条，写出 `[3]` 立刻变成无效标记（`cite` 记幻觉、服务端校验拒绝） |
 | **禁止把结构化输出原文写入历史** | 否则下一轮模型会看到 `decision` 字段，模仿 JSON 格式作答 |
 | 截断策略：最近 N 轮纯文本 | 同时解决 token 预算 |
 
@@ -1088,7 +1105,7 @@ candidates (加权 RRF 融合后，截断至上限条数)
      降级：用 RRF 顺序   正常精排
            └─────┬───────┘
                  ↓
-           reranked (Top-K)
+           reranked (Top-5)
        retrieval_confidence = ?
 ```
 
@@ -1112,7 +1129,7 @@ candidates (加权 RRF 融合后，截断至上限条数)
 **结构图**
 
 ```
-reranked (Top-K)
+reranked (Top-5)
       ↓
 按文档分组 → 组内按 chunk_index 排序
       ↓
@@ -1460,12 +1477,25 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
 | `session_created` | `session_id` | 新会话 |
 | `resolved` | `resolved_query` | 消解补全结果，前端可展示 |
 | `route` | `route, clarify_facets?` | 路由类别；`clarify` 时附候选意图列表 |
+| `decision` | `ANSWERED` / `REFUSED_NO_EVIDENCE` | 结构化判定结果，服务端边收边解析得到（见节点 9）。前端据此区分「作答」与「证据不足拒答」 |
 | `token` | `text` | 逐字回答 |
 | `citations` | `Citation[]` | 引用列表 |
 | `verify` | `VerifyReport` | 后校验结果；前端据此标注无依据句 |
 | `refused` | `reason` | 触发拒答 |
 | `done` | `latency_ms` | 结束 |
 | `error` | `code, message` | 异常 |
+
+> **两条拒答路径在 SSE 上如何区分**（两条路都很容易实现成不一样，必须钉死）：
+>
+> | 拒答来源 | `decision` 事件 | `refused` 事件 |
+> |---|---|---|
+> | 候选为空（`rerank` 后短路 → 节点 11） | 不发送 | **发送**，`reason = "no_candidate"` |
+> | 模型判定证据不足（节点 9 → 直接 END） | **发送** `REFUSED_NO_EVIDENCE` | **发送**，`reason = "insufficient_evidence"` |
+>
+> 即：**`refused` 事件两条路都发，`reason` 取值见 5.2 的「拒答原因取值表」**；
+> `decision` 事件只在 `generate` 跑过之后才有意义。前端**只需监听 `refused` 做拒答渲染**，`decision` 用于区分文案（前者可建议咨询渠道，后者提示「资料中未找到」）。
+>
+> 依据：5.2 已声明「`qa_logs.refusal_reason`、SSE `refused` 事件的 `reason`、前端展示分支**都用同一张表**」——词表有两个值，说明两条路都要发该事件。
 
 #### 3.7.3 管理端
 
@@ -1843,7 +1873,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 文号 / 专有名词型 | | | |
 | 多轮指代型 | | | |
 
-**这张分层表是回应模块②立项理由的直接证据。**
+**这张分层表是回应亮点②立项理由的直接证据。**
 
 ### 5.4 回归
 
@@ -1895,12 +1925,16 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 |---|---|---|---|
 | 1 | MinerU 密钥硬编码且已提交 git | `app/config/chroma.yaml` | 吊销重发 + 改环境变量 + 清理 git 历史 |
 | 2 | `user_id` 为客户端传入参数，无校验 | 全部接口 | 一律从 JWT 取，接口不再接受该参数 |
-| 3 | intent 分类器配置项在两个 YAML 中均不存在，静默使用代码默认值 | `intent_classifier.py` | 新项目配置项与代码严格对应 |
+| 3 | intent 分类器配置项在两个 YAML 中均不存在，静默使用代码默认值 | `intent_classifier.py`（**注意：该文件已不在当前分支**，见下方注） | 新项目配置项与代码严格对应 |
 | 4 | `mode="auto"` 声明但未实现，静默降级为 agent | `chat_service.py` | 新项目无此参数（模式由架构决定） |
 | 5 | 知识库接口存在两套命名空间 | `/knowledge` 与 `/api/knowledge` | 统一为 `/api/admin/documents` |
 | 6 | 引用机制两套并存（代码计算 vs LLM 自写） | `chat_service.py` / `agent.txt` | 统一为代码计算，见 3.5.3 节点 10 |
 | 7 | 上下文组装逻辑在两个文件中重复 | `rag_service.py` / `agent_service.py` | 收敛为单一 `build_context` 节点 |
 | 8 | 零测试、无 CI | 全项目 | 见第六章 |
+
+> **第 3 条的定位说明（v1.1 补充）**：`intent_classifier.py` 的**源码已不在当前工作区**（`refactor/campus-rag` 与 `main` 都没有，只剩 `app/intent/__pycache__/` 下的 `.pyc` 残留），源码仅存于 `feature/intent-recognition` 分支（1c47541）。
+>
+> 不影响本条结论——**决策 #3 已废弃 Agent 模式**，intent 分类器整体不进新项目；这条只是把它列为「旧项目的教训：配置项与代码必须严格对应」，而**不是**要求去改那个文件。施工时**不要去仓库里找它**。
 
 ---
 
@@ -1995,7 +2029,13 @@ except ImportError:      # ← 只捕获 ImportError
 
 **重传必然复现同一结果 → 用户陷入死循环。**
 
-**触发条件低得惊人**：只要页面里存在**面积 > 5000px² 的矩形**——中文公文里的**表格框线极常见**。
+**触发条件低得惊人**：只要页面里存在**面积 > 5000pt² 的矩形**——中文公文里的**表格框线极常见**。
+
+> **⚠️ v1.1 实测修正**：后半句「表格框线极常见」是**未经实测的推断，已被数据否定**。实测 `corpus/guet/` 全部 95 页：**表格 0 个**，面积 > 5000pt² 的矩形**仅 1 个**，且该文档被判定为 `text_pdf`、根本不走裁切路径——**本语料实际触发率 ≈ 0**（详见附录 E.1）。
+>
+> **但修复照做**：这是**逻辑错误**（VL 关闭却计入 degraded），与触发频率无关；且语料将来变化后条件可能成立。
+>
+> （单位订正：`px²` → `pt²`，配置项 `chart_area_threshold` 比较的是 PDF point 坐标算出的面积。）
 
 **修复**
 
@@ -2031,6 +2071,12 @@ doc.metadata["current_chapter"] = doc.metadata.get("current_chapter", "")
 这个 doc 级的值被**原样复制到该文件的每一个 chunk**。
 
 **后果**：一份制度文档的所有片段，在 prompt 和引用里**都显示成「第一章 xxx」**。
+
+> **⚠️ 适用范围（v1.1 补充，务必连附录 E.3.2 一起读）**：上面这个「第一个标题」的取值路径是 **`file_handler.py`（MD / DOCX）**。
+>
+> **PDF 的情况不同——它的 `current_chapter` 是空的**（加载器从不写这个字段，实测索引里 1244 条**全部是空字符串**）。而本项目的**制度文档恰恰全是 PDF**。
+>
+> 也就是说：**MD/DOCX 是「章节错」，PDF 是「章节无」**。修复必须同时覆盖两者，只修 `file_handler.py` 会造成「PDF 看起来修好了、其实仍是空的」。详见 **E.3.2**。
 
 > **这比没有章节更糟**——没有章节用户知道信息缺失，章节错的会误导用户以为找对了地方。亮点③（引用溯源到章节）的**可信度直接归零**。
 
@@ -2068,11 +2114,12 @@ for md5_hex, _, _ in batch_md5s:
 | 死代码 | 位置 | 说明 |
 |---|---|---|
 | `toc` / `chapter_count` / `chapter_level` | 多个加载器 + `processor.py:214-215` | **只有写入，无任何读取**；每个 chunk 多存一份（`toc` 可能是几百字符的 JSON） |
-| `ocr_engine` / `scan_branch` / `degraded` / `degraded_images` | `mineru_scan_loader.py:207-208, 375-376` | 写了但无人读 |
+| `ocr_engine` / `scan_branch` | `mineru_scan_loader.py:207-208, 375-376` | 写了但无人读 |
+| `degraded` / `degraded_images` | **`pdf_multimodal_loader.py:497-498`**（v1.1 订正：原先误标为 `mineru_scan_loader`） | 写了但无人读 |
 | `_replace_images_in_text()` | `mineru_scan_loader.py:435-449` | 功能已被 `_blocks_to_markdown` 取代 |
 | `MINERU_IMAGE_MIN_SIZE` + `chroma.yaml:87` | `mineru_scan_loader.py:29-30` | 定义后从未使用 |
 | `_max_edge_density` + `chroma.yaml:96` | `image_filter.py:116-118` | 赋值后类内无引用（实际用的是硬编码值） |
-| `_get_allow_types()` | `file_handler.py:9-10` | 零调用；`knowledge_service.py:18` 与 `zip_handler.py:15` 各复制了一份 |
+| `_get_allow_types()` | `file_handler.py:9-10` | 零调用；`knowledge_service.py:18` 与 `zip_handler.py:15-16` 各复制了一份 |
 | `page_image_map` 参数 | `pdf_multimodal_loader.py:616` → `mineru_scan_loader.py:230` | 传入后从未使用；连带 `extract_images_from_pdf` 对纯扫描件是 100% 空转 |
 
 > **⚠️ v1.1 勘误 —— 本表原先还有一行「`pdf_loader.py` 整个文件」，已被删除，那条是错的。**
@@ -2108,7 +2155,7 @@ for md5_hex, _, _ in batch_md5s:
 
 #### B.3.1 同一个 PDF 被打开 3–4 次
 
-**位置**：`judge_pdf_type`（`:52`）→ `extract_images_from_pdf`（`image_extractor.py:41`）→ `_process_text_pdf`（`:196, 198`）/ `_process_text_mix_pdf`（`:279, 298`）
+**位置**：`judge_pdf_type`（`:53`，`fitz.open` 所在行）→ `extract_images_from_pdf`（`image_extractor.py:41`）→ `_process_text_pdf`（`:196, 198`）/ `_process_text_mix_pdf`（`:279, 298`）
 
 每次 `fitz.open` 都要重建 xref 与页树。**修复**：一次打开、多处复用（把打开的 Document 往下传），或在一次遍历里同时完成类型判定与图片提取。
 
@@ -2142,7 +2189,7 @@ for md5_hex, _, _ in batch_md5s:
 
 ---
 
-## 附录 C：技术选型评估 —— 已决策项与待决项
+## 附录 C：技术选型评估 —— 决策记录（**无待决项**）
 
 > **为什么单独列一节**：正文各处已确定了"选什么"，但没有系统记录**"为什么不选替代方案"**。
 >
@@ -2263,7 +2310,9 @@ Agent 模式已废弃（决策 #3），剩下的是**线性管道 + 两个条件
 
 ---
 
-### C.2 待决项（本轮新发现）
+### C.2 补充决策（本轮新增，**已全部定案，无待决项**）
+
+> **原标题为「待决项」，已订正**：本节三项现已分别落定为 **C.2.1 ✅已决策**、**C.2.2 ✅已核验**、**C.2.3 明确不做**。**本文档当前没有待决的技术选型**，施工时不必等待任何拍板。
 
 #### C.2.1 嵌入模型：**保持在线 API**（本地方案作为可切换备选）
 
@@ -2320,7 +2369,7 @@ OLLAMA_EMBED_MODEL=qwen3-embedding:0.6b
 | 项 | 实测结果 |
 |---|---|
 | Ollama | ✅ **已安装**（v0.18.0） |
-| Ollama 服务 | ❌ 当前未运行（11434 无响应） |
+| Ollama 服务 | ⚠️ **写文档时未运行**（11434 无响应）；v1.1 复核时已在运行（进程启动于 2026-10-02 20:21）。**该状态随时间变化，施工前请自行确认** |
 | 模型目录 | **`OLLAMA_MODELS=e:\llm\models`**（在 E 盘） |
 | 已下载模型 | `deepseek-r1:1.5b`（1.1GB）—— 下载机制已验证可用 |
 | GPU 配置 | ✅ `OLLAMA_CUDA=1` + `OLLAMA_GPU_LAYERS=35` |
@@ -2405,7 +2454,7 @@ ollama pull qwen3-embedding:0.6b
 ```
 venv 总计       6.4 GB
 ├─ torch        4.4 GB
-├─ rapid_doc    753 MB   ← 被 modelscope / unstructured 拉进来（意外发现）
+├─ rapid_doc    753 MB   ← 来源存疑，见下方订正
 ├─ llvmlite     103 MB
 ├─ scipy         98 MB
 ├─ spacy         85 MB
@@ -2415,6 +2464,12 @@ venv 总计       6.4 GB
 
 （模型文件另计：bge-reranker-v2-m3  2.2 GB）
 ```
+
+> **v1.1 订正：「753MB 真实，但「被谁拉进来」查无实据」。**
+>
+> 原写作「被 modelscope / unstructured 拉进来（意外发现）」。实测遍历全部 `*.dist-info/METADATA`：**没有任何已安装包声明依赖 `rapid-doc`**；`uv.lock` 中也 **0 命中**；`rapid_doc/` 目录自身连 dist-info 都没有。`modelscope` 的依赖表只有 filelock / packaging / requests / setuptools / tqdm / urllib3。
+>
+> **体积属实、归因不成立**——所以「删 modelscope 就能去掉 rapid_doc」这个推论**不保证成立**（见下方类别 B）。
 
 ---
 
@@ -2459,6 +2514,9 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 
 **连带收益**：`rapid_doc`（753MB）+ `spacy`（85MB）+ 部分 `numba/llvmlite` 随之消失。
 
+> ⚠️ **但「连带」这个因果链未经验证**（见上方订正）：没有任何包声明依赖 `rapid_doc`，它在 `uv.lock` 里也查不到。
+> **施工时请实测**——删掉 `modelscope` 后重跑依赖解析，确认这三样是否真的消失；**不要把它当作既成收益写进结论**。
+
 > **注意**：若校园网络访问 HuggingFace 不通，用 `HF_ENDPOINT` 指向国内镜像；或保留 modelscope 但**移出主环境**（放进独立的下载脚本）。
 
 ---
@@ -2493,7 +2551,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | 项 | 现在 | 清理后 |
 |---|---|---|
 | venv | 6.4 GB | **约 5.5 GB**（保留 CUDA torch） |
-| 依赖条目 | 30 | 约 22 |
+| 依赖条目 | **35** | **30**（类别 A 删 5 个；类别 B 是换实现、条数不变） |
 
 ---
 
@@ -2525,8 +2583,12 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 
 | | 字段 |
 |---|---|
-| **旧** | `document_id` / `chunk_index` / `chunk_id` / `user_id` / `md5` / `original_filename` / `file_type` / `current_chapter` |
-| **新** | 上述**全部保留**，另加 `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `char_start` / `char_end` / `page` |
+| **旧**（实测自 `chroma.sqlite3`，17 个键） | `kb_id` / `chunk_id` / `chunk_index` / `user_id` / `md5` / `original_filename` / `file_type` / `current_chapter` / `chapter_level` / `chapter_count` / `toc` / `has_images` / `page` / `source` / `created_at` / `ocr_engine` / `scan_branch` |
+| **新**（见 3.3.2） | `document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `current_chapter` / `chapter_level` / `chunk_index` / `char_start` / `char_end` / `page` / `image_paths` |
+
+> **v1.1 订正**：旧字段清单原先写作 `document_id / chunk_index / chunk_id / user_id / md5 / original_filename / file_type / current_chapter`，其中 **`document_id` 在现有索引中根本不存在**（全仓代码也无此名，对应位置实际是 `kb_id`），且漏列了 9 个真实存在的键。现按 sqlite 实际查询结果重写。
+>
+> **新增的字段**（旧索引没有、ACL 与版本过滤依赖它们）：`document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `char_start` / `char_end` / `image_paths`。注意 **`page` 不是新增的**，旧索引里已有。
 
 **旧向量没有新增的那些字段** → 检索期的 **ACL 过滤和版本过滤会全部失效**（亮点①直接归零）。
 
@@ -2637,7 +2699,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 > | **修正 B 的判断** | E.2.1（`magic`，结论成立但更严重）、E.2.2（`pdf_loader.py`，B 的删除指令是错的） |
 > | **B 里没有的新问题** | E.3.1（签名表编码错误）、E.3.2（`current_chapter` 从未写入）、E.3.3（封面竖排倒序） |
 > | **新增参考数据** | E.1（语料画像）、E.5（性能与环境）、E.6（外部选型，不完整） |
-> | **新增方案（待评审）** | E.4（按"有无文字层"分路的简化方案） |
+> | **新增方案（未采纳，备选）** | E.4（按"有无文字层"分路）——**已确认沿用 3.4.2 的三路分支**；其中 **E.4.3 单独仍然适用** |
 >
 > 环境：`.venv`（Python 3.13 / PyMuPDF 1.27.2）｜ 语料：`corpus/guet/` 10 份公文 95 页 ｜ 实测日期：2026-10-02
 
@@ -2653,7 +2715,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | 扫描页（无文字层） | **0** |
 | 表格 | **0**（`extract_tables()` 全页返回空） |
 | 显著内嵌图片（>30×30） | **6 张，且全部落在第 1 页** |
-| 那 6 张图是什么 | 153×153px / 8–9KB 的 JPEG，红头文件的**公章/文件头** |
+| 那 6 张图是什么 | **4 张 153×153px（约 7.6KB）+ 1 张 162×162px（9.2KB）+ 1 张 980×979px（94KB）**，均为 JPEG，红头文件的**公章/文件头** |
 | 面积 > 5000pt² 的矩形 | **1 个**（且该文档判定为 `text_pdf`，根本不走裁切路径） |
 | 当前链路实跑耗时（3 份抽样） | 0.38s / 0.68s / 0.90s，**零降级** |
 
@@ -2712,7 +2774,7 @@ B.2.3「死代码清理清单」原先把 `app/utils/pdf_loader.py`（27 行）�
 
 #### E.3.1 `magic_signatures` 签名表编码错误 —— 三分之二失配 【已实测】
 
-**位置**：`processor.py:16-18`（`_get_magic_signatures`）+ `chroma.yaml:19-27`（`magic_signatures`）
+**位置**：`processor.py:16-18`（`_get_magic_signatures`）+ `app/config/chroma.yaml:26-31`（`magic_signatures`，含全部 5 条签名）
 
 **问题**：配置里的签名被 `.encode("utf-8")` 编码，但配置中写的是**字面字符**（`‰` 想表达字节 `0x89`、`ÿ` 想表达 `0xFF`、`ÐÏà` 想表达 `0xD0CF11`）。UTF-8 编码把它们变成了 3 字节序列，**与真实文件头对不上**：
 
@@ -2755,7 +2817,8 @@ B.2.3「死代码清理清单」原先把 `app/utils/pdf_loader.py`（27 行）�
 **实测证据**（直接查 `data/chromadb/chroma.sqlite3`）：
 
 ```
-current_chapter: 全部 NULL      toc: 全部 "[]"      chapter_count: 全部 0
+current_chapter: 全部为空字符串（1244/1244，NULL 行数为 0）
+toc: 全部 "[]"      chapter_count: 全部 0
 page: 正常（1,2,3,3,3,4...）
 ```
 
@@ -2798,7 +2861,15 @@ page: 正常（1,2,3,3,3,4...）
 
 ---
 
-### E.4 简化方案（**待评审**，未定案）
+### E.4 简化方案（**未采纳**，保留为备选记录）
+
+> **⛔ 状态：本轮不采纳。**
+>
+> 经确认，**PDF 解析沿用正文 3.4.2 的「三路分支」方案**（纯文本 / 图文混排 / 扫描件走 OCR，沿用现有成熟实现）。正文 3.4.2 为**唯一口径**。
+>
+> 本节保留记录「按文字层分路」这一备选思路及其数据依据（E.1），**施工时不按此实施**，仅在将来重新评估 PDF 链路时作为起点。
+>
+> **⚠️ 例外：E.4.3 与分支选择无关，仍然适用。** 它解决的是**上传格式校验被 `magic` 拖垮**的问题（B.1.1 / E.2.1），与 PDF 走几路分支没有关系，**该修还得修**。
 
 #### E.4.1 核心思路
 
@@ -2818,12 +2889,25 @@ page: 正常（1,2,3,3,3,4...）
 **章节用正则**。实测公文正文结构高度规整（`第X章` 独立成行、`第X条` 行内、`（一）`、`1.`），全语料 95 页跑一遍：
 
 ```
-148ms / 95 页 / 41617 字
-识别到：第X章 23 个、第X条 266 条、（一）级 279 个、数字序号 23 个
+148ms / 95 页
+识别到：第X条 266 条、（一）级 279 个、数字序号 23 个
 ```
 
-> **一处要注意**：`01 / 05 / 06 / 07 / 10` 五份的"章"识别为 0——它们不走 `第X章` 层级，用的是别的样式。
-> 施工时需按这 5 份的实际结构补正则，**不能只测通 04/02/08 就收工**。
+> **⚠️ v1.1 订正——「第X章」这一项原先写错了，别照着改。**
+>
+> 原文写「识别到第X章 23 个」并断言「`01/05/06/07/10` 五份不走 `第X章` 层级，施工时需按它们的实际结构补正则」。
+> **这个断言是错的，是正则写太严造成的假象。**
+>
+> 真实情况（实测，两套提取器交叉验证）：
+>
+> | 匹配方式 | `第X章` 命中 | 说明 |
+> |---|---|---|
+> | 严格（**整行只有** `第X章`） | 31 个 | 01/05/06/07/10 命中 0——**当时就是这个口径** |
+> | 宽松（允许行尾带标题） | **58 个** | 01 命中 5、05 命中 10、06 命中 7、07 命中 5 |
+>
+> 也就是说：**只有第 10 份真的没有「章」**，另外四份是**章标题与后续文字排在同一行**，被严格正则漏掉了。
+>
+> **施工结论**：正则要按**宽松口径**写（`第X章` 出现在行内即可，不要求独占一行），**不需要为那四份补四套规则**。
 
 #### E.4.3 文件类型合规检查（**重建，不是保留**）
 
@@ -2854,7 +2938,7 @@ app/utils/file_type.py
 > **别踩历史坑**：`chroma.yaml` 里留着注释 `# "PK\x03\x04" removed: ... this signature caused misdiagnosis`。
 > 裸判 `PK` 分不出"普通 zip"和"docx"，当年就是这么误判的，**必须配合容器内部结构**。
 
-**顺带能收掉的重复**：`allow_knowledge_file_types` 现在被复制在 `knowledge_service.py:18`、`zip_handler.py:16`、`file_handler.py:10` **三处**；
+**顺带能收掉的重复**：`allow_knowledge_file_types` 现在被复制在 `knowledge_service.py:18`、`zip_handler.py:15-16`、`file_handler.py:10` **三处**；
 `allowed_mime_types` 在删掉 magic 后**已无任何消费者**，要么删要么别留着当摆设。
 
 **定位说明**：这层是**给人看的（快速 + 提示语说人话），不是安全边界**。真正的把关是解析器本身（PyMuPDF / python-docx 遇到假文件会直接拒绝）。
@@ -2924,7 +3008,7 @@ Ollama 现有模型: deepseek-r1:1.5b  ← C.2.1 计划的 qwen3-embedding:0.6b 
 
 | 项 | 状态 |
 |---|---|
-| E.4 简化方案 | **待评审**——需确认后再进实施计划 |
+| E.4 简化方案 | **已确认不采纳**——PDF 沿用正文 3.4.2 的三路分支。仅 **E.4.3（格式校验重建）仍适用** |
 | Docling / MinerU 自托管 / PP-StructureV3 | **未调研**——若 E.4.4 要接扫描件，需先补这一轮 |
 | 在中文公文语料上实测外部解析器 | **未做**——E.6 全部结论均来自文档与 issue，**未经语料验证** |
 | 索引里残留的《操作系统电子书》1244 条 | 按**附录 D** 的流程全量重建即可，不单独处理 |
