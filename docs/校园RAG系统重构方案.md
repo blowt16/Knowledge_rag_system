@@ -25,9 +25,9 @@
 > | | 做 / 不做 |
 > |---|---|
 > | **不做** | 值班表、告警通知渠道（邮件/短信/webhook）、发布流程、多环境部署、容量规划 |
-> | **做** | `trace_id` 贯通、JSON 结构化日志、节点耗时分位数、阈值可视化标红（即 3.2.3 的全部内容） |
+> | **做** | `trace_id` 贯通、JSON 结构化日志、**指标栈（Collector + Prometheus + Jaeger）**、仪表盘的耗时分位数与告警状态（即 3.2.3 的全部内容 + 4.4 的面板） |
 >
-> 这也是 3.2.3.3 选择「软告警」而非引入 Alertmanager 的原因（见该节）。
+> 三个可观测容器**是"工具"，不是"运维体系"**——它们由启动脚本一并拉起，不需要人值守。真正属于"运维体系"的（值班、通知渠道、发布流程）都不做，见 3.2.3.6。
 
 ### 1.2 决策清单
 
@@ -297,38 +297,67 @@ core/deps.py      构造 UserContext
 >
 > 日志文件沿用现有 `RotatingFileHandler` 轮转，**不引入日志检索平台**（见 3.2.3.6）。
 
-##### 3.2.3.3 指标与告警（不引指标栈）
+##### 3.2.3.3 指标栈与仪表盘（追踪数据可视化）
 
-**决策：不引入 Prometheus / Collector / Alertmanager，指标全部落在已有的 SQLite 上。**
+**决策：引入指标栈（OTel Collector + Prometheus），把 trace 派生的运行数据接到管理端仪表盘上。**
 
-> 本节原先把「指标导出 + 分位数 + 告警」列为**必须**，而 3.2.3.6 又写「不建 Collector、单容器 Jaeger 即可」——两者不能同时成立：**Jaeger 只做 trace，不存指标、不算分位数、不评估告警**；而「从 span 派生直方图」恰恰需要一个 collector 组件，被 3.2.3.6 排除了。
+> 本节原先把「指标导出 + 分位数 + 告警」列为**必须**，而 3.2.3.6 又写「不建 Collector、单容器 Jaeger 即可」——两者不能同时成立：**Jaeger 只做 trace，不存指标、不算分位数**。现在按「引入指标栈」定案，3.2.3.6 相应收窄。
 
-**数据源与算法**：
+**数据流**（一条链路，三处消费）：
 
-| 指标 | 来源 | 算法 |
+```
+FastAPI + LangGraph（应用）
+        │ OTLP（自动埋点，见 3.2.3.4）
+        ▼
+OTel Collector（单实例）
+        ├─ spanmetrics connector ──→ 从 span 派生指标（节点耗时直方图、调用计数、错误计数）
+        ├─ ──→ Prometheus          存指标（拉取）
+        └─ ──→ Jaeger              存 trace（单次请求的完整 span 树）
+                        │
+   Prometheus ◄── PromQL ──┐
+                           ▼
+              后端 `stats/*` 接口（见 3.7.3）
+                           ▼
+                  管理端仪表盘（见 4.4）
+                           │ 点异常 → 深链到 Jaeger
+                           ▼
+                     Jaeger UI（看具体是哪次请求）
+```
+
+**关键点：`spanmetrics` connector 是「追踪数据能上仪表盘」的那一环**——它把 span 实时聚合成 Prometheus 指标（按 span 名、状态、耗时分桶）。**没有它，Jaeger 里的 trace 就只是一个个孤立的请求，出不了分位数与趋势**。这也是原方案「单容器 Jaeger 即可」不成立的原因。
+
+**仪表盘上能看到什么**（全部来自 Prometheus，不再从 SQLite 现算）：
+
+| 面板 | 指标 | PromQL 形态（示意） |
 |---|---|---|
-| **各图节点耗时分位数** | `qa_logs.node_timings`（JSON，逐轮落地） | 仪表盘查询时用 SQL 算 p50 / p95 / p99 |
-| HTTP 耗时 / 错误率 | `qa_logs.latency_ms` + 3.2.3.2 的 JSON 日志 | 同上 |
-| LLM token 用量 | `qa_logs.token_usage` | 求和 / 分组 |
-| 降级次数 | `degradation_events` | `COUNT(*) GROUP BY kind` |
-| 拒答率 | `qa_logs.is_refused` | 比例 |
+| 节点耗时分位数 | p50 / p95 / p99，按节点维度 | `histogram_quantile(0.95, sum by (le, node) (rate(node_duration_bucket[5m])))` |
+| 端到端延迟 | p50 / p95 / p99 | 同上，不按节点分组 |
+| 错误率 | HTTP 5xx 比例、LLM 调用失败率 | `rate(http_5xx[5m]) / rate(http_total[5m])` |
+| LLM token 用量 | 输入 / 输出，按时间 | `sum(rate(llm_tokens_total[1h]))` |
+| 检索召回条数 | 分布 | 直方图 |
+| 降级次数 | 按 `kind` 分组 | 来自 `degradation_events`（业务表，非 Prometheus） |
 
-> **延迟仍必须看分位数（p50 / p95 / p99），不看平均值**——平均值会被少数快请求拉平、掩盖长尾，而长尾正是用户抱怨的来源。
->
-> **为什么 SQLite 够用**：本项目是**校园内网、低流量、单机单 worker**。几千到几万行上做分位数排序，SQLite 毫无压力。原方案担心的「算不了实时分位数」在**高并发**场景才成立，对本项目不成立——这也是排除指标栈的真正理由（见 3.2.3.6）。
+> **`degradation_events` 仍走 SQLite**：它是**业务语义**的降级记录（重排超时、路由降级、BM25 索引失效……），不是运行指标。仪表盘的「降级次数」面板继续读它，与 Prometheus 那几块并列展示。
 
-**告警的形态：仪表盘标红，不是真通知**
+**「追踪的可观测数据」怎么落到仪表盘上**
 
-| 监控项 | 触发条件（阈值在 M5 用真实流量标定） | 呈现 |
+仪表盘不直接展示 raw trace（那是 Jaeger 的活），而是展示**由 trace 聚合出来的指标**，并提供下钻：
+
+1. 仪表盘看到「`rerank` 节点 P95 异常抬升」
+2. **点该面板 → 深链到 Jaeger**，带上时间范围与 `service.name` + span 名过滤
+3. Jaeger 里看到那段时间的所有 `rerank` span，点开任一条看完整 span 树（含它父级的 `route` / 子级的模型调用）
+
+> 这样分工：**Prometheus 答「什么时候、哪个环节变慢了」，Jaeger 答「那一次具体慢在哪一步」**。两者靠同一份 OTel 数据，不重复埋点。
+
+**告警**
+
+| 监控项 | 依据 | 呈现 |
 |---|---|---|
-| 错误率 | HTTP 5xx 比例超阈 | 仪表盘指标卡标红 |
-| P95 延迟 | 端到端与关键节点分别设阈 | 同上 |
-| 降级事件速率 | `degradation_events` 增速异常 | 同上 |
-| 拒答率 | 突增（业务侧信号——知识库可能出问题） | 同上 |
+| 错误率 / P95 延迟 / 降级速率 / 拒答率 | Prometheus 告警规则（阈值在 M5 用真实流量标定） | ① 仪表盘状态卡标红 ② **`/api/v1/rules` 的告警状态回读**，同一个面板显示"当前有几条规则处于 firing" |
 
-> ⚠️ **这是「软告警」，必须如实说明**：**没有人盯仪表盘就不会知道出事了**。真告警需要通知渠道与值班安排，而本项目「不真上线」（1.1），两者都没有答案——所以**不引入告警组件，也不声称有告警能力**。
+> **不引入 Alertmanager（无接收方）**：它解决的是**通知的分组、去重、静默、多渠道分发**——而本项目「不真上线」（1.1）、无人值班，**没有接收方**。Prometheus 自身的告警规则足以算出「当前是否越限」，仪表盘把它读出来展示即可。
 >
-> 若被问到「你们有告警吗」，正确回答是：**「有阈值监控与可视化，但没有通知渠道——因为不真上线、无人值班，加 Alertmanager 只是徒增组件」**。这比说"有"更站得住。
+> 若日后真要上线，接 Alertmanager 只是加一个容器 + 配置通知渠道，**指标与规则不用改**——所以现在不加不损失什么。
 
 ##### 3.2.3.4 接入范围与采样策略
 
@@ -340,6 +369,16 @@ core/deps.py      构造 UserContext
 | **图节点** | `opentelemetry-instrumentation-langchain` | `0.62.4` |
 | DB / HTTP 客户端 | SQLite、httpx 自动埋点 | 可选 |
 
+**需要起的组件**（见 3.2.3.3 的数据流）：
+
+| 组件 | 形态 | 作用 |
+|---|---|---|
+| OTel Collector | 单容器，含 `spanmetrics` connector | 收 OTLP；把 span 聚合成指标；分发到 Prometheus 与 Jaeger |
+| Prometheus | 单容器，保留期 15 天 | 存指标，供 `stats/*` 用 PromQL 查询 |
+| Jaeger | 单容器 | 存 trace，供下钻查看单次请求的 span 树 |
+
+> **三个容器，不做集群、不做高可用**（3.2.3.6）。开发期可只起 Collector + console exporter，Prometheus / Jaeger 按需起。
+
 **采样策略**：
 
 - 本项目**流量低**（校园内网），**默认全量采样**，不设采样率
@@ -350,10 +389,8 @@ core/deps.py      构造 UserContext
 
 | 档 | 内容 | 判据 |
 |---|---|---|
-| **必须** | ① `trace_id` 生成与传播（3.2.3.1）② 日志 JSON 化 + 脱敏（3.2.3.2）③ **节点耗时与分位数在仪表盘可见**（3.2.3.3，走 SQLite 不引指标栈） | 不做就不叫生产标准 |
-| **加分** | ④ 图节点自动成 span（Jaeger 可视化完整图执行轨迹）⑤ 采样策略（3.2.3.4）⑥ 阈值标红（软告警，3.2.3.3） | 答辩展示价值高 |
-
-> **与上一版的关键差异**：原先把「指标**导出**」和「告警阈值」列为必须——那意味着必须引入指标栈。改为**「仪表盘可见」为必须、「阈值标红」为加分**，与 3.2.3.3 的决策一致。
+| **必须** | ① `trace_id` 生成与传播（3.2.3.1）② 日志 JSON 化 + 脱敏（3.2.3.2）③ **指标栈接入：Collector（含 spanmetrics）+ Prometheus**（3.2.3.3）④ **仪表盘的耗时分位数与错误率面板**（4.4） | 不做就不叫生产标准 |
+| **加分** | ⑤ 图节点自动成 span（Jaeger 可视化完整图执行轨迹 + 仪表盘深链下钻）⑥ 采样策略（3.2.3.4）⑦ Prometheus 告警规则 + 面板标红 | 答辩展示价值高 |
 
 ##### 3.2.3.6 明确不做（防止施工时无限扩张）
 
@@ -361,9 +398,10 @@ core/deps.py      构造 UserContext
 |---|---|
 | 多服务分布式追踪 | **单服务**，无跨服务链路，OTel 的分布式能力在这里用不上 |
 | 商业 APM（Datadog / New Relic 等） | 内网部署、无预算、数据不应出网 |
-| **指标栈（Prometheus / OTel Collector / Alertmanager）** | **低流量下 SQLite 算分位数够用**（3.2.3.3）；真告警需要通知渠道与值班，本项目「不真上线」，没有接收方 |
-| 自建 Collector 编排 / 集群 | **单容器 Jaeger** 即可；开发期用 console exporter |
-| 日志检索平台（ES / Loki） | 文件轮转够用；业务查询走 `qa_logs` |
+| **Alertmanager（告警通知）** | 它解决的是通知的分组、去重、静默、多渠道分发——而本项目无人值班、**没有接收方**。Prometheus 自身的规则已能算出「是否越限」，仪表盘读出来展示即可（3.2.3.3）。将来真上线时再加，指标与规则不用改 |
+| Collector **集群 / 编排** | **单实例**足够；不做高可用、不做分布式采集 |
+| **长期指标存储（VictoriaMetrics / Thanos / S3 归档）** | Prometheus 本地保留期（建议 15 天）够用；本项目不做长期趋势分析 |
+| 日志检索平台（ES / Loki） | 文件轮转够用；业务查询走 `qa_logs`。**日志与指标不做联合查询**——需要联查时按 `trace_id` 人工关联 |
 | 全链路 Replay / 事件溯源 | 超出可观测性范畴 |
 
 ---
@@ -1814,11 +1852,11 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   DELETE /api/admin/documents/{id}
 
 仪表盘：
-  GET /api/admin/stats/overview
-  GET /api/admin/stats/trend?days=30
-  GET /api/admin/stats/retrieval
+  GET /api/admin/stats/overview          ← 业务指标，读 SQLite
+  GET /api/admin/stats/trend?days=30     ← 业务指标，读 SQLite
+  GET /api/admin/stats/retrieval         ← ★ 运行指标，用 PromQL 查 Prometheus（见 3.2.3.3）
   GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
-  GET /api/admin/stats/hot-questions
+  GET /api/admin/stats/hot-questions     ← 业务指标，读 SQLite
 
 拒答分析：
   GET  /api/admin/refusals?page=&page_size=    分页明细，含 qa_logs.id
@@ -1830,6 +1868,12 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   GET  /api/admin/eval/runs/{id}
   GET  /api/admin/eval/compare?run_ids=a,b,c   消融对比矩阵，见 4.3.1.4
 ```
+
+> **`stats/retrieval` 是唯一读 Prometheus 的接口**：它返回节点耗时分位数、错误率、token 用量等**运行指标**，数据源是 Prometheus（PromQL 查询）。其余 `stats/*` 读 SQLite 的**业务指标**。
+>
+> 两类的区别见 3.2.3 开头：业务指标答「系统答得好不好」，运行指标答「这次请求为什么慢」。
+>
+> **Prometheus 不可用时**该接口降级为返回 `null` 并附状态，**不能 500**——仪表盘的其他面板（读 SQLite）必须照常可用。
 
 ---
 
@@ -2762,13 +2806,33 @@ POST /api/admin/refusals/{log_id}/annotate  写标注
 
 ### 4.4 仪表盘
 
-| 图表 | 数据源 | 类型 |
+**分两块**：业务指标读 SQLite，运行指标读 Prometheus（数据流见 3.2.3.3）。
+
+**业务指标**（数据源：SQLite）
+
+| 面板 | 接口 | 类型 |
 |---|---|---|
 | 核心指标卡 | `stats/overview` | 数字卡：文档数 / chunk 数 / 问答量 / 拒答率 |
 | 问答量趋势 | `stats/trend` | 折线图（近 30 天） |
-| 检索性能 | `stats/retrieval` | **节点耗时分位数（p50 / p95 / p99）** + 分布柱状图 + 降级次数；**阈值超限时标红**（软告警，见 3.2.3.3） |
 | 拒答分布 | `stats/refusals`（**仅聚合**） | 饼图 + Top N 计数；明细列表由 `GET /api/admin/refusals` 提供（见 4.3.1.3） |
 | 高频问题 | `stats/hot-questions` | 横向柱状图 |
+| 降级次数 | `stats/retrieval` 的降级字段 | 按 `kind` 分组的柱状图（来自 `degradation_events`） |
+
+**运行指标**（数据源：Prometheus —— `stats/retrieval` 用 PromQL 查询）
+
+| 面板 | 指标 | 类型 |
+|---|---|---|
+| 节点耗时分位数 | p50 / p95 / p99，**按节点分组** | 折线图（可切时间范围） |
+| 端到端延迟 | p50 / p95 / p99 | 折线图 |
+| 错误率 | HTTP 5xx、LLM 调用失败率 | 折线图 + 当前值 |
+| LLM token 用量 | 输入 / 输出 | 堆叠柱状图 |
+| 告警状态 | Prometheus 规则的 firing 状态 | 状态卡——**有 firing 即标红** |
+
+> **每个运行指标面板都要能下钻到 Jaeger**：点击面板 → 带时间范围与 span 名过滤跳到 Jaeger UI，看那段时间的具体 trace。
+>
+> 分工：**Prometheus 答「什么时候、哪个环节变慢了」，Jaeger 答「那一次具体慢在哪一步」**。两者共用同一份 OTel 数据，不重复埋点。
+
+> **Prometheus 不可用时的降级**：运行指标区块显示「运行指标暂不可用」，**业务指标区块照常渲染**——3.7.3 已约定 `stats/retrieval` 返回 `null` 而非 500。
 
 ---
 
