@@ -2475,7 +2475,10 @@ L3 找不到就只打开文档、不定位，提示「未能精确定位」
 
 - 数据来源：`Citation.images`（URL 列表，节点 10 已补该字段）
 - 展示：缩略图网格，点击放大；每张标出所属文档
-- 后端已有完整链路（抽图 → 视觉描述 → `/images` 静态服务），**现有前端完全没用上**——`front/app.py:249-254` 的渲染只读 `label`，`images` 字段被直接丢弃
+- 后端链路：**图片提取与落盘保留**（只砍掉 VL 描述，见 E.4.5），图片经 `/images` 静态服务对外提供
+- **现有前端完全没用上**：`front/app.py:249-254` 的渲染只读 `label`，`images` 字段被直接丢弃
+
+> **为什么已有 bbox 回跳还要缩略图**：两者解决不同问题——**bbox 回跳**是「跳到原文那一页看图」，**缩略图**是「不打开原文就能确认图对不对」。公文里的公章、表格截图，扫一眼缩略图往往就够了，不必展开整个阅读器。
 
 ### 4.2.4 流式渲染与长列表
 
@@ -3541,7 +3544,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | | 字段 |
 |---|---|
 | **旧**（实测自 `chroma.sqlite3`，17 个键） | `kb_id` / `chunk_id` / `chunk_index` / `user_id` / `md5` / `original_filename` / `file_type` / `current_chapter` / `chapter_level` / `chapter_count` / `toc` / `has_images` / `page` / `source` / `created_at` / `ocr_engine` / `scan_branch` |
-| **新**（见 3.3.2） | `document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `current_chapter` / `chapter_level` / `chunk_index` / `char_start` / `char_end` / `page` / `image_paths` |
+| **新**（见 3.3.2） | `document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `current_chapter` / `chapter_level` / **`chunk_id`** / `chunk_index` / `char_start` / `char_end` / `page` / **`bbox`** / `image_paths` |
 
 > **新增的字段**（旧索引没有、ACL 与版本过滤依赖它们）：`document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `char_start` / `char_end` / `image_paths`。注意 **`page` 不是新增的**，旧索引里已有。
 
@@ -3871,10 +3874,15 @@ page: 正常（1,2,3,3,3,4...）
 #### E.4.2 主链路
 
 ```
-每页 → PyMuPDF 取文字层
-        ├─ 有文字且可信 → 直接出 Document（带页码 + 正则章节）
-        └─ 无文字 / 不可信 → 交 MinerU（按页限定范围，见 E.8.6）
+每页 → PyMuPDF 一次遍历（同时完成：文字提取 + 图片提取 + 类型判定）
+        ├─ 文字层可信 → 直接出 Document（带页码 + 正则章节）
+        ├─ 无文字 / 不可信 → 交 MinerU（按页限定范围，见 E.8.6）
+        └─ 图片提取 → 落盘 + 写 metadata 的 image_paths
 ```
+
+> **一次遍历同时做三件事**（见 E.8 ④ 与 E.8.6）：原链路同一个 PDF 被 `fitz.open` 打开 3–4 次（类型判定 → 取图 → 各分支），每次都重建 xref 与页树。合并为一次打开。
+>
+> **图片提取与落盘保留**（决策，见 E.4.5）：只砍 VL 描述，提取本身保留——引用面板的缩略图依赖它。**图表裁切与 pHash 去重删除**（产出为零，见 E.1）。
 
 > **① 文字层质量闸门就落在这个判断点上**（已采纳）：判据从「**有没有**文字」细化为「文字**可不可信**」——不合格的页同样走 MinerU。阈值见 **E.8.1**。
 >
@@ -3954,8 +3962,14 @@ ingestion/file_type.py            ← 新项目位置（见 3.1 工程结构）
 
 #### E.4.5 删除清单（**已采纳**，E.4.2 的必然结果）
 
-图表裁切 + pHash 去重 + 图片过滤器（336 行）+ VL 默认调用 + 图片提取落盘。
+图表裁切 + pHash 去重 + 图片过滤器（336 行）+ VL 默认调用。
 **图片只记路径**供前端回跳，不描述内容——公章描述对检索没有价值。
+
+> **图片提取与落盘保留**（决策）——**只砍「描述」，不砍「提取」**。
+>
+> 原清单把「图片提取落盘」也列为删除项，与三处说法冲突：E.8 ④ 要求「一次遍历里同时完成类型判定 + 文字提取 + **图片提取**」；附录 D.2 写「新 metadata 的 `image_paths` 会指向它们」（指旧提取图片）；4.2.3.3 的图片引用列表依赖可访问的图片 URL。
+>
+> **保留的理由**：引用面板要能显示缩略图，用户不必打开原文就能确认图对不对。落盘目录与清理规则见附录 D.2。
 
 ---
 
@@ -3968,7 +3982,9 @@ ingestion/file_type.py            ← 新项目位置（见 3.1 工程结构）
 | 当前链路 | 0.38 / 0.68 / 0.90 秒 **每份**（抽样 3 份） | PDF 层 **7 文件 2168 行**、**29 个配置开关** |
 | 最小方案（PyMuPDF + 正则） | **148ms 跑完 10 份**（≈15ms/份） | 约 40 行 |
 
-> **口径说明**：最小方案不做图片提取 / 类型判定 / 表格——**而这三项在本语料上产出为零**（E.1）。所以这不是"少做功能换速度"，是"去掉产出为零的工作"。
+> **口径说明**：最小方案不做**图表裁切** / **表格结构化**——**这两项在本语料上产出为零**（E.1）。所以这不是"少做功能换速度"，是"去掉产出为零的工作"。
+>
+> **图片提取与落盘保留**（决策，见 E.4.5）：本语料几乎没有图（E.1），所以它对本表的耗时数字影响可忽略；保留它是为了引用面板的缩略图，不是为了检索。
 
 **硬件约束**：
 
