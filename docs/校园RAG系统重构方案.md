@@ -612,7 +612,7 @@ document_id, doc_group_id, status, effective_date, version,
 visibility, vis_admin, vis_staff,
 current_chapter, chapter_level,
 chunk_id, chunk_index, char_start, char_end,   ← 原文回跳必需
-page, image_paths
+page, bbox, image_paths
 ```
 
 > **`vis_admin` / `vis_staff` 是布尔字段，不是 `visible_roles` 数组。**
@@ -632,6 +632,10 @@ page, image_paths
 > **BM25 的映射表必须是「下标 → `chunk_id`」，不能只到 `document_id`**：只到文档粒度的话，① 同一 chunk 被两路命中时无法去重（违背 RRF 去重键的设计）；② BM25 侧命中拿不到 `char_start` / `char_end` / `page`，引用与原文回跳就缺了定位信息。
 >
 > **只加 `chunk_id` 进 metadata，不引入独立的 `chunks` 表**：chunk 正文与 metadata 都在向量库里，SQLite 侧不需要第二份（避免两处不同步）。
+
+> **`bbox` 是引用回跳的主定位依据**（格式与落点见 E.8.4）：存 RAGFlow 的 `@@{页号}\t{x0}\t{x1}\t{top}\t{bottom}##` 格式，**独立字段，不进 chunk 正文**。前端据此直接调 `react-pdf-highlighter` 按坐标高亮，不需要文本匹配。
+>
+> **非 PDF 与扫描件该字段为空**——此时前端退到 4.2.2.4 的文本匹配降级路径。
 >
 > **偏移的参照系必须明确**：`char_start/char_end` 是相对 `documents.normalized_text_path` 那份**清洗后的规范化文本**的偏移，**不是原始 PDF 的字节偏移**（清洗会删除页眉页脚，两者对不上）。前端跳转时先取规范化文本定位，再映射到阅读器。
 >
@@ -2285,43 +2289,53 @@ const toCp = (s, i) => [...s.slice(0, i)].length;
 
 **两者单位都是 Unicode 码点**（同 4.2.1.2 的契约），但**绝不能拿答案的偏移去文档里定位**，反之亦然。
 
-#### 4.2.2.4 定位策略：三级降级
+#### 4.2.2.4 定位策略：四级降级
 
-规范化文本的偏移**无法直接**映射到 PDF 阅读器坐标——清洗会删除页眉页脚，规范化文本与原始 PDF 的坐标系对不上（见 3.3.2）。因此**不依赖偏移做高亮**，改用内容匹配：
+**主路径是 bbox 坐标，文本匹配是降级**（两者主备关系，见 E.8.4）。
+
+规范化文本的偏移**无法直接**映射到 PDF 阅读器坐标——清洗会删除页眉页脚，两者坐标系对不上（见 3.3.2）。所以**不用偏移做高亮**，改用「坐标优先、文本兜底」：
 
 ```
 ① 取 jump_target.document_id → GET /api/documents/{id}/file，打开抽屉
         ↓
 ② 跳到 jump_target.page
         ↓
-③ L1 用 citation.snippet 在该页文本层检索匹配 → 精确高亮该片段
+③ L1 用 jump_target.boxes 直接按坐标高亮（bbox 来自 chunk metadata，见 3.3.2 / E.8.4）
+   —— react-pdf-highlighter 原生支持按坐标高亮，这是主路径
+   bbox 缺失或越界 ↓
+   L2 用 citation.snippet 在该页文本层检索匹配 → 高亮匹配到的文本
    匹配失败 ↓
-   L2 用 citation.chapter 匹配章节标题 → 高亮标题位置
+   L3 用 citation.chapter 匹配章节标题 → 高亮标题位置
    仍失败 ↓
-   L3 只跳到该页，不高亮，并提示「未能精确定位」
+   L4 只跳到该页，不高亮，并提示「未能精确定位」
 ```
 
-**降级是必需的，不是可选**，两条依据：
+**四级降级都要实现**，依据如下：
 
-- 附录 E.3.2 已实测：**当前** PDF 的 `current_chapter` 从未被写入（1244/1244 全为空串），**现状下 L2 完全不可用**；该字段的修复见 E.4.2（正则提取，不依赖模型）——**修复后 L2 才可用**
-- L1 的 `snippet` 匹配本身可能失败（换行、连字符、全半角差异）
+- **L1 需要 bbox 存在**，而它对以下情形为空：非 PDF（docx/pptx/md/txt）、扫描件、旧索引。这些情况直接落 L2
+- **L2 的 `snippet` 匹配可能失败**（换行、连字符、全半角差异）
+- 附录 E.3.2 已实测：**当前** PDF 的 `current_chapter` 从未被写入（1244/1244 全为空串），**现状下 L3 完全不可用**；修复见 E.4.2（正则提取，不依赖模型）——**修复后 L3 才可用**
+- 因此 **L4 是常态兜底，必须实现**，不能假设前三级有一级一定成功
 
-因此 **L3 是常态兜底，必须实现**，不能假设 L1 或 L2 一定成功。
-
-> 三级都只用 `citations` 已有的字段（`snippet` / `chapter` / `page`），**不需要新增后端接口**。
+> 四级都只用 `jump_target` / `citations` 已有的字段（`boxes` / `snippet` / `chapter` / `page`），**不需要新增后端接口**。
 
 #### 4.2.2.5 `jump_target` 结构
 
 ```json
 "jump_target": {
   "document_id": "…",   // documents 表主键；用于 GET /api/documents/{id}/file
-  "page": 3,            // 页码，1 起
+  "page": 3,            // 页码，1 起（bbox 缺失时用于 L2 的文本匹配范围）
   "char_start": 1024,   // 相对规范化文本的偏移，Unicode 码点
-  "char_end": 1088
+  "char_end": 1088,
+  "boxes": [            // ★ 主定位依据：该 chunk 的坐标框，取自 Chroma metadata 的 bbox
+    { "page": 3, "x0": 120.5, "x1": 480.0, "top": 300.2, "bottom": 356.8 }
+  ]
 }
 ```
 
 > **`document_id` 必须在这里**：`Citation` 顶层只有 `document_name`（供展示），而调用 `/api/documents/{id}/file` 需要**主键**，两者不可互相替代。
+>
+> **`boxes` 是引用回跳的主定位依据**（见 4.2.2.4 的 L1）：来源是 chunk metadata 的 `bbox` 字段（3.3.2 / E.8.4），支持跨页框。**非 PDF、扫描件、旧索引会为空数组**——此时前端落到 L2 的文本匹配。
 >
 > `snippet` 与 `chapter` **不重复放进 `jump_target`**——它们已在 `Citation` 顶层，避免同一信息两处编码（与 4.2.1 的「同一信息不编码两遍」原则一致）。
 
@@ -2347,7 +2361,7 @@ const toCp = (s, i) => [...s.slice(0, i)].length;
 
 ##### 定位：与 PDF 完全同构
 
-`docx-preview` 渲染出的 DOM 里是真实文本，所以 4.2.2.4 的三级降级**原样适用**：
+`docx-preview` 渲染出的 DOM 里是真实文本，所以 4.2.2.4 的降级链**原样适用**（docx 的 `boxes` 为空，直接从 L2 起步）：
 
 ```
 L1 用 citation.snippet 在渲染出的 DOM 文本里检索匹配 → 包 <mark> 并 scrollIntoView
@@ -2357,7 +2371,7 @@ L3 找不到就只打开文档、不定位，提示「未能精确定位」
 
 **后端契约不需要任何改动**——`jump_target` 现有字段够用，`snippet` / `chapter` 已在 `Citation` 顶层。
 
-> ⚠️ **docx 定位不能靠页码**：一是 `docx_loader` 的 `page` 是**硬编码的 1**（`app/utils/file_handler.py` 的 `base_meta`），没有真实页码；二是 docx 本身的分页是渲染产物、不是文档固有属性。**所以 docx 只能走 L1 / L2 的内容匹配**——这恰好也是 4.2.2.4 已经定好的路径。
+> ⚠️ **docx 定位不能靠页码**：一是 `docx_loader` 的 `page` 是**硬编码的 1**（`app/utils/file_handler.py` 的 `base_meta`），没有真实页码；二是 docx 本身的分页是渲染产物、不是文档固有属性。**所以 docx 只能走内容匹配**（`boxes` 为空 → 从 L2 起步）——这恰好也是 4.2.2.4 已经定好的路径。
 
 > ⚠️ **docx 没有段落锚定能力**：其官方 issue #222 明确说明渲染后**无法把 DOM 节点映射回源段落**，承诺的 `exposeParaIds`（给段落打 `data-para-id`）至今未发布——实测 `0.4.1` 产物中 `data-para-id` 出现 **0 次**。
 >
@@ -2408,7 +2422,7 @@ L3 找不到就只打开文档、不定位，提示「未能精确定位」
 | 限制 | 说明 |
 |---|---|
 | docx / pptx 无可靠页码 | `docx_loader` 的 `page` 硬编码为 1；pptx 连幻灯片序号都没有 → 定位只靠 `snippet` / `chapter` |
-| docx 高亮靠文本匹配 | 跨 run 的换行、空格、全半角差异会导致匹配失败 → 降级 L2 / L3 |
+| docx 高亮靠文本匹配 | 跨 run 的换行、空格、全半角差异会导致匹配失败 → 降级 L3 / L4 |
 | docx 无段落锚定 | 官方尚未提供 `exposeParaIds`，只能自行用 `h` 钩子打标 |
 | pptx 无在线预览 | 本轮为下载兜底 |
 
@@ -2416,9 +2430,9 @@ L3 找不到就只打开文档、不定位，提示「未能精确定位」
 
 | 限制 | 说明 |
 |---|---|
-| 规范化文本偏移**未用于**高亮 | 因坐标系对不上（3.3.2），高亮靠 `snippet` 内容匹配；偏移保留用于 chunk 溯源与「规范化文本视图」 |
-| L1 可能匹配失败 | `snippet` 在 PDF 文本层可能因换行、连字符、全半角差异匹配不到 → 降级 L2 / L3 |
-| 扫描件 PDF | 无文本层，L1 / L2 均不可用，只能 L3（跳到页）——除非接入 OCR |
+| 规范化文本偏移**未用于**高亮 | 因坐标系对不上（3.3.2），主定位走 `boxes` 坐标、兜底走 `snippet` 文本匹配；偏移保留用于 chunk 溯源与「规范化文本视图」 |
+| L2 可能匹配失败 | `snippet` 在 PDF 文本层可能因换行、连字符、全半角差异匹配不到 → 降级 L3 / L4 |
+| 扫描件 PDF | 无文本层、也无 bbox，四级定位全部不可用，只能 L4（跳到页）——除非接入 OCR（MinerU 当前挂起，见 E.9） |
 
 ### 4.2.3 引用展示
 
@@ -4090,6 +4104,14 @@ Ollama 现有模型: deepseek-r1:1.5b  ← C.2.1 计划的 qwen3-embedding:0.6b 
 **依据**：公文里跨页签批、跨页表很常见，自己设计偏移方案不划算；该格式 RAGFlow 已跑在生产。
 
 **代价**：小（照搬格式）。**收益**：亮点③（引用回跳）的定位方案不用自己发明。
+
+**落点（原方案未写，必须钉死）**：该 bbox 存为 **Chroma metadata 的独立字段 `bbox`，不进 chunk 正文**。
+
+> 进正文会同时污染三处：向量（坐标串被一起嵌入）、BM25（坐标串参与打分）、`Citation.snippet`（`snippet` 是给用户看的摘录，混进 `@@3\t120.5...##` 就是脏数据）。
+
+**与 4.2.2.4 的关系**：**bbox 是回跳的主定位机制**——`react-pdf-highlighter` 本身就是按坐标高亮的，坐标是它的原生输入。4.2.2.4 的文本匹配**降级为兜底**，处理 bbox 缺失或失效的情形（扫描件、旧索引、坐标越界）。
+
+> 两套机制不是并列候选，而是**主备关系**：bbox 命中就用坐标；bbox 不可用才退到文本匹配。这样既有坐标的精度，又保留了 L3「只跳页」的最终兜底。
 
 ---
 
