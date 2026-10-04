@@ -225,7 +225,7 @@ core/deps.py      构造 UserContext
 |---|---|
 | `student` | User 端问答、查看自己的会话 |
 | `staff` | 同 student（**检索期可见范围不同**——由 `visible_roles` 决定，见 3.3.2 / 3.3.3） |
-| `admin` | 管理端所有操作；**检索期同样受 ACL 公式约束**（见 3.3.3） |
+| `admin` | 管理端所有操作；**检索期默认同样受 ACL 公式约束**（见 3.3.3）——需要查看未授权文档时走显式提权，不是默认行为 |
 
 **关键约束**：角色与身份**只能来自 JWT**，任何接口都不得接受客户端传入的 `user_id`。这是现有项目最大的安全缺陷（现在传谁的 id 就能读谁的资料）。
 
@@ -719,6 +719,22 @@ status = "active"                          ← 状态过滤
 ```
 
 > **「同组取最高 version」不在这里表达**——Chroma 做不到跨条目的聚合。它由应用层在检索后完成，见 3.3.1 的「检索期如何解析『当前生效版本』」。
+
+**admin 的处理：默认走同一公式，需要时显式提权**
+
+**公式对 admin 一视同仁**——是否可见只由 `visibility` 与 `vis_<角色>` 决定，**不看角色是不是 admin**。
+
+这意味着常见的「admin 专属文档」写法天然可用：`visibility = "restricted"` + `visible_roles = ["admin"]` → admin 按公式就能检索到，**不需要提权**。
+
+只有一种情况需要提权：**文档没勾 admin**（如 `visible_roles = ["staff"]`），而管理员因排查 / 审计需要查看它。此时走显式参数：
+
+| 参数 | 位置 | 语义 |
+|---|---|---|
+| `include_restricted=true` | 检索期（`filters.py` 的入参）与原文回跳接口 | 该项文档**即使当前用户不可见也返回**，但**响应中标记为越权查看**（`escalated: true`），并**记审计日志** |
+
+> **为什么不做成 admin 默认旁路**：若 admin 天然看到一切——① 「受限」对 admin 失去意义，将来若有真受限材料（未定稿文件、内部纪要），管理员无法不看到它们；② **5.3 的 ACL 对照实验基准会被削弱**，「admin 跑全部题」会变成"因为旁路所以能跑全部题"，而不是"因为公式判定他有权限"，说服力差一截。
+>
+> **提权必须留痕**：`escalated: true` 让前端能显式标注「此内容你本无权限」，审计日志记录谁在何时提权看了哪份文档。
 
 #### 3.3.4 后过滤召回不足问题（面试深度点）
 
@@ -1720,7 +1736,7 @@ refused = true, refusal_reason = "no_candidate"
 | Vector | `retrieval/vector.py` | Chroma 封装，含动态过采样逻辑 |
 | Fusion | `retrieval/fusion.py` | **加权 RRF**：融合 N 路（三类查询 × 两种检索器）结果，权重取自 `RetrievalQuery.weight`；融合后按上限截断 |
 | Reranker | `retrieval/reranker.py` | Cross-Encoder，含降级链 |
-| Filters | `retrieval/filters.py` | 把 UserContext + 日期拼装成过滤条件（**唯一入口**）。ACL 部分产出 `vis_<角色> = true` 的 `$or` 条件，见 3.3.2 |
+| Filters | `retrieval/filters.py` | 把 UserContext + 日期（+ 可选的 `include_restricted`）拼装成过滤条件（**唯一入口**）。ACL 部分产出 `vis_<角色> = true` 的 `$or` 条件，见 3.3.2 / 3.3.3 |
 
 **`filters.py` 是唯一入口**：过滤条件只在这里生成，**向量检索、BM25、以及 User 端原文访问（`/api/documents/{id}/*` 与图片，见 3.7.2）三方都调它**。避免"多条路过滤规则不一致"导致越权——这是安全相关的强约束。
 
@@ -2938,8 +2954,13 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 | 条件 | Context Recall | 越权返回次数 |
 |---|---|---|
-| admin 角色跑全部题 | | 0（基准） |
-| student 角色跑受限题 | | **应为 0** |
+| **基准**：admin **开启** `include_restricted=true` 跑全部题 | | 0（基准） |
+| **admin 不开启提权**跑受限题 | | **应为 0** ← **证明公式对 admin 一视同仁**（见 3.3.3） |
+| student 跑受限题 | | **应为 0** |
+
+> **第二行是这条对照实验最有说服力的一格**：它证明「admin 不是旁路」——同一批受限题，admin 不显式提权就拿不到，与 student 的结果一致。若只有第一行与第三行，"admin 能跑全部题"会被误读成"因为 admin 有旁路"，而不是"因为他显式提权了"。
+>
+> **提权行的 `escalated` 标记也要一并验证**：基准行的返回里，越权取得的文档应带 `escalated: true`，它与正常命中的文档可区分。
 
 目的是证明「隔离后 Recall 不塌、越权为 0」，**不是证明过滤能提升 Recall**。
 
