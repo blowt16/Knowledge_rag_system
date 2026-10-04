@@ -1880,7 +1880,7 @@ frontend/web/
 └── vite.config.ts
 ```
 
-**技术栈**：Vue 3 + Vite + Vue Router + Pinia + Element Plus + ECharts + remark / rehype（unified 生态，选型理由见 4.2.1.1）
+**技术栈**：Vue 3 + Vite + Vue Router + Pinia + Element Plus + ECharts + `unified`（remark / rehype，选型理由见 4.2.1.1）+ `vue-pdf-embed` / `pdfjs-dist`（见 4.2.2.2）+ `@tanstack/vue-virtual`（见 4.2.4.3）
 
 **单工程双端的实现**：路由按 `/chat/*` 与 `/admin/*` 分组，全局前置守卫校验 `role`，非 admin 访问 `/admin/*` 直接重定向。共用组件（消息气泡、Markdown 渲染、SSE 封装、请求拦截器）只写一份。
 
@@ -1935,7 +1935,7 @@ frontend/web/
 | `markdown-it` | ❌ **不能**。实测 37 个 token 中 23 个只有行号 `map`，inline 子 token 全部只有行号，**没有任何字符偏移**。要用它做置灰只能自己逐字符反推，等于重写一遍分词 |
 | `remark`（mdast） | ✅ **能**。实测 10/10 个叶子节点，其 `position.start.offset` / `end.offset` 切出的内容与原文逐字一致 |
 
-> `remark` / `rehype` 是纯 JS 实现，**与前端框架无关**（React 侧走 `react-markdown`，Vue 侧直接跑 `unified` 管道），因此本节的方案**不受 4.1 技术栈选择影响**。
+> `remark` / `rehype` 是纯 JS 实现，**与前端框架无关**。4.1 已定 Vue 3，本节方案直接跑 `unified` 管道即可——Vue 侧没有 `react-markdown` 那样的现成封装，需要自行把 hast 渲染成模板/DOM（做法见 4.2.4.1）。
 
 #### 4.2.1.2 偏移契约（防漂移的根本）
 
@@ -1954,9 +1954,11 @@ frontend/web/
 const toCp = (s, i) => [...s.slice(0, i)].length;
 ```
 
-> **不要用 `rehype-sanitize` 的默认 schema**——它会吃掉 `class`，`<span class="uncited">` 会退化成 `<span>`，标注全部静默失效。
+> **不要往管道里加 `rehype-sanitize`**——它的默认 schema 会吃掉 `class`，`<span class="uncited">` 退化成 `<span>`，标注**静默失效**（不报错、不崩溃，只是灰不掉）。
 >
-> **这不是理论风险**：4.2.4.1 推荐的 `streamdown` 就内置了它（且无 schema 配置口子），实测 `defaultSchema` 不允许 `span` 的 `className`。详见 4.2.4.1。
+> **这不是理论风险，是实测结论**：`hast-util-sanitize` 的 `defaultSchema` 中 `className` **不在全局允许列表**，只对 `a[data-footnote-backref]` 与 `code[language-*]` 开了白名单。React 侧的 `streamdown` 正因此与本方案冲突（见 4.2.4.1）。
+>
+> **Vue 侧自建管道默认不含 sanitize，这正是我们要的**——`class` 与 `data-*` 都能存活。安全由另一条保证：**不启用 `rehype-raw` / `allowDangerousHtml`**，答案里的裸 HTML 不会被渲染成元素。
 
 #### 4.2.1.3 算法
 
@@ -2039,12 +2041,18 @@ const toCp = (s, i) => [...s.slice(0, i)].length;
 
 基于 **PDF.js 文本层**（与 3.7.2 的措辞一致）：
 
-| 框架 | 组件 |
-|---|---|
-| React（若 4.1 最终选 React） | `react-pdf-highlighter` —— 已核实 **RAGFlow**（`web/package.json` → `"react-pdf-highlighter": "^6.1.0"`）与 **Dify**（`web/package.json`，经 pnpm catalog 引入）均在使用 |
-| Vue（若维持 4.1 现状） | 无同等成熟的现成组件，需基于 `pdfjs-dist` 自建文本层高亮 |
+**4.1 已定 Vue 3**，因此选型如下（均为 npm 实测）：
 
-> 组件选型**依赖 4.1 的框架决策**（见附录 C.1.6）；但本节的**定位策略与降级规则与框架无关**。
+| 层 | 选型 |
+|---|---|
+| PDF 渲染容器 | `vue-pdf-embed@2.1.6` |
+| 文本层高亮 | **基于 `pdfjs-dist` 自建** |
+
+> React 侧有成熟组件 `react-pdf-highlighter`（已核实 RAGFlow `"^6.1.0"`、Dify 经 pnpm catalog 均在使用），**但 Vue 侧没有对应物，必须自建**。
+>
+> **自建范围明确限定**：只做「在目标页文本层检索 `snippet` → 算高亮矩形」这一段，**不含 PDF 渲染本身**（由 `vue-pdf-embed` 承担）。
+>
+> 本节的**定位策略与降级规则（4.2.2.4）与框架无关**，换框架不影响。
 
 #### 4.2.2.3 偏移参照系：两套偏移不可混用
 
@@ -2164,33 +2172,36 @@ PDF 之外（docx / pptx / md / txt）**跳文档预览页**，不走抽屉的 P
 
 > **反例就是现有实现**：`front/app.py:229-231` 每收到一个 token 执行 `placeholder.markdown(full_response)`，整段重新解析重渲染。
 
-**候选：`streamdown`**（React）。以下为实测结论：
+**结论：Vue 侧自建。现成库没有一个能同时满足这三条。**
 
-| 项 | 实测结果 |
+候选评估（均为 npm 实测）：
+
+| 候选 | 结论 |
 |---|---|
-| 内部解析器 | `unified` / `remark-parse` / `remark-gfm` / `remark-rehype`——**与 4.2.1 同源** ✅ |
-| 可注入插件 | 类型定义暴露 `remarkPlugins` / `rehypePlugins` / `components` ✅ |
-| 中文支持 | 有独立插件 `@streamdown/cjk` |
-| 生产用例 | Dify `web/package.json` 已含 `streamdown`（与 `remark` 同栈，无 `markdown-it`） |
-| ⚠️ **内置 sanitize** | 依赖含 **`rehype-sanitize`（用其 `defaultSchema`）+ `rehype-harden`**，且**未暴露 schema 配置口子** |
-| ⚠️ 框架 | peerDependencies 为 `react` / `react-dom`，**React 专属** |
+| `streamdown`（React，Dify 在用） | ❌ **两条否决**：① **React 专属**（peerDependencies 为 `react` / `react-dom`）；② 内置 `rehype-sanitize`（用其 `defaultSchema`）+ `rehype-harden` 且无 schema 配置口子，**会剥掉 `<span class="uncited">` 的 class**，与要求 3 冲突 |
+| `vue-stream-markdown@2.0.0`（Vue，2026-09 仍在更新） | ❌ 内部是 **Comark / Markmend 自研解析器**（`@markmend/parser` → `comark`、`markdown-it-cjk-friendly`），**不是 remark 系、没有 mdast 位置信息**，挂不上要求 3 的偏移标注 |
 
-**必须绕开的坑**：实测 `hast-util-sanitize` 的 `defaultSchema` 中，`className` **不在全局允许列表**，只对两处开了白名单：
+> `streamdown` 的 sanitize 冲突有独立证据：`hast-util-sanitize` 的 `defaultSchema` 中 `className` **不在全局允许列表**，只对 `a[data-footnote-backref]` 与 `code[language-*]` 开白名单。这条同样适用于任何引入默认 sanitize 的方案。
+
+**自建方案（复用 4.2.1 已确定的 `unified` 管道，不另起一套）**：
 
 ```
-a:    ['className', 'data-footnote-backref']    ← 只允许这一个值
-code: [['className', /^language-./]]            ← 只允许 language-* 前缀
+remark-parse → remark-gfm → [置灰插件] → [角标插件] → remark-rehype → rehype-stringify
+                                                                          ↓
+                                                                  渲染为 Vue 模板
 ```
 
-**即 `<span class="uncited">` 的 class 会被 streamdown 的 sanitize 剥掉，4.2.1 的置灰会静默失效。**
+**增量渲染的具体做法——按「已完结块」切分**（要求 1 的落地）：
 
-**结论与适配**：
+- 把答案切成块（空行分隔、代码围栏已闭合、表格已结束）
+- **已完结的块只渲染一次**，DOM 保持稳定
+- 每个 token 只重渲染**尾部那一个未完结的块**
 
-- 标注节点**不得依赖任何属性存活**。改用 `components` 把**标准标签**（如 `<mark>`）映射到自定义组件——标签本身会被保留，属性不需要
-- 或者：不用 streamdown，由 4.2.1 的 remark 管道自行接管渲染
-- **若 4.1 最终选 Vue**：streamdown 不可用，需基于 `unified` 自建流式渲染层
+这样同时满足要求 2——尾部块即使坏掉（半截的围栏、未闭合的粗体）也只影响它自己，不会让整段重排或闪动。
 
-> 无论走哪条，**接入时先跑一次「class / 属性是否存活」的最小验证**——这条已经踩过一次（见上表）。
+**交互元素（`[n]` 角标、置灰提示）用事件委托**：容器上监听 `click` / `mouseover`，用 `event.target.closest('[data-marker]')` 定位目标。这样**不必让 hast→模板 的转换支持组件映射**，也就不需要 `components` 那套机制。
+
+> **安全**：**不启用 `rehype-raw` / `allowDangerousHtml`**——答案里的裸 HTML 不会被渲染成元素。这是「不引入 sanitize」的替代保证，与 4.2.1.2 配套。
 
 #### 4.2.4.2 检索过程反馈
 
@@ -2218,7 +2229,14 @@ code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 | 会话列表（侧栏） | 分页加载（3.7.1 已支持 offset / limit），**滚动到底自动加载下一页** |
 | 消息流 | 长会话虚拟滚动，避免全量 DOM |
 
-**「用户上翻时不被强行拉到底」是必须项**：流式输出期间自动滚到底部，但用户一旦主动上翻查阅历史，**必须停止自动滚动**，否则内容会被不断顶走。有现成实现可直接用（如 `use-stick-to-bottom`），也可自行判断滚动位置。
+**「用户上翻时不被强行拉到底」是必须项**：流式输出期间自动滚到底部，但用户一旦主动上翻查阅历史，**必须停止自动滚动**，否则内容会被不断顶走。
+
+| 能力 | Vue 侧选型 |
+|---|---|
+| 虚拟滚动 | `@tanstack/vue-virtual@3.13.39`（npm 实测存在，TanStack Virtual 的 Vue 适配） |
+| 吸底滚动 | **自建**——Vue 侧无 `use-stick-to-bottom` 的等价物 |
+
+> 吸底判定的做法：监听滚动事件判断是否贴近底部（阈值内才自动跟随），用户上翻即置为「不跟随」，回落到阈值内再恢复。
 
 > 现有前端没有这个问题——它是整页 `st.rerun()` 重绘，谈不上滚动控制。这是换成正经前端后**必然出现**的新问题，不是可选项。
 
