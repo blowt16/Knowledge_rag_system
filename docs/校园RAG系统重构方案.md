@@ -158,6 +158,7 @@ backend/
 │   │   ├── admin.py             仪表盘统计
 │   │   └── eval.py              评测触发与查询
 │   ├── schemas/                 Pydantic 契约（前后端共同依据）
+│   │                            ← 前端类型由 OpenAPI 生成，见下方注
 │   ├── graph/                   LangGraph 编排
 │   │   ├── state.py             RAGState 定义
 │   │   ├── builder.py           图装配
@@ -195,6 +196,16 @@ backend/
 
 ---
 
+> **Pydantic 契约怎么变成前端能用的类型（原方案未定义）**：React / TS 侧**无法直接消费 Pydantic 模型**，施工者要么逐接口手写 TS interface（必然与后端漂移），要么临时引入代码生成（属未在技术栈内的新增依赖）。
+>
+> **约定**：**FastAPI 的 OpenAPI → `openapi-typescript` 生成前端类型**。做法：
+>
+> 1. 后端启动后导出 `openapi.json`（CI 里跑，或提交一份快照）
+> 2. 前端 `npm run gen:api` 调 `openapi-typescript` 生成 `src/api/schema.d.ts`
+> 3. **生成物提交进仓库**——这样前端在没起后端时也能编译，且 diff 里能看见接口变化
+>
+> `openapi-typescript` 是开发依赖（不进运行时产物），故不计入 4.1 的技术栈清单。
+
 ### 3.2 基础设施层
 
 #### 3.2.1 配置管理
@@ -231,6 +242,17 @@ core/deps.py      构造 UserContext
 | `admin` | 管理端所有操作；**检索期默认同样受 ACL 公式约束**（见 3.3.3）——需要查看未授权文档时走显式提权，不是默认行为 |
 
 **关键约束**：角色与身份**只能来自 JWT**，任何接口都不得接受客户端传入的 `user_id`。这是现有项目最大的安全缺陷（现在传谁的 id 就能读谁的资料）。
+
+**SSE 不能用 `EventSource`，必须用 `fetch` + `ReadableStream`（口径钉死）**
+
+| 事实 | 后果 |
+|---|---|
+| 浏览器原生 `EventSource` **只能发 GET、且无法设置请求头** | 带不上 `Authorization: Bearer <JWT>` → 只能 401，或被逼把 token 塞进查询串 |
+| 把 token 塞查询串 | 与上文「身份只能来自 JWT」冲突，且 **token 会进入访问日志与浏览器历史** |
+
+**约定**：所有 SSE 端点（`/api/chat/stream`、上传进度流）一律用 **`fetch` + `ReadableStream` 手工解析 `data:` 行**——可带请求头、可用 POST。
+
+> 这条是**前后端并行开工第一天就会撞上的**问题：后端按 Bearer 头实现鉴权，前端用 `EventSource` 就永远连不上。必须在 M0 钉死 SSE 协议时一并确定（见第七章的 M0 交付）。
 
 **`token_version` 的校验**（撤销机制，见 3.7.1）：JWT 载荷带 `tv` 声明，`security.py` 解码后**与 `users.token_version` 比对**——不等即拒（401）。这一步是**每次请求一次查库**；`users` 表小、且按 `id` 主键查，开销可忽略。
 
@@ -301,6 +323,23 @@ core/deps.py      构造 UserContext
 > - 密钥 / 令牌绝不入日志（附录 A 第 1 条已有硬编码密钥的教训）
 >
 > 日志文件沿用现有 `RotatingFileHandler` 轮转，**不引入日志检索平台**（见 3.2.3.6）。
+
+**⚠️ span 属性必须同级脱敏——自动埋点默认会记录问答原文**
+
+上面的规则只管住了**日志**。但 3.2.3.4 把节点埋点交给了 `opentelemetry-instrumentation-langchain` **自动埋点**，而**这类埋点的默认行为就会把 prompt 与模型返回内容写进 span 属性**（OpenLLMetry 的 `TRACELOOP_TRACE_CONTENT`、OTel GenAI 语义约定里的内容捕获，默认都是开的）。
+
+**后果**：日志干净了，**Jaeger 里却摆着学号、姓名、成绩原文**——而 Jaeger UI 会给任何能访问它的人看。
+
+**约定**：
+
+| 项 | 做法 |
+|---|---|
+| 关闭内容捕获 | 显式设置对应环境变量（如 `TRACELOOP_TRACE_CONTENT=false`）——**具体变量名随埋点库版本而变，接入时必须实测确认**（见下） |
+| span 上只保留 | 节点名、耗时、召回条数、token 数、状态码——**不含任何正文** |
+| Jaeger 的访问范围 | **仅内网、仅管理员**可访问；不对 User 端暴露 |
+| 验收 | M5 的 trace 可还原验收里，**加一条「抽查 span 属性不含正文」** |
+
+> ⚠️ **这条必须实测**：不同版本的 instrumentation 对内容捕获的开关名与默认值不同（有的默认开、有的默认关）。**在 M0 接入埋点时，先跑一次真实问答，然后去 Jaeger 里翻那次的 span 属性，确认没有正文**——不能只看文档就认为关掉了。
 
 ##### 3.2.3.3 指标栈与仪表盘（追踪数据可视化）
 
@@ -417,13 +456,27 @@ OTel Collector（单实例）
 
 | 问题 | 处理 |
 |---|---|
-| **总超时** | 每请求设总超时（建议 60s）；超时 → SSE 发 `error` 事件并关闭 |
+| **首字超时（TTFT）** | 从请求开始到**首个 `token` 事件**之间设上限（建议 60s）——**这是"总超时"原本想表达的东西**，覆盖消解→路由→检索→重排→生成首字这段 |
+| **流式总时长** | 首字到达后，整条流另设上限（建议 180s）。两个超时**分别设置**：只有一个总数的话，长答案会被误杀 |
+| **上传进度流的例外** | `GET /api/admin/documents/upload/{task_id}/stream` 等**分钟级长连接不适用上述超时**——它们本来就设计成可长挂（空闲超时另由 `sse_stream_timeout` 管，见 3.2.3 附近配置）。原表述「**每请求**设总超时 60s」会把上传进度条自己的超时掐断 |
+| **超时后的处理** | 发 `error` 事件（`code = "timeout"`），**保留已流出的 token**，与「流式中断」同处理——**不是清空重来** |
 | **流式中断** | 生成到一半失败：已输出的 token 保留，追加「回答中断，请重试」；**不自动续写** |
 | **同会话并发** | 同一 `session_id` 同时只允许一个请求——前端禁用发送按钮，后端按 session 加锁 |
 | **GPU 并发** | `rerank` 加**信号量**（如同时 2 个请求）。节点内的「显存不足 → 降级」是**单请求内判断**，跨请求没有信号量会直接 OOM |
 | **幂等** | 客户端生成 `request_id`，服务端在 session 内去重，防双击重复提交 |
 
+**会话锁与幂等去重的落点（原方案未定义）**
+
+| 项 | 约定 |
+|---|---|
+| **部署前提** | **单 worker**（`uvicorn` 不加 `--workers`）。多 worker 下进程内锁形同虚设——这一点必须写进部署说明，否则"锁"是假的 |
+| **锁的实现** | 进程内 `dict[session_id, Lock]`（单 worker 前提下足够，**不引入 Redis**） |
+| **锁的释放** | ⚠️ **必须覆盖三条路径**：① 正常结束 ② 超时 ③ **客户端断连**。用 `try/finally` 保证。**断连不释放是最危险的**——该会话会永久「正在生成」，前端按钮禁用 + 后端拒绝，学生只能重开会话 |
+| **`request_id` 去重** | 落 **`conversations` 表旁的一张轻量表**或进程内 LRU（TTL 10 分钟）。**不做持久化**——重启后重复提交的概率极低，不值得为它建表 |
+
 > **「断线自动重连」不做。** 原设计写了「SSE 断开自动重连 + 轮询兜底」，但 SSE 没有 event id / 重放机制，3.7.2 也没有可轮询的查询接口——**那是一句实现不了的承诺**。改为：断线后前端提示「连接中断，请重新发送」。
+>
+> **断连时后端必须释放会话锁**（见上表），否则用户重新发送会被自己的旧锁挡住。
 
 ---
 
@@ -454,7 +507,7 @@ OTel Collector（单实例）
 | md5 | TEXT | 文件内容指纹，用于去重 |
 | **version** | INTEGER | 版本号，同组内递增 |
 | **effective_date** | DATE | 施行日期 |
-| **status** | TEXT | `indexing` / `active` / `disabled`（**不含 `superseded`**——版本新旧由检索期解析，见下） |
+| **status** | TEXT | `indexing` / `active` / `disabled` / **`failed`**（**不含 `superseded`**——版本新旧由检索期解析，见下） |
 | **visibility** | TEXT | public / restricted |
 | **visible_roles** | TEXT(JSON) | restricted 时生效，如 `["admin"]` |
 | **source_path** | TEXT | **原文件**在服务器上的存储路径（原文回跳用） |
@@ -484,6 +537,9 @@ OTel Collector（单实例）
 | `indexing` | 正在索引，**尚未完成** | ❌ |
 | `active` | 正常 | ✅ 需同时满足下方「当前生效」解析 |
 | `disabled` | 管理员手动停用 | ❌ |
+| **`failed`** | **索引失败**（补偿删除已执行，详见 `ingestion_tasks` 的「失败与重试」） | ❌ |
+
+> **`failed` 行必须保留、不能删**：它承载「这次上传失败过」的事实。删掉行的话，管理端既看不到失败记录，也无法判断某个 `doc_group_id` 是「从没传过」还是「传失败了」——而这两种情况的处置完全不同（前者要传新版，后者要排查失败原因）。
 
 > **`indexing` 是解开「写入顺序」与「失败回滚」冲突的关键**（原方案缺这个态，三条约定无法同时成立）：
 >
@@ -543,17 +599,44 @@ OTel Collector（单实例）
 |---|---|---|
 | id | TEXT PK | 即 `task_id`，**持久化**（服务重启后仍可查） |
 | doc_group_id | TEXT | 目标文档组 |
-| status | TEXT | pending / parsing / chunking / embedding / done / failed |
+| **batch_id** | TEXT | **同一压缩包内的任务共享**；单文件上传时等于自己的 `id` |
+| **file_name** | TEXT | 包内文件名——**进度条与错误列表要显示它**，不能只显示 `task_id` |
+| **trace_id** | TEXT | **OTel trace id（32 位十六进制）**。后台任务**不能靠 contextvars 隐式继承**，必须在这里显式落库、各阶段从表里取（见 3.2.3.1） |
+| status | TEXT | pending / parsing / chunking / embedding / done / **duplicate** / failed |
 | progress | INTEGER | 0–100 |
 | message | TEXT | 当前阶段说明 |
 | error | TEXT | 失败原因 |
-| document_id | TEXT FK | 完成后回填 |
+| **retry_count** | INTEGER | 同一文件被上传了几次（仅观测，见下方「失败与重试」） |
+| document_id | TEXT FK | 索引成功时回填（配合 3.3.1 的 `indexing` 状态） |
 | **uploader_id** | TEXT FK | 谁传的（管理端展示） |
 | created_at / updated_at | DATETIME | |
 
-**回滚语义**：任一步失败 → 按 `document_id` **反向删除三个存储**（Chroma → BM25S → SQLite），不是事务回滚（跨异构存储做不到原子，只能补偿删除）。
+> **`batch_id` 与 `file_name` 是 ZIP 批量上传必需的**：一次 zip 会产生 N 条任务，而原表只有 `doc_group_id`（单值）——**整包进度、包内哪个文件失败都无处表达**。有了 `batch_id` 才能：① 聚合出「整包处理了 m/N」；② 管理端展开看到每个文件的状态。单文件上传时 `batch_id = id`，口径统一。
+>
+> **`duplicate` 状态是去重跳过的落点**：原设计写「已存在 → 标记 duplicate，跳过」，但 `status` 的取值里没有 `duplicate`，`documents.status` 也没有——**标记无处可写**，进度条上重复文件显示成什么也没定义。
 
-**version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。
+**失败处理是「补偿删除」，不是事务回滚**（跨异构存储做不到原子）：
+
+```
+1. 删 Chroma 里该 document_id 的 chunk
+2. 删 BM25S 索引里该 document_id 的项
+3. SQLite：documents 行置 failed（不删行）；ingestion_tasks 行置 failed（不删行）
+```
+
+> **删除顺序是「先把向量与稀疏索引、后 SQLite」**，与写入顺序完全相反。原表述写「按 `document_id` **反向**删除三个存储（Chroma → BM25S → SQLite）」——**「反向」与括号里的顺序对不上**（写入顺序本来就是 Chroma → BM25S → SQLite），施工会有两种实现。现按「反序 = SQLite 最后」钉死。
+>
+> **两张表的行都必须保留**：`ingestion_tasks` 行承载「失败队列」——删了它管理端就看不到失败记录；`documents` 行保留但置 `failed`（取值见 3.3.1）。
+
+**失败队列与重试**：
+
+| 项 | 定义 |
+|---|---|
+| 失败队列 | `SELECT * FROM ingestion_tasks WHERE status = 'failed'`（**不另建表**） |
+| 重试 | **本轮不做「原地重跑」**——重试 = 重新上传该文件。`retry_count` 只作观测 |
+
+> 不做原地重跑的理由：补偿删除若中途失败会留下「半删状态」，自动重跑在脏状态上继续，风险高于收益。重新上传会走完整的校验与去重流程，状态可控。
+
+**version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。配套 `UNIQUE(doc_group_id, version)` 兜底（见 3.3.1 的 `documents`）。
 
 **`conversations`**
 
@@ -589,7 +672,9 @@ OTel Collector（单实例）
 
 | 字段 | 说明 |
 |---|---|
-| id / session_id / user_id / role | 归属 |
+| id / session_id / user_id | 归属 |
+| **trace_id** | **OTel trace id（32 位十六进制），建索引**——与日志、Jaeger 的关联键，也是「按 trace_id 还原单次请求全链路」这条验收的落点（见 3.2.3.2 / 1.4） |
+| **user_role** | 提问时的角色（student / staff / admin） |
 | question | 原始问题 |
 | resolved_query | 消解补全后 |
 | route | chat / clarify / knowledge |
@@ -606,18 +691,23 @@ OTel Collector（单实例）
 | **token_usage** | JSON，输入/输出 token（成本统计） |
 | created_at | |
 
+> **`role` 改名为 `user_role`**：同表族里 `messages.role` 是 user / assistant（消息角色），`users.role` 是 student / staff / admin（身份角色），而 `qa_logs` 每行本就是一轮问答、**不存在消息角色**——原名会被实现成消息角色。改名后语义唯一。
+
 **`degradation_events`** — 降级事件（仪表盘"降级次数"的数据源）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | TEXT PK | |
-| session_id | TEXT FK | 关联本轮问答 |
+| session_id | TEXT FK | 关联会话 |
+| **qa_log_id** | TEXT FK | **关联到具体轮次**——`qa_logs` 落库后回填（或同事务写出） |
 | node | TEXT | 发生降级的节点（rerank / route / bm25 / **compaction** …） |
 | kind | TEXT | 降级类型（timeout / oom / model_load_failed / index_invalid …） |
 | detail | TEXT | 补充信息 |
 | created_at | DATETIME | |
 
 > 单独建表而不是塞进 `qa_logs.node_timings`：后者是**节点耗时**字段，把降级事件混进去会让仪表盘解析要特判。独立表还能直接 `COUNT(*) GROUP BY kind` 出"降级次数"。
+>
+> **`qa_log_id` 是下钻必需的**：原设计只有 `session_id`，而一个会话有**多轮**问答。仪表盘从某条 `degraded = 1` 的记录想看「到底是哪一步降级了」时，**无法区分是哪一轮**——只能靠时间戳猜。
 
 **`refusal_annotations`** — 拒答标注（管理端「拒答分析」的写入口，见 4.3.1.3）
 
@@ -644,8 +734,17 @@ OTel Collector（单实例）
 | ground_truth | TEXT | 标准答案 |
 | expected_doc_ids | TEXT(JSON) | 相关文档标注 |
 | expected_chunk_ids | TEXT(JSON) | 相关 chunk 标注 |
-| **case_type** | TEXT | `factual` / `cross_paragraph` / `doc_number` / `refusal` / `multi_turn`（对应 5.1 的分层） |
+| **case_type** | TEXT | `factual` / `cross_paragraph` / `doc_number` / `refusal` / **`restricted`** / `multi_turn`（对应 5.1 的分层） |
+| **turns** | TEXT(JSON) | **多轮用例的轮次脚本**——`[{question, ground_truth, expected_doc_ids}]` 的数组；单轮用例为 `null` |
+| **visible_roles** | TEXT(JSON) | **受限题专用**：该题要求的可见范围（如 `["admin"]`）。5.3 的 ACL 对照实验要用它挑题 |
 | created_at | DATETIME | |
+
+> **为什么补 `turns` 与 `visible_roles`**：
+>
+> - `case_type` 原本已含 `multi_turn`（5.1 占 10%、15–20 题），但表里只有**单个** `question` / `ground_truth`——**多轮用例的轮次脚本、每轮期望、按轮判分无处存放**。
+> - 5.3 的 ACL 对照实验要求「admin 跑全部题 / student 跑受限题」，但 5.1 的题型表里**没有受限类**、字段里也没有 `visible_roles` 标注——跑到 5.3 时找不到那批题，只能临时挑，对照实验无法复现。
+>
+> 两者都需要在**建题库时**就标好，不能等到做实验时再补。
 
 **`eval_runs`** — 每次评测运行
 
@@ -653,10 +752,24 @@ OTel Collector（单实例）
 |---|---|---|
 | id | TEXT PK | |
 | name | TEXT | 运行名称 |
-| **config** | TEXT(JSON) | 本轮配置，如 `{"bm25": false, "rerank": true}` ← **消融实验的对照依据** |
+| **config** | TEXT(JSON) | 本轮配置 ← **消融实验的对照依据**（字段清单见下） |
+| **role** | TEXT | 本轮以哪个角色跑（`student` / `staff` / `admin`）——**5.3 的 ACL 对照实验按它分组** |
+| **include_restricted** | INTEGER | 0/1，是否开启提权（见 3.3.3）——基准行必须为 1 |
 | status | TEXT | pending / running / done / failed |
 | **metrics** | TEXT(JSON) | 汇总指标（ragas 四指标 + 自定义指标） |
 | started_at / finished_at | DATETIME | |
+
+**`config` 的字段清单**（原方案只说「如 `{"bm25": false, "rerank": true}`」，没有封闭词表——不定义就没法打消融表）：
+
+| 键 | 取值 | 对应消融项 |
+|---|---|---|
+| `bm25` | true / false | 混合检索的稀疏路开关 |
+| `rerank` | true / false | 精排开关 |
+| `query_expansion` | true / false | 三类查询扩展开关 |
+| `rrf_weighted` | true / false | 加权 RRF 开关 |
+| `resolve` | true / false | 消解节点开关 |
+
+> **只列这 5 个是有意的**：它们正好对应 5.3 叠加表的各行。**`role` / `include_restricted` 不放这里**——它们是**对照实验的分组维度**，不是消融开关，混在一起会让消融表的行含义不纯。
 
 **`eval_case_results`** — 单题结果（下钻用）
 
@@ -667,6 +780,7 @@ OTel Collector（单实例）
 | case_id | TEXT FK | |
 | retrieved_ids | TEXT(JSON) | 实际召回的 chunk |
 | answer | TEXT | 实际回答 |
+| **unauthorized_hits** | INTEGER | 本题返回的 chunk 中**属于当前角色不可见文档**的条数——**5.3 的「越权返回次数应为 0」直接读它** |
 | metrics | TEXT(JSON) | 该题的指标 |
 | created_at | DATETIME | |
 
@@ -749,13 +863,27 @@ status = "active"                          ← 状态过滤
 
 > **两个符号务必分清**：`K`（每路召回 10）与**最终返回 5 条**是两回事。本文档**不用字母缩写指代后者**，一律写死 `Top-5`——避免第二个字母与本节的泛指 `Top-N` 撞车。
 
-**方案**：**固定过采样 + 一次重试**
+**方案**：**固定过采样 + 一次重试**（口径钉死）
 
 ```
-第一次：取 3 × K（=30）
-「Chroma 过滤 + 版本折叠」后仍不足 K 条 → 取 6 × K（=60）再试一次
+第一次：每个向量查询路各自 n_results = 3 × K（=30）
+        ↓
+「Chroma 过滤 + 版本折叠」后仍不足 K 条
+        ↓
+重试：每个向量查询路各自 n_results = 6 × K（=60）
+      · 重试结果**整体替换**该路首次结果（不是叠加）
+      · 替换后**重新做版本折叠**，再按同一判据检查
+        ↓
 仍不足 → 按实际条数返回（库里确实没有，交给 generate 判拒答）
 ```
+
+> **三条口径原方案没写清，施工时会有两种实现**：
+>
+> | 歧义 | 钉死为 |
+> |---|---|
+> | 「取 3 × K」是**每路**还是**合计**？ | **每路各自**取 `3K`（本项目有 3 类查询 × 检索器组合，若理解成合计，单路只剩 10 条，过采样失去意义） |
+> | 重试结果**替换**还是**叠加**首次结果？ | **整体替换**该路的首次结果——叠加会让首次的低分结果混进来，且要去重两次结果 |
+> | 重试后要不要**重新折叠**？ | **要**。折叠依赖的是候选集合本身，集合变了必须重算；否则「折叠后不足」这条判据失效 |
 
 > **判据必须包含版本折叠后的条数**，不能只看 Chroma 过滤结果。某制度有 8 个历史版本时，Top-30 可能被占满，折叠后只剩 2–3 条——但"Chroma 过滤后条数够"，不会触发重试，结果进 rerank 的候选远少于 K。
 
@@ -778,43 +906,72 @@ status = "active"                          ← 状态过滤
         ↓
   MD5 计算
         ↓
-  ┌─ 已存在? ─┬─ 是 → 标记 duplicate，跳过
+  ┌─ 已存在? ─┬─ 是 → ingestion_tasks 置 duplicate，跳过（见 3.3.1）
   │           │
   │           └─ 否 ↓
   ↓
-  内容解析（按格式分发）
+  【落盘 + 建行】保存原文件 → source_path
+                 写 documents 行：status = indexing、事务内分配 version
+                 —— 行必须先建：失败时才能按 document_id 补偿删除（见 3.3.1）
+        ↓
+  内容解析（按格式分发，见 3.4.2）
+        ├─ PDF：一次遍历同时完成 类型判定 + 文字提取 + 图片提取
+        │       ├─ 文字层可信 → 本地提取（PyMuPDF，带页码 + 正则章节）
+        │       └─ 无文字 / 不可信 → MinerU（按页限定范围，见 E.8.6）
+        └─ DOCX / PPTX / MD / TXT：各自加载器
+        ↓
+  图片提取与落盘 → image_paths（见 E.4.5；只提取，不做 VL 描述）
+        ↓
+  【竖排检测】命中 → 反转行序
+        ⚠️ 必须在清洗之前（见 E.3.3）
         ↓
   文本清洗（控制字符 / 页眉页脚 / 目录行）
         ↓
+  【规范化文本写出】→ documents.normalized_text_path
+        ↓
   分块（500 字 / 50 重叠 / 中文标点切分）
         ↓
-  元数据富化（章节、页码、图片路径）
+  元数据富化（章节、页码、bbox、chunk_id、图片路径）
         ↓
-  ┌─ 版本判定 ────────────────────────┐
-  │ 是否同 doc_group 已有文档？        │
-  │  是 → version +1（旧版状态不变）   │
-  │  否 → 新建 group，version = 1      │
-  └───────────────┬───────────────────┘
-                  ↓
         批量向量化（20 chunk / 18000 字一批，指数退避重试）
                   ↓
         ┌─────────┼─────────┐
         ↓         ↓         ↓
      Chroma    BM25S     SQLite
-     写向量    增量索引   写元数据
+     写向量    增量索引   最后把 documents.status 翻成 active
         └─────────┴─────────┘
                   ↓
             记录 MD5 指纹
 ```
+
+> **本流程与附录 E 的关系（重要，别按错的那份施工）**：上图是**完整链路**，其中带【】的四步——**落盘建行、图片提取、竖排检测、规范化文本写出**——原先只在附录 E 里出现，主流程里没有。照旧版流程图施工会：
+>
+> - **漏掉竖排检测，或把它放在清洗之后** → 清洗会先删掉「成文日期」这类单字符行，**反转再也救不回来**（E.3.3 已实测）
+> - **漏掉原文件与规范化文本的落盘** → `jump_target` 的偏移参照系（`normalized_text_path`）与原文回跳的 `/file` 都失去数据源
+> - **PDF 的「类型判定」独立成一步** → 同一个 PDF 被 `fitz.open` 打开 3–4 次（E.8.6），合并成一次遍历
+>
+> **PDF 分支的细节以附录 E.4 / E.8 为准**，上图是它的简化表示。
 
 #### 3.4.2 加载器
 
 | 格式 | 实现 | 说明 |
 |---|---|---|
 | PDF | **两路分支** | **文字层可用 → 本地提取**（PyMuPDF，带页码 + 正则章节）；**无文字层 → MinerU**。**原「三路分支」已废弃**——「图文混排 → VL 流水线」整条删除，理由见 **E.4.1** |
-| DOCX | python-docx | 提取标题层级 + 内嵌图片 |
-| PPTX | python-pptx | 按页提取 |
+| DOCX | python-docx | 提取标题层级 + 内嵌图片。**`page` 恒为 1**，见下 |
+| PPTX | python-pptx | **按幻灯片边界切分**，每个 chunk 的 `page` = 幻灯片序号（从 1 起），见下 |
 | Markdown | mistune AST | 提取目录结构 |
+
+**非 PDF 的 `page` 字段语义（原方案未定案）**
+
+| 格式 | `page` | 说明 |
+|---|---|---|
+| **DOCX** | **恒为 1** | docx 的分页是**渲染产物**、不是文档固有属性；且现有 `docx_loader` 本就硬编码 `"page": 1`。**该字段对 docx 无意义**——定位走 4.2.2.4 的 L2 / L3（`boxes` 为空 → 从 L2 起步） |
+| **PPTX** | **幻灯片序号，从 1 起** | **必须输出**。原 `pptx_loader` 把整份 PPT 的文本拼成一个字符串、**没有幻灯片序号**——不补这个，pptx 的引用回跳与分块预览都定位不到「第几页」 |
+| MD / TXT | **恒为 1** | 与 docx 同理 |
+
+> **PPTX 的 `page` 直接复用现有字段，不新增 `slide_index`**：语义一致（「第几页」），复用能避免下游（`jump_target` / 分块预览 / 引用卡片）出现两套页码概念。**代价**：要在 3.3.2 的 metadata 说明里注明「`page` 对 PPTX 表示幻灯片序号」。
+>
+> **chunk 不跨幻灯片**：pptx 按幻灯片边界切分；若单页文本超过 500 字阈值，页内再按标点切——但**不把两页的内容合进一个 chunk**，否则 `page` 无法表达。
 | TXT | 编码回退链 | UTF-8 / GBK / GB18030 依次尝试 |
 
 **HTML 不做**（决策 #6）。
