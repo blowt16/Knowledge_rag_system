@@ -27,7 +27,7 @@
 | # | 决策项 | 结论 |
 |---|---|---|
 | 1 | 推进方式 | **全量重写**（现有代码作参考，不直接改造） |
-| 2 | 前端 | Vue 3 单工程双端：User 问答端 + 管理端 |
+| 2 | 前端 | React 单工程双端：User 问答端 + 管理端 |
 | 3 | 编排 | LangGraph；**废弃现有 Agent 模式**，只保留线性 RAG |
 | 4 | 权限 | 真实 ACL，**检索期数据隔离**（非仅接口鉴权） |
 | 5 | 版本管理 | 版本号 + 生效日期 + 新版自动取代旧版 |
@@ -60,7 +60,7 @@
 
 ```
                         ┌─────────────────┐
-                        │   Vue Console   │
+                        │  React Console  │
                         │  User端 | 管理端 │
                         └────────┬────────┘
                                  │ HTTPS / SSE
@@ -1866,11 +1866,11 @@ def count_tokens(text: str) -> int:
 frontend/web/
 ├── src/
 │   ├── api/            请求封装、SSE 封装、拦截器（两端共用）
-│   ├── stores/         Pinia: auth / chat / conversation / admin
+│   ├── stores/         Zustand: auth / chat / conversation / admin
 │   ├── router/         路由定义 + 角色守卫
 │   ├── layouts/
-│   │   ├── UserLayout.vue    聊天为主
-│   │   └── AdminLayout.vue   侧边导航
+│   │   ├── UserLayout.tsx    聊天为主
+│   │   └── AdminLayout.tsx   侧边导航
 │   ├── views/
 │   │   ├── login/
 │   │   ├── chat/             User 端
@@ -1880,9 +1880,13 @@ frontend/web/
 └── vite.config.ts
 ```
 
-**技术栈**：Vue 3 + Vite + Vue Router + Pinia + Element Plus + ECharts + remark / rehype（unified 生态，选型理由见 4.2.1.1）
+**技术栈**：React + Vite + React Router + Zustand + shadcn/ui + ECharts + `unified`（remark / rehype，选型理由见 4.2.1.1）+ `react-markdown`（见 4.2.4.1）+ `react-pdf-highlighter`（见 4.2.2.2）+ `@tanstack/react-virtual` / `use-stick-to-bottom`（见 4.2.4.3）
 
-**单工程双端的实现**：路由按 `/chat/*` 与 `/admin/*` 分组，全局前置守卫校验 `role`，非 admin 访问 `/admin/*` 直接重定向。共用组件（消息气泡、Markdown 渲染、SSE 封装、请求拦截器）只写一份。
+> 组件库选 `shadcn/ui`（Radix + Tailwind）的核心理由：它是**把组件代码复制进项目**而不是装一个黑盒依赖，聊天界面需要的高度定制（消息气泡、引用卡片、角标）不必和组件库的样式体系对抗。同类项目 RAGFlow / Khoj / Chainlit 均采用。
+>
+> 若要「开箱即用」的组件库，`antd` 是与原 Element Plus 最接近的替代——但聊天界面的定制成本会更高。
+
+**单工程双端的实现**：路由按 `/chat/*` 与 `/admin/*` 分组，在路由层校验 `role`，非 admin 访问 `/admin/*` 直接重定向。请求拦截器与 SSE 封装两端共用。
 
 ### 4.2 User 端
 
@@ -1935,7 +1939,7 @@ frontend/web/
 | `markdown-it` | ❌ **不能**。实测 37 个 token 中 23 个只有行号 `map`，inline 子 token 全部只有行号，**没有任何字符偏移**。要用它做置灰只能自己逐字符反推，等于重写一遍分词 |
 | `remark`（mdast） | ✅ **能**。实测 10/10 个叶子节点，其 `position.start.offset` / `end.offset` 切出的内容与原文逐字一致 |
 
-> `remark` / `rehype` 是纯 JS 实现，**与前端框架无关**（React 侧走 `react-markdown`，Vue 侧直接跑 `unified` 管道），因此本节的方案**不受 4.1 技术栈选择影响**。
+> `remark` / `rehype` 是纯 JS 实现，**与前端框架无关**。4.1 已定 React，直接走 `react-markdown`——它本身就是 `unified` + `remark-parse` + `remark-rehype` 的封装（见 4.2.4.1），本节的标注插件作为 `remarkPlugins` 注入即可。
 
 #### 4.2.1.2 偏移契约（防漂移的根本）
 
@@ -2039,12 +2043,15 @@ const toCp = (s, i) => [...s.slice(0, i)].length;
 
 基于 **PDF.js 文本层**（与 3.7.2 的措辞一致）：
 
-| 框架 | 组件 |
-|---|---|
-| React（若 4.1 最终选 React） | `react-pdf-highlighter` —— 已核实 **RAGFlow**（`web/package.json` → `"react-pdf-highlighter": "^6.1.0"`）与 **Dify**（`web/package.json`，经 pnpm catalog 引入）均在使用 |
-| Vue（若维持 4.1 现状） | 无同等成熟的现成组件，需基于 `pdfjs-dist` 自建文本层高亮 |
+**4.1 已定 React**，因此选型如下：
 
-> 组件选型**依赖 4.1 的框架决策**（见附录 C.1.6）；但本节的**定位策略与降级规则与框架无关**。
+| 层 | 选型 |
+|---|---|
+| PDF 渲染 + 文本层高亮 | `react-pdf-highlighter` |
+
+> 已核实 **RAGFlow**（`web/package.json` → `"react-pdf-highlighter": "^6.1.0"`）与 **Dify**（`web/package.json`，经 pnpm catalog 引入）均在使用。它内部即 PDF.js 文本层，与 3.7.2 的措辞一致，**不需要另行拼装**。
+>
+> 本节的**定位策略与降级规则（4.2.2.4）与框架无关**，换框架不影响。
 
 #### 4.2.2.3 偏移参照系：两套偏移不可混用
 
@@ -2164,33 +2171,43 @@ PDF 之外（docx / pptx / md / txt）**跳文档预览页**，不走抽屉的 P
 
 > **反例就是现有实现**：`front/app.py:229-231` 每收到一个 token 执行 `placeholder.markdown(full_response)`，整段重新解析重渲染。
 
-**候选：`streamdown`**（React）。以下为实测结论：
+**结论：渲染器用 `react-markdown`，增量策略自建。**
+
+`react-markdown@10.1.0` 实测：
 
 | 项 | 实测结果 |
 |---|---|
-| 内部解析器 | `unified` / `remark-parse` / `remark-gfm` / `remark-rehype`——**与 4.2.1 同源** ✅ |
-| 可注入插件 | 类型定义暴露 `remarkPlugins` / `rehypePlugins` / `components` ✅ |
-| 中文支持 | 有独立插件 `@streamdown/cjk` |
-| 生产用例 | Dify `web/package.json` 已含 `streamdown`（与 `remark` 同栈，无 `markdown-it`） |
-| ⚠️ **内置 sanitize** | 依赖含 **`rehype-sanitize`（用其 `defaultSchema`）+ `rehype-harden`**，且**未暴露 schema 配置口子** |
-| ⚠️ 框架 | peerDependencies 为 `react` / `react-dom`，**React 专属** |
+| 内部管道 | `unified` / `remark-parse` / `remark-rehype` / `hast-util-to-jsx-runtime`——**与 4.2.1 的标注管道同源** ✅ |
+| **内置 sanitize** | ❌ **没有**（依赖清单里不含 `rehype-sanitize`）→ `class` 与 `data-*` 都能存活 ✅ |
+| 可注入 | README 实测暴露 `components` / `remarkPlugins` / `rehypePlugins` / `skipHtml` / `allowedElements` |
+| 默认安全 | README 原文 *"Use of `react-markdown` is secure by default"*——不渲染裸 HTML（未启用 `rehype-raw`） |
+| 若日后要加固 | README 建议自行加 `rehype-sanitize`，**且可自定义 schema**——**若加，必须放行 `className`**，否则 4.2.1 的置灰静默失效（见 4.2.1.2） |
 
-**必须绕开的坑**：实测 `hast-util-sanitize` 的 `defaultSchema` 中，`className` **不在全局允许列表**，只对两处开了白名单：
+**为什么不用 `streamdown`**（虽然它是 React 生态的）：
+
+| 项 | 实测结果 |
+|---|---|
+| 内部管道 | 同样是 `unified` / `remark` 系 ✅ |
+| ⚠️ **内置 sanitize** | 依赖含 **`rehype-sanitize`（用其 `defaultSchema`）+ `rehype-harden`**，且**未暴露 schema 配置口子** |
+
+实测 `hast-util-sanitize` 的 `defaultSchema` 中，`className` **不在全局允许列表**，只对两处开白名单：
 
 ```
 a:    ['className', 'data-footnote-backref']    ← 只允许这一个值
 code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 ```
 
-**即 `<span class="uncited">` 的 class 会被 streamdown 的 sanitize 剥掉，4.2.1 的置灰会静默失效。**
+**即 `<span class="uncited">` 的 class 会被 `streamdown` 的 sanitize 剥掉，4.2.1 的置灰静默失效**——而它不给配置口子，绕不开。
 
-**结论与适配**：
+> `streamdown` 的流式优化确实更好，但**它的 sanitize 与本方案的核心需求（`class` 存活）直接冲突**。若日后仍想用它，必须改用 `components` 把**标准标签**（如 `<mark>`）映射到自定义组件，不依赖属性存活。
 
-- 标注节点**不得依赖任何属性存活**。改用 `components` 把**标准标签**（如 `<mark>`）映射到自定义组件——标签本身会被保留，属性不需要
-- 或者：不用 streamdown，由 4.2.1 的 remark 管道自行接管渲染
-- **若 4.1 最终选 Vue**：streamdown 不可用，需基于 `unified` 自建流式渲染层
+**增量渲染的具体做法——按「已完结块」切分**（要求 1 的落地）：
 
-> 无论走哪条，**接入时先跑一次「class / 属性是否存活」的最小验证**——这条已经踩过一次（见上表）。
+- 把答案切成块（空行分隔、代码围栏已闭合、表格已结束）
+- **已完结的块用 `memo` 包住，只渲染一次**，DOM 保持稳定
+- 每个 token 只重渲染**尾部那一个未完结的块**
+
+这样同时满足要求 2——尾部块即使坏掉（半截围栏、未闭合粗体）也只影响它自己，不会让整段重排或闪动。
 
 #### 4.2.4.2 检索过程反馈
 
@@ -2218,7 +2235,12 @@ code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 | 会话列表（侧栏） | 分页加载（3.7.1 已支持 offset / limit），**滚动到底自动加载下一页** |
 | 消息流 | 长会话虚拟滚动，避免全量 DOM |
 
-**「用户上翻时不被强行拉到底」是必须项**：流式输出期间自动滚到底部，但用户一旦主动上翻查阅历史，**必须停止自动滚动**，否则内容会被不断顶走。有现成实现可直接用（如 `use-stick-to-bottom`），也可自行判断滚动位置。
+**「用户上翻时不被强行拉到底」是必须项**：流式输出期间自动滚到底部，但用户一旦主动上翻查阅历史，**必须停止自动滚动**，否则内容会被不断顶走。
+
+| 能力 | 选型 |
+|---|---|
+| 虚拟滚动 | `@tanstack/react-virtual` |
+| 吸底滚动 | `use-stick-to-bottom` |
 
 > 现有前端没有这个问题——它是整页 `st.rerun()` 重绘，谈不上滚动控制。这是换成正经前端后**必然出现**的新问题，不是可选项。
 
@@ -2495,11 +2517,11 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 | # | 里程碑 | 交付内容 | 人天 | 验收标准 |
 |---|---|---|---|---|
-| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、最简 Vue 聊天页 | 8–12 | **端到端跑通**：传文档 → 提问 → 流式作答 + 引用 |
+| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、最简 React 聊天页 | 8–12 | **端到端跑通**：传文档 → 提问 → 流式作答 + 引用 |
 | **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样 | 12–16 | 检索指标有基线数据 |
 | **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | 12–16 | 多轮指代场景通过 |
 | **M3** | 生成与引用 | 上下文组装、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 12–16 | 点击引用可跳转原文；校验能标出无依据句 |
-| **M4** | Vue 两端 | User 端完整、管理端、仪表盘 | 18–24 | 全功能可用 |
+| **M4** | React 两端 | User 端完整、管理端、仪表盘 | 18–24 | 全功能可用 |
 | **M5** | 评测与打磨 | **10–15 题拒答校准小集**、测试集构建（**分两阶段**）、ragas 接入、消融实验、测试补齐、可观测性、部署配置 | 20–25 | 消融实验表产出 + 测试通过 + 拒答四项指标有基线 |
 | | **合计** | 原始估算 | **82–109** | 含 30% 返工余量约 **107–142 人天** |
 
@@ -2891,11 +2913,11 @@ Agent 模式已废弃（决策 #3），剩下的是**线性管道 + 两个条件
 
 ---
 
-#### C.1.6 前端：**Vue 单工程双端**
+#### C.1.6 前端：**React 单工程双端**
 
 **决策**（见决策 #2）
 
-一个工程、两套路由（`/chat/*` 与 `/admin/*`），公共组件（消息渲染、SSE 封装、请求拦截器）只写一份。
+一个工程、两套路由（`/chat/*` 与 `/admin/*`）。两端真正共用的只有 **SSE 封装与请求拦截器**——消息渲染是 User 端专属（管理端是表格 + 图表），不要为了"共用"硬抽公共组件。
 
 ---
 
