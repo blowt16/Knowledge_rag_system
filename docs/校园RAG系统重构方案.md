@@ -1490,7 +1490,8 @@ DELETE /api/conversations/{id}
 # 原文回跳（亮点③）
 GET  /api/documents/{id}/text           规范化文本 + 偏移索引
 GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层定位；
-                                        其它格式跳文档预览页）
+                                        docx/md/txt 由前端渲染后同样按文本定位；
+                                        pptx 本轮降级为下载——详见 4.2.2.6）
 ```
 
 **SSE 事件协议**
@@ -1885,7 +1886,7 @@ frontend/web/
 └── vite.config.ts
 ```
 
-**技术栈**：React + Vite + React Router + Zustand + shadcn/ui + ECharts + `unified`（remark / rehype，选型理由见 4.2.1.1）+ `react-markdown`（见 4.2.4.1）+ `react-pdf-highlighter`（见 4.2.2.2）+ `@tanstack/react-virtual` / `use-stick-to-bottom`（见 4.2.4.3）
+**技术栈**：React + Vite + React Router + Zustand + shadcn/ui + ECharts + `unified`（remark / rehype，选型理由见 4.2.1.1）+ `react-markdown`（见 4.2.4.1）+ `react-pdf-highlighter`（见 4.2.2.2）+ `docx-preview`（非 PDF 原文预览，见 4.2.2.6）+ `@tanstack/react-virtual` / `use-stick-to-bottom`（见 4.2.4.3）
 
 > 组件库选 `shadcn/ui`（Radix + Tailwind）的核心理由：它是**把组件代码复制进项目**而不是装一个黑盒依赖，聊天界面需要的高度定制（消息气泡、引用卡片、角标）不必和组件库的样式体系对抗。同类项目 RAGFlow / Khoj / Chainlit 均采用。
 >
@@ -2111,7 +2112,84 @@ const toCp = (s, i) => [...s.slice(0, i)].length;
 
 #### 4.2.2.6 非 PDF 格式
 
-PDF 之外（docx / pptx / md / txt）**跳文档预览页**，不走抽屉的 PDF 高亮逻辑（与 3.7.2 一致）。
+> 本节补齐 4.2.2 原先的缺口：只说「非 PDF 跳文档预览页」，但**方案里没有这个页面的设计**。本节定方案、定定位、定降级。
+
+##### 格式与方案对应
+
+| 格式 | 渲染 | 定位高亮 |
+|---|---|---|
+| **docx** | **`docx-preview`** | 复用 4.2.2.4 的 `snippet` 内容匹配（见下） |
+| **md / txt** | 已有的 Markdown 管道（与答案渲染同一套） | 同上，最简单 |
+| **pptx** | **本轮降级为「下载原文 + 提示」** | 不做（理由见下） |
+
+`docx-preview` 的实测依据：`0.4.1`（2026-09-21 发版）、2110 star、700 万下载/月、Apache-2.0。保真度高（支持分页、页眉页脚、脚注），且**渲染产物是真 DOM 文本而非图片**——这是能复制定位策略的前提。
+
+##### 定位：与 PDF 完全同构
+
+`docx-preview` 渲染出的 DOM 里是真实文本，所以 4.2.2.4 的三级降级**原样适用**：
+
+```
+L1 用 citation.snippet 在渲染出的 DOM 文本里检索匹配 → 包 <mark> 并 scrollIntoView
+L2 用 citation.chapter 匹配章节标题
+L3 找不到就只打开文档、不定位，提示「未能精确定位」
+```
+
+**后端契约不需要任何改动**——`jump_target` 现有字段够用，`snippet` / `chapter` 已在 `Citation` 顶层。
+
+> ⚠️ **docx 定位不能靠页码**：一是 `docx_loader` 的 `page` 是**硬编码的 1**（`app/utils/file_handler.py` 的 `base_meta`），没有真实页码；二是 docx 本身的分页是渲染产物、不是文档固有属性。**所以 docx 只能走 L1 / L2 的内容匹配**——这恰好也是 4.2.2.4 已经定好的路径。
+
+> ⚠️ **docx 没有段落锚定能力**：其官方 issue #222 明确说明渲染后**无法把 DOM 节点映射回源段落**，承诺的 `exposeParaIds`（给段落打 `data-para-id`）至今未发布——实测 `0.4.1` 产物中 `data-para-id` 出现 **0 次**。
+>
+> 因此高亮后处理**必须自己写**（约两三百行）：用 `docx-preview` 的 `h` 渲染钩子逐个元素回调、自行打标；跨 `<span>` 的文本匹配需先拼接文本节点。
+>
+> **L3 兜底不是可选项**，与 PDF 同理。
+
+##### pptx：本轮降级，不做在线预览
+
+兜底为「**下载原文 + 提示**」。理由：
+
+- 候选库 `@aiden0z/pptx-renderer`（自带 `searchText` → `highlightSearchResult`，是调研中**唯一**现成的非 PDF 定位方案）**仅 125 star、2026-02 建仓**，上线前必须用真实 pptx 验证
+- **而当前语料里没有任何 pptx**（`corpus/` 是 10 个 PDF + 1 个 md）——**想验也没得验**
+
+升级前提（两件，缺一不可）：
+
+1. 入库侧补**幻灯片级 metadata**。现有 `pptx_loader`（`app/utils/file_handler.py`）把整份 PPT 文本拼成一个字符串，**没有幻灯片序号**——不补这个，「第几页」无从谈起
+2. 拿真实 pptx 跑通 `@aiden0z/pptx-renderer` 的定位；验证不通过则维持下载兜底
+
+##### 明确排除的方案
+
+| 方案 | 排除理由 |
+|---|---|
+| **第三方在线预览**（Microsoft Office Online Viewer / Google Docs Viewer） | ❌ **内网不可用**。微软官方文档原文要求「文档在 Internet 上必须是可公开访问的」——是**对方服务器来抓你给的 URL**，实测 `localhost` / `192.168.x.x` 全部跳到错误页；纯内网连域名都打不开。且微软文档写明缓存**最多保留 30 天**，删除原文件后副本可能仍在 |
+| `@cyntler/react-doc-viewer` | 同上——它对 Office 格式走的正是该在线服务，README 自标 `Public URLs only!` |
+| `react-file-viewer` | ❌ **已停更**：最后发版 2019-11-13，`peerDependencies` 锁死 React 16 |
+| `@extend-ai/react-docx`（RAGFlow 的选择） | ⚠️ 已知中文缺陷：按 0.88 倍字号算行高导致 **CJK 行重叠**，RAGFlow 不得不动态改 docx 的 XML 注入 1.3 倍行距。中文语料不选 |
+| **服务端转 PDF**（LibreOffice / Gotenberg） | ❌ **本轮不做**，见下 |
+
+##### 为什么不引入 LibreOffice 转 PDF
+
+服务端转 PDF 确实能复用整条 PDF 流水线，但**「只维护一套阅读器」的优势取决于转换时机**：
+
+- **入库时转** → ✅ 优势成立：上传时转好存一份，之后全链路复用，`jump_target` 语义完全一致
+- **点击时才转** → ⚠️ 优势缩水：仍要解决「chunk → 转出来的 PDF 的哪一页」，LibreOffice 不提供这个映射
+
+本轮不做的理由（实测与已知代价）：
+
+- **本机实测未安装 LibreOffice**（PATH 与默认安装路径均无），部署要新增约 1GB 运行时
+- **中文字体会变、分页会变**：微软字体（宋体/雅黑）因授权不打包，会被 Noto CJK 替代，**字宽变化可能让页数与 Word 对不上**；另有亚洲字体导出、竖排混排等多条 CJK 相关官方 bug
+- **引用锚点会漂移**：页码是「转换产物」而非文档固有属性，换版本、换字体分页即变，已建立的引用会跳错
+- **LibreOffice 单实例串行**，并发需自行多开实例 + 每实例独立 profile（**共享 profile 是静默失败**：不报错，只是不产出文件）
+
+> **结论**：为一份当前语料中不存在的格式，引入 1GB 运行时 + 字体 / 分页 / 并发三份长期维护成本，不划算。等真有非 PDF 文档进来、**且入库时转换**能满足需求时再评估。
+
+##### 非 PDF 的已知限制
+
+| 限制 | 说明 |
+|---|---|
+| docx / pptx 无可靠页码 | `docx_loader` 的 `page` 硬编码为 1；pptx 连幻灯片序号都没有 → 定位只靠 `snippet` / `chapter` |
+| docx 高亮靠文本匹配 | 跨 run 的换行、空格、全半角差异会导致匹配失败 → 降级 L2 / L3 |
+| docx 无段落锚定 | 官方尚未提供 `exposeParaIds`，只能自行用 `h` 钩子打标 |
+| pptx 无在线预览 | 本轮为下载兜底 |
 
 #### 4.2.2.7 已知限制
 
