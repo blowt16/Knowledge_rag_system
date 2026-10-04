@@ -1878,7 +1878,9 @@ answer（含 [n] 标记）+ reranked + chunk 溯源
 {
   "total_claims": 3,
   "cited_claims": 2,
-  "invalid_markers": [7],          // 越界标记，如只有 5 条候选却写了 [7]
+  "invalid_markers": [             // 越界标记 —— 带定位信息
+    {"marker": 7, "char_start": 88, "char_end": 91}
+  ],
   "uncited_claims": [              // 无标记的结论句（定义见节点 9）—— 带定位信息
     {"sentence": "申请材料需提前一周提交。", "char_start": 42, "char_end": 55}
   ]
@@ -2086,22 +2088,44 @@ GET  /api/auth/me
 #### 3.7.2 User 端
 
 ```
-POST /api/chat/stream                   SSE
-GET  /api/conversations?offset=&limit=  分页列表（置顶优先 + 最近聊天靠前，
-                                        limit 上限与 3.7.3 一致取 100）
-POST /api/conversations
-GET  /api/conversations/{id}/messages
-PATCH /api/conversations/{id}           改名 / 置顶
+POST /api/chat/stream                   SSE（请求体见下）
+GET  /api/conversations?offset=&limit=  分页列表（排序见下）
+POST /api/conversations                 { title? } → { id }
+GET  /api/conversations/{id}/messages   → { messages: [...] }（结构见下）
+PATCH /api/conversations/{id}           { title?, is_top? } —— 改名 / 置顶
 DELETE /api/conversations/{id}
 
 # 原文回跳（亮点③）
 # ⚠️ 下列接口与 /images 都必须走 filters.py 的同一套行级 ACL，详见下方「原文访问鉴权」
-GET  /api/documents/{id}/text           规范化文本 + 偏移索引
+GET  /api/documents/{id}/text           规范化文本（**本轮无前端消费方**，见下）
 GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层定位；
                                         docx/md/txt 由前端渲染后同样按文本定位；
                                         pptx 本轮降级为下载——详见 4.2.2.6）
 GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 URL（见下）
 ```
+
+**关于 `/api/documents/{id}/text`：本轮没有前端消费方，保留给调试与将来的「规范化文本视图」**
+
+| 项 | 说明 |
+|---|---|
+| **响应结构** | `{ document_id, text, char_offset_index }`——`text` 是清洗后的规范化文本；`char_offset_index` 是 `[{chunk_id, char_start, char_end, page}]` 的数组，**用于把偏移映射回 chunk** |
+| **本轮谁在用** | **没有前端页面**。原文回跳（4.2.2）只调 `/file`，不调它 |
+| **为什么还留着** | ① **调试**：排查偏移错位时能直接看规范化文本 ② 3.3.2 说明「偏移的参照系是规范化文本」，有个出口能验证这个参照系 |
+
+> ⚠️ **口径要写清，否则会被误用**：3.3.2 有一句「前端跳转时**先取规范化文本定位，再映射到阅读器**」——那句话**已被 4.2.2.4 证伪**（规范化文本与 PDF 坐标系对不上，所以改用 bbox 坐标 + 文本匹配）。**不要照 3.3.2 那句去实现**，否则会白做一套已被否决的偏移映射。
+>
+> **本方案不做「规范化文本视图」这个页面**（4.1 的 `views/` 只有 `login` / `chat` / `admin`）。若将来要做，它读这个接口即可——接口先留着。
+
+**管理端文档写接口的规格（原方案只有路径）**
+
+| 项 | 规格 |
+|---|---|
+| **上传粒度** | **一次 zip = 一个 `batch_id` + N 条 `ingestion_tasks`**（每条对应包内一个文件）。单文件上传时 `batch_id = task_id`、`tasks` 只有一项——**响应结构统一**，前端不必写两套 |
+| **为什么需要 batch 级进度流** | 一个 zip 有 N 个文件，**开 N 条 SSE 流是不现实的**。`upload/batch/{batch_id}/stream` 聚合成一条流，推「处理了 m/N + 当前文件名 + 各状态计数」 |
+| **`PATCH /api/admin/documents/{id}` 允许改的字段** | `title`（**不触发重索引**——标题不冗余进 Chroma，不进检索过滤）、`visibility` / `visible_roles` / `effective_date`（**触发重索引**，见 4.3.1.2）、`status`（启用/停用，**同样触发**——`status` 也冗余在 Chroma，见 3.3.2） |
+| **`file_type` / `md5` / `version` / `doc_group_id`** | **不可改**。它们是内容身份的一部分；要换内容请传新版本 |
+
+> ⚠️ **`status` 也必须重索引**——这条容易漏：`status` 与 `visibility` / `effective_date` 一样冗余在 Chroma metadata 里（见 3.3.2），而原方案的「改后须重新索引」只覆盖了后两个。**停用文档却不重写 metadata，检索期的 `status = "active"` 过滤就形同虚设。**
 
 **原文访问鉴权（口径必须钉死）**
 
@@ -2129,6 +2153,20 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 >
 > **`/images` 静态目录不得直接对外暴露**——`main.py` 现有的 `app.mount("/images", StaticFiles(...))` 必须去掉，改由上述带鉴权的路由提供。
 
+**会话列表与消息接口的规格（原方案只有路径，无字段）**
+
+| 接口 | 规格 |
+|---|---|
+| `GET /api/conversations` | **排序固定为 `ORDER BY is_top DESC, last_chat_time DESC`**（与 3.3.1 的索引一致）。**分页上限 100**（全站 `page_size` 统一，见下） |
+| `PATCH /api/conversations/{id}` | 请求体 `{ title?, is_top? }`，两个字段都可选、至少给一个。**`is_top` 为 0/1 布尔**，允许多条置顶（按 `last_chat_time` 再排） |
+| `GET /api/conversations/{id}/messages` | 返回 `{ messages: [{ role, content, citations, created_at }] }`，**按时间升序**（不加分页——单会话消息量有界）。`citations` 是落库的那一列（见 3.3.1），**用于刷新后重新渲染引用** |
+
+> **「分页上限 100」的含义**：全站 `page_size` 的上限统一取 100，**不在各处分别声明**——原方案在两处互相指（会话列表指 3.7.3、文档列表指 3.7.1），而 3.7.1 是认证，两处都指错了。
+
+> ⚠️ **刷新后置灰标注会丢失，这是有意为之**：`verify_report` 只存在 `qa_logs`，`messages` 表里没有——所以重开历史会话时，**无依据句的灰标不再显示**（引用角标仍在，因为 `citations` 落库了）。
+>
+> 理由：`qa_logs` 是**评测与分析**的数据源，不应被前端会话读取；把 `verify_report` 也落进 `messages` 会让同一份校验结果存两处。**若将来要求刷新后仍显示灰标**，再把 `verify_report` 落 `messages`——届时两处需保持一致。
+
 **`POST /api/chat/stream` 请求体**（原方案只写了路径、未定义字段）
 
 | 字段 | 必填 | 说明 |
@@ -2151,8 +2189,10 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | `resolved` | `resolved_query` | 消解补全结果，前端可展示 |
 | `route` | `route, clarify_facets?` | 路由类别；`clarify` 时附候选意图列表 |
 | `stage` | `stage, label` | **阶段提示**，在 `token` 之前下发，用于填充首字到达前的静默期（见 4.2.4.2）。取值：`routing` / `resolving` / `retrieving` / `reranking` / `generating` / `verifying` |
+| | | ⚠️ **`label` 只作兜底与调试，前端展示文案以 `stage` 为准**（见 4.2.4.2 的文案映射表）——**两个文案源并存会造成不一致**：服务端改了 `label`，前端仍显示自己那份 |
 | `decision` | `ANSWERED` / `REFUSED_NO_EVIDENCE` | 结构化判定结果，服务端边收边解析得到（见节点 9）。前端据此区分「作答」与「证据不足拒答」 |
 | `token` | `text` | 逐字回答 |
+| | | ⚠️ **协议级硬约束：`text` 必须是 JSON 解码后的纯文本，不得残留转义**。客户端把 `token` 按序拼接的结果，必须**逐字等于**服务端校验偏移时使用的文本——否则 4.2.1 的置灰映射会**静默错位**，且「无法靠任何校验发现」（见 4.2.1.2） |
 | `citations` | `Citation[]` | 引用列表 |
 | `verify` | `VerifyReport` | 后校验结果；前端据此标注无依据句 |
 | `refused` | `reason, text, hint?` | 触发拒答。`reason` 取值见 5.2；**`text` 是服务端产出的固定话术**；`hint` 为可选补充提示（如「建议咨询教务处」） |
@@ -2183,13 +2223,16 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 
 ```
 文档：
-  POST   /api/admin/documents/upload
-  GET    /api/admin/documents/upload/{task_id}/stream   SSE 进度
+  POST   /api/admin/documents/upload      multipart，**单文件或 zip 都走它**
+                                        → { batch_id, tasks: [{task_id, file_name}] }
+  GET    /api/admin/documents/upload/{task_id}/stream       单文件 SSE 进度
+  GET    /api/admin/documents/upload/batch/{batch_id}/stream  **整包 SSE 进度**
   GET    /api/admin/documents?status=&visibility=&q=&page=&page_size=
                                                         ↑ 筛选参数见 4.3.1.1
   GET    /api/admin/documents/{group_id}/versions
   GET    /api/admin/documents/{id}/chunks?page=&page_size=   分块预览，见 4.3.2
-  PATCH  /api/admin/documents/{id}      ← 改可见范围/生效日期须重新索引，见 4.3.1.2
+  PATCH  /api/admin/documents/{id}      ← **允许改的字段见下**；其中
+                                          改 visibility/effective_date 须重新索引（见 4.3.1.2）
   POST   /api/admin/documents/{id}/disable
   POST   /api/admin/documents/{id}/enable
   DELETE /api/admin/documents/{id}
@@ -2201,7 +2244,8 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
   GET /api/admin/stats/hot-questions     ← 业务指标，读 SQLite
 
-用户管理：
+角色与用户：
+  GET    /api/admin/roles                          角色清单（供可见范围选择器用，见 4.3.1.2）
   GET    /api/admin/users?role=&page=&page_size=   列表
   POST   /api/admin/users                          建号（username / password / role）
   PATCH  /api/admin/users/{id}                     改角色 / 停用
@@ -2214,11 +2258,23 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   POST /api/admin/refusals/{log_id}/annotate   写标注，请求体见 4.3.1.3
 
 评测：
-  POST /api/admin/eval/run
+  POST /api/admin/eval/run              { name, config, role, include_restricted }
+                                        → { run_id }，**异步**：立即返回，进度走
+                                          GET /api/admin/eval/runs/{id} 轮询
+                                          （60–80 题 × ragas 是分钟级任务，
+                                           与上传任务同模式，见下）
   GET  /api/admin/eval/runs
   GET  /api/admin/eval/runs/{id}
   GET  /api/admin/eval/compare?run_ids=a,b,c   消融对比矩阵，见 4.3.1.4
 ```
+
+> **评测任务的执行模型（原方案未定义）**：`POST /api/admin/eval/run` **异步执行**——立即返回 `run_id`，实际跑在后台任务里，前端轮询 `GET /api/admin/eval/runs/{id}` 看 `status` 与进度。
+>
+> **复用上传任务的「任务表 + 状态查询」模式，但不复用 `ingestion_tasks` 表**：`eval_runs` 本身就有 `status` 字段，**它就是评测的任务表**——不必再建一张，也不必给上传表加评测专用的列。
+>
+> **与上传的差异**：评测**不做 SSE 进度流**（`eval_runs.status` 只有 5 个取值，轮询足够），也**不需要 trace_id 贯穿**（它不是用户请求触发的，是管理员手动触发的批量任务）——这两点与 `ingestion_tasks` 不同，写在这里以免施工者照搬。
+>
+> **GPU 争用**：评测会大量调用 rerank（与线上问答抢同一块 GPU）。**约定：评测任务与线上问答共用同一个 GPU 信号量**（见 3.2.4），即评测会让在线请求变慢，但不会 OOM。**不做优先级抢占**。
 
 > **`stats/retrieval` 是唯一读 Prometheus 的接口**：它返回节点耗时分位数、错误率、token 用量等**运行指标**，数据源是 Prometheus（PromQL 查询）。其余 `stats/*` 读 SQLite 的**业务指标**。
 >
@@ -2260,7 +2316,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 
     ├─ 系统提示词          固定，约 500–800 token
     ├─ 历史（摘要 + 近几轮） 见 3.8.3，动态
-    ├─ 检索上下文          见节点 8，动态，优先级最高
+    ├─ 检索上下文          见节点 8；**预算 8,000 token**，优先级最高
     └─ 当前问题            固定，很短
 ```
 
@@ -2272,6 +2328,14 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | 最大输入 | 258,048 |
 | 最大输出 | 65,536（**思考模式下降为 32,768**） |
 
+> **四块里只有两块有明确数值**（历史 16,000 见 3.8.3、检索上下文 8,000 见节点 8），另两块（系统提示词、当前问题）量小且固定，不给配额——**不是遗漏**。
+>
+> **检索上下文的 8,000 是防御性上限**：`Top-5` 片段通常远达不到（实测单轮检索结果约 2–3K token）。它的作用是**兜住异常情况**，不是运行目标。
+>
+> ⚠️ **原方案在这里只写「见节点 8，动态」，而节点 8 又写「裁剪到 token 预算」也没给数**——两处互相指，谁都没给值。本节与节点 8 现在统一为 **8,000**。
+>
+> **「条数」与「token」两种口径的关系**：`Top-5` 是**条数**上限（精排后取 5 条，见节点 6），8,000 是**token** 上限（裁剪用，见节点 8）。**两者是串联的两道闸**——先按条数取 5 条，再按 token 裁（正常情况下第二条不会触发）。
+
 > **⚠️ 关键区分：上面的「可用总量」是硬上限，不是运行目标。**
 >
 > 262K 的窗口意味着**溢出在本项目几乎不可能发生**——按真实对话中位 **609 token/轮**（实测 61 组问答，见 3.8.3）估算，**塞满窗口需要约 430 轮**，而实际会话最长只有 10 轮。
@@ -2280,15 +2344,21 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 >
 > 因此 **3.8.3 的历史预算是按成本/延迟定的显式目标值，不从这个窗口派生**。
 
-**回收顺序**（超出预算时按此顺序裁）：
+**回收顺序——⚠️ 两套预算、两套顺序，不要混在一起**
 
-```
-1. 先裁历史（摘要保留，只减最近轮次；这也是 3.8.3 压缩的**兜底**——压缩区压完仍超预算时由这里接手）
-2. 再裁检索上下文（从低分片段开始裁）
-3. 最后仍超 → 说明单轮检索结果过大，应在 build_context 就限制条数
-```
+原方案只写了一个「超出预算时按此顺序裁」，**没说锚在哪个预算上**，而本文有两个预算（**历史目标 16K** 与 **硬上限 ≈196K**）。施工者只能二选一，两种都错：
 
-> **检索上下文优先级高于历史**——本轮检索到的是回答依据，历史只是理解指代的背景。
+| 触发条件 | 顺序 | 动不动检索上下文 |
+|---|---|---|
+| **A. 历史自身超出 16K 目标**（3.8.3） | ① 增量压缩（把最旧的几轮并进摘要）② 压缩区压完仍超 → 减少保留区的轮次 ③ 仍超 → 缩减摘要 | ❌ **绝不动** |
+| **B. 整个 prompt 超出可用总量**（硬上限 ≈196K） | ① 同 A ② 再裁检索上下文（从低分片段起，见节点 8）③ 仍超 → 报 `context_length_exceeded` | ✅ 只有这条会动 |
+
+> **两条硬约束**：
+>
+> - **A 不碰检索上下文**——本轮检索到的是**回答依据**，历史只是理解指代的背景。原方案把「裁历史」与「裁检索上下文」放进同一个列表，施工者会实现成「历史一超 16K 就裁证据」，**把依据裁掉留背景**，方向反了。
+> - **检索上下文的优先级最高**，只在 B（真溢出）时才动它。
+>
+> **B 在本项目几乎不会触发**（262K 窗口、会话最长 10 轮）——它的存在是**防御性的，不是运行目标**。上表「塞满窗口需要约 430 轮」那句就是这个意思：**不要把它当日常路径去优化**。
 
 ---
 
@@ -2359,7 +2429,9 @@ compressed_count    INTEGER 已被摘要覆盖的消息条数
 
 > **滞回是必须的**：只设一条线会变成「压完刚好降到线下 → 下一轮又超 → 又压」，**每轮都在调 LLM**。高低水位让它一次压够、能撑住若干轮。
 >
-> **兜底**：若压缩区全部并入后历史仍 > L，说明**保留区自身就超预算**——此时不再压，交给 3.8.2 的回收顺序处理（摘要保留，只减最近轮次）。
+> **兜底**：若压缩区**全部**并入后历史仍 > L，说明「**摘要 + 保留区**」本身就超过了低水位——**没有可压的原文了**，不再压，交给 3.8.2 的**顺序 A** 处理（减少保留区轮次、缩减摘要）。
+>
+> 写「保留区自身就超预算」不够准确：按上面的口径，**摘要是计入历史的**（见下方参数表的说明），所以超出的部分可能来自摘要而不是保留区。**判据要写成「摘要 + 保留区」。
 
 **参数**：
 
@@ -2372,7 +2444,18 @@ compressed_count    INTEGER 已被摘要覆盖的消息条数
 | `summary_max_tokens` | 800 | **摘要产物自身的上限**（见下方说明） |
 | 摘要模型 | **qwen-turbo**（非主模型） | 见下方说明 |
 
-> **摘要产物必须自己有上限（`summary_max_tokens`）**。否则摘要会随对话不断膨胀——它是**加在预算之外**的一整块，涨起来反而会把窗口撑爆。这是业界踩过的坑，不是理论风险。
+> **摘要产物必须自己有上限（`summary_max_tokens`）**。否则摘要会随对话不断膨胀，涨起来反而会把窗口撑爆。这是业界踩过的坑，不是理论风险。
+>
+> ⚠️ **摘要是 `历史` 的一部分、计入 16K 预算**——依据就是本节开头的数据结构定义：`完整历史 = compressed_summary + messages[compressed_count:]`。
+>
+> **原文「它是加在预算之外的一整块」与这个定义直接矛盾**，两种读法都自洽但代码完全不同：
+>
+> | 读法 | 后果 |
+> |---|---|
+> | 摘要**计入**（本方案） | `summary_max_tokens = 800` 是它的单项上限；触发判据 `历史 token > H` 涵盖摘要 |
+> | 摘要**不计入** | 压缩永不收敛（压出去的原文腾出的空间又被摘要吃掉，但计数看不见）；且 3.8.1 的兜底判据永远不成立 |
+>
+> **实现**：`count_tokens(compressed_summary) + count_tokens(messages[compressed_count:]) > H` 触发压缩。
 >
 > **摘要用便宜模型**：qwen3-max 输出 24 元/百万 token，而摘要的输入输出都很小。**改用 qwen-turbo 是纯收益**——单次成本降约 5 倍，且摘要质量对此任务足够。
 
@@ -2525,6 +2608,17 @@ def count_tokens(text: str) -> int:
 ```
 
 **顺序有讲究**：摘要在前、原文在后，是因为**越靠后的信息对模型的即时影响越大**（近因效应），而本轮问题放最后能拿到最强的注意力。
+
+> ⚠️ **组装与计数所用的 `messages` 一律是【不含本轮】的历史**——本轮用户消息**不落进 `messages[compressed_count:]`**，只以 `[本轮问题 resolved_query]` 的形式出现在末尾。
+>
+> **原方案没有写这一点，两种实现都"合理"但行为不同**：
+>
+> | 实现 | 后果 |
+> |---|---|
+> | **不含本轮**（本方案） | 本轮问题只出现一次，在末尾——注意力最强 |
+> | 含本轮（已落库） | 本轮问题**出现两次**（历史块里一次、末尾一次），且 3.8.3 的 token 统计与 `recent_messages_limit` 的槽位计数**都会把本轮算进去**，导致**压缩触发时机与设计值不一致** |
+>
+> **落库时机**：`messages` 表在本轮**回答生成完成后**才写入（与 `qa_logs` 同事务），所以组装阶段读到的天然不含本轮。这条也解释了为什么「本轮」要以 `resolved_query` 单独传进组装函数，而不是从 `history` 里取。
 
 > **证据与历史之间**用上面这个顺序（摘要 → 原文 → 本轮证据 → 本轮问题）。
 >
@@ -3067,7 +3161,7 @@ code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 
 - 选「公开」→ `visibility = "public"`，`visible_roles` 不参与检索过滤（过滤表达式见 3.3.3）
 - 选「受限」→ `visibility = "restricted"`，**至少勾选一个角色**，写入 `visible_roles`
-- **角色清单来自 `users.role` 的取值集合**，不在表单里硬编码
+- **角色清单来自 `GET /api/admin/roles`**（返回 `[{value, label}]`，如 `[{value:"admin", label:"管理员"}, ...]`）——**不在表单里硬编码**，也不让前端读 `users.role` 的取值集合（那需要拉一遍用户列表，且分页时取不全）
 
 > ⚠️ **修改可见范围或生效日期必须触发重新索引，界面必须显式告知。**
 >
