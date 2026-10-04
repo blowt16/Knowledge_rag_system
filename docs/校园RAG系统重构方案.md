@@ -1468,9 +1468,14 @@ refused = true, refusal_reason = "no_candidate"
 
 ```
 POST /api/auth/login     → { access_token, refresh_token, user }
+POST /api/auth/refresh   → { access_token, refresh_token }   ← 用 refresh_token 换新令牌
 POST /api/auth/logout
 GET  /api/auth/me
 ```
+
+> **认证做到「完整」**（决策）：JWT + 刷新令牌 + 角色守卫。这是决策 #4「真实 ACL、检索期数据隔离」的地基——角色来自 JWT，不是客户端传参（见附录 A 第 2 条）。
+>
+> ⚠️ 上表原先**只有签发 `refresh_token`、没有使用它的接口**，本方案已补 `POST /api/auth/refresh`。前端需要在 `access_token` 过期时静默续期，不能把用户踢回登录页。
 
 #### 3.7.2 User 端
 
@@ -2529,6 +2534,18 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 **M0 是风险控制点**：全量重写下"什么都跑不起来"的窗口压到 8–12 天。
 
+**前端与后端并行推进**（决策）——前端**不等后端全量完成**。M0 起就有最简 React 聊天页与后端同步演进，每个后端里程碑落地时同步补上对应界面：
+
+| 后端里程碑落地 | 前端同步补 |
+|---|---|
+| M1 检索做对 | 引用展示：三层入口 + 聚合去重 + 图片（4.2.3） |
+| M2 查询理解 | 消解提示（`resolved`）与澄清交互（`route=clarify` 的 `facets`） |
+| M3 生成与引用 | 无依据句标注（4.2.1）与原文回跳（4.2.2） |
+
+> 因此 **M4 的定位是「补齐剩余页面」**（管理端 4.3、仪表盘 4.4），不是「前端从零开始」。
+>
+> 并行的前提是 **M0 就把 SSE 协议钉死**（3.7.2 的事件表）——协议一改，前端已写的部分就要返工。新增事件（如 4.2.4.2 的 `stage`）应当是**追加**而非改动既有事件。
+
 ---
 
 ## 附录 A：现有项目需同步处理的问题
@@ -2546,6 +2563,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 7 | 上下文组装逻辑在两个文件中重复 | `rag_service.py` / `agent_service.py` | 收敛为单一 `build_context` 节点 |
 | 8 | 零测试、无 CI | 全项目 | 见第六章 |
 | 9 | `MAX_MEMORY_TURNS` 在 `.env` 声明但**全仓无代码读取**，静默失效 | `.env:57`（实际生效的是 `chroma.yaml:63` 的 `llm_history_turns`） | 与第 3 条同类：配置项与代码严格对应 |
+| 10 | 现有 Streamlit 前端（`front/`）对接的是旧后端接口（`/chat`、`/knowledge/*`、`/conversation/*`、`/api/knowledge/*`），**M0 起旧后端被新骨架替换后即失效** | `front/` | **冻结停用**（决策）：不双轨维护。保留代码作参考，但标记为不可用，避免误用 |
 
 > **实测确认**：`MAX_MEMORY_TURNS` 只在旧版 `.pyc` 残留里出现，**源码已无任何地方读它**。当前真正生效的是 **`llm_history_turns: 5` 直接截最近 5 轮**——正是 3.8.1 批评的「简单截断」，也是新设计要替掉的（见 3.8.3）。
 
