@@ -385,7 +385,7 @@ core/deps.py      构造 UserContext
 | md5 | TEXT | 文件内容指纹，用于去重 |
 | **version** | INTEGER | 版本号，同组内递增 |
 | **effective_date** | DATE | 施行日期 |
-| **status** | TEXT | active / disabled（**不含 `superseded`**——版本新旧由检索期解析，见下） |
+| **status** | TEXT | `indexing` / `active` / `disabled`（**不含 `superseded`**——版本新旧由检索期解析，见下） |
 | **visibility** | TEXT | public / restricted |
 | **visible_roles** | TEXT(JSON) | restricted 时生效，如 `["admin"]` |
 | **source_path** | TEXT | **原文件**在服务器上的存储路径（原文回跳用） |
@@ -399,6 +399,10 @@ core/deps.py      构造 UserContext
 ```
 上传新版本
     ↓
+① 先插 documents 行，status = indexing（在同一 SQLite 事务内分配 version）
+    ↓
+② 索引写完后 → status = active        ← 这一步才是「完成」标记
+    ↓
 同组内 version 递增，**不改动旧版状态**
 
         管理员手动操作
@@ -408,8 +412,16 @@ core/deps.py      构造 UserContext
 
 | 状态 | 含义 | 参与检索 |
 |---|---|---|
+| `indexing` | 正在索引，**尚未完成** | ❌ |
 | `active` | 正常 | ✅ 需同时满足下方「当前生效」解析 |
 | `disabled` | 管理员手动停用 | ❌ |
+
+> **`indexing` 是解开「写入顺序」与「失败回滚」冲突的关键**（原方案缺这个态，三条约定无法同时成立）：
+>
+> - `documents` 行**必须在写向量库之前插入**——否则并发上传同一 `doc_group_id` 时相互看不见对方未提交的行，事务内分配的 version 会撞车。配套加 `UNIQUE(doc_group_id, version)` 兜底。
+> - 行有了，`document_id` 就存在了 → **失败时才能「按 `document_id` 反向删除三个存储」**（原方案要求回填 `document_id`，但失败时它还是 NULL，回滚无从下手）。
+> - 半成品文档不会污染检索：`indexing` 不满足折叠规则里的 `status = "active"`，**自动被排除**——原方案下它会被折叠当成"现行版最大 version"，在上传窗口内把旧版挤掉。
+> - 「SQLite 最后写」的正确含义是 **「最后把 `status` 翻成 `active`」**，不是「最后才插行」。
 
 **检索期如何解析「当前生效版本」**（关键设计）
 
@@ -428,11 +440,29 @@ core/deps.py      构造 UserContext
 - **传错文件**：删掉新版即可，旧版自动恢复生效，不用手工 enable
 - 管理端的「历史版本」列表仍按 version 正常展示
 
+> ⚠️ **同一个机制带来一个必须说明的语义：停用现行版会让上一版「复活」。**
+>
+> 折叠规则取的是「组内 `status="active"` 且 `effective_date ≤ 今天` 中**最大的 version**」。所以管理员**停用** v5 后，v5 不再满足 `active`，**组内最大 version 就变成 v4** —— 已废止的旧政策会当作「当前生效」被检索并返回。
+>
+> 这与「删掉新版 → 旧版恢复」是同一机制的两面，但**操作者的预期通常不是这样**：管理员停用 v5 多半想表达「这条制度先关掉」，而不是「回退到 v4」。
+>
+> **本方案的处理**：保留该语义（与删除路径一致，不自相矛盾），但**管理端在停用「当前生效版本」时必须显式提示**「停用后上一版将恢复生效」。
+>
+> **明确不做**：组级停用（让整套制度整体退出检索）本轮不做——它需要新增组级状态字段与管理入口。若日后发现"停用即回退"在实际使用中造成困扰，再评估。
+
 **实现方式**：不要在 Chroma 里表达"同组最大版本"（它做不到），改为**两段式**——
 
-1. Chroma 检索（带 `status` / `effective_date` / ACL 过滤，含过采样）
+1. 两路检索（Chroma 与 BM25）各自带 `status` / `effective_date` / ACL 过滤，含过采样
 2. **拿候选里的 `doc_group_id` 回查 SQLite**，得到每组「active 且 effective_date ≤ 今天」的 `max(version)`
-3. **丢弃 version ≠ 该最大值的 chunk**，再取最终返回的 5 条（见下方术语）
+3. **丢弃 version ≠ 该最大值的 chunk**，剩下的**候选池**进入 RRF 融合与精排
+
+> **折叠作用于「两路候选的并集」，不是只作用于 Chroma 那一路**。BM25 对措辞雷同的旧版（v4）命中率天然更高，若它不做折叠，旧版会以高 RRF 分进入候选并可能被返回 —— 正是亮点①要防的场景。BM25 侧经「下标 → 映射表」回查时同样要取到 `doc_group_id` / `version` 参与组内最大值判定。
+
+> ⚠️ **折叠的产物是「候选池」，不是「最终结果」**。完整链路固定为：
+>
+> **召回 → 版本折叠 → RRF 融合 → 精排 → Top-5 进 `build_context`**
+>
+> 原表述「丢弃后**再取最终返回的 5 条**」读起来像折叠直接产出最终结果、跳过精排。按那种读法施工会**取消精排**（Top-5 退化成相似度排序），或把折叠挪到精排之后 —— 后者更糟：已废止的 v4 可能先被精排选中，再被折叠丢弃，最终凑不满 5 条，且旧版有机会漏出。
 
 > ⚠️ **第 2 步必须回查 SQLite，不能在召回集内取最大。** 若现行版 v5 的措辞与 query 不相似、而已废止的 v4 相似，Top-N 里只有 v4——在召回集内折叠会把 **v4 当成现行版本**返回，用户拿到已废止的政策，界面还按「当前生效」展示。**这会让亮点①的版本隔离彻底失效。**
 
@@ -581,7 +611,7 @@ Chroma 的 chunk metadata **必须冗余存一份过滤字段**：
 document_id, doc_group_id, status, effective_date, version,
 visibility, vis_admin, vis_staff,
 current_chapter, chapter_level,
-chunk_index, char_start, char_end,     ← 原文回跳必需
+chunk_id, chunk_index, char_start, char_end,   ← 原文回跳必需
 page, image_paths
 ```
 
@@ -594,6 +624,14 @@ page, image_paths
 > **`version` 必须冗余进 Chroma**——应用层的"同组取最大版本"折叠需要它（见 3.3.1）。
 
 > **`chunk_index` / `char_start` / `char_end` 是亮点③的落地基础**，缺了它们，「字符偏移」无从谈起。
+
+> **`chunk_id` 的生成规则与稳定性**（原方案被四处在用却从未定义）：**`chunk_id = f"{document_id}:{chunk_index}"`**，进 Chroma metadata。
+>
+> 它必须稳定且全局唯一——`Citation.chunk_id`、RRF 融合去重（`chunk_id` 是去重键）、`qa_logs.retrieved_chunk_ids` / `reranked_chunk_ids`、`eval_cases.expected_chunk_ids` 全靠它。
+>
+> **BM25 的映射表必须是「下标 → `chunk_id`」，不能只到 `document_id`**：只到文档粒度的话，① 同一 chunk 被两路命中时无法去重（违背 RRF 去重键的设计）；② BM25 侧命中拿不到 `char_start` / `char_end` / `page`，引用与原文回跳就缺了定位信息。
+>
+> **只加 `chunk_id` 进 metadata，不引入独立的 `chunks` 表**：chunk 正文与 metadata 都在向量库里，SQLite 侧不需要第二份（避免两处不同步）。
 >
 > **偏移的参照系必须明确**：`char_start/char_end` 是相对 `documents.normalized_text_path` 那份**清洗后的规范化文本**的偏移，**不是原始 PDF 的字节偏移**（清洗会删除页眉页脚，两者对不上）。前端跳转时先取规范化文本定位，再映射到阅读器。
 >
@@ -743,6 +781,7 @@ class RAGState(TypedDict):
     history: list[Message]
     resolved_query: str
     skipped_resolve: bool        # 是否跳过了消解（供观测）
+    resolve_unresolved: bool     # 指代无法消解 —— clarify 的触发依据（见节点 1 / 2）
     route: str                   # chat | clarify | knowledge
     route_source: str            # rule | llm —— 规则命中率观测用（见节点 2）
     last_route: str              # 上一轮路由结果，用于多轮分类稳定（见节点 2）
@@ -753,12 +792,14 @@ class RAGState(TypedDict):
     retrieval_queries: list[RetrievalQuery]   # 三类检索查询，见 3.5.3 节点 5
     candidates: list[Chunk]      # RRF 融合后
     reranked: list[Chunk]        # 精排后
+    evidence: list[Chunk]        # ★ 编号清单 —— 顺序即 prompt 里的 [1]…[N]（见下）
     retrieval_confidence: float | None  # 仅观测用，不参与判定；降级时为 None（见节点 7）
     rerank_degraded: bool        # 精排是否降级（见节点 7）
 
     # 生成
     context: str
     answer: str
+    decision: str                # ★ ANSWERED | REFUSED_NO_EVIDENCE —— 条件边读它
     citations: list[Citation]
     verify_report: VerifyReport    # 引用校验报告（见节点 10）
     refused: bool
@@ -767,6 +808,29 @@ class RAGState(TypedDict):
     # 可观测
     trace: list[NodeTrace]       # 各节点耗时、召回数、降级事件
 ```
+
+**两个带 ★ 的字段是「编号 → 证据」的唯一载体，缺了会导致引用错位**
+
+| 字段 | 谁写 | 谁读 | 为什么必须有 |
+|---|---|---|---|
+| **`evidence`** | 节点 8（`build_context`） | 节点 9 按它编号；节点 10 按它映射 `[n]`、判越界 | **`reranked` 不能替代它**：节点 8 是「按文档分组 → 组内按 `chunk_index` 排序」后才拼 context，**prompt 里的顺序 ≠ `reranked` 的顺序**。拿 `reranked` 做映射，`[1]` 会指向错的 chunk —— 引用错位比漏引用更糟 |
+| **`decision`** | 节点 9（`generate`） | 条件边（`ANSWERED` → `cite`；`REFUSED_NO_EVIDENCE` → `END`） | 原方案没有这个状态字段，条件边没有判定依据；且 REFUSED 路径由谁写 `refused` / `refusal_reason` 无处安放 —— 而 SSE 的 `refused` 事件与 `qa_logs.is_refused` 都依赖它 |
+
+> **编号在「裁剪之后」分配**：节点 8 若按 token 预算裁剪（从低分片段裁），**必须先裁完再编号**。否则裁剪掉中间某条会让编号出现空洞（有 `[1]` `[3]` 没有 `[2]`），而模型仍会照抄编号。
+>
+> **越界判定的上界是 `len(evidence)`**，不是 `len(candidates)`。`candidates` 是 RRF 融合后的全量（可达 40 条），拿它做上界会让「只有 5 条证据却写了 `[7]`」这类真越界**漏检**。
+
+**`NodeTrace` 定义**（原方案只引用未定义）：
+
+```python
+class NodeTrace(TypedDict):
+    node: str            # 节点名
+    ms: int              # 耗时
+    recalled: int        # 召回条数（无检索的节点为 0）
+    degraded: str | None # 降级类型，未降级为 None（与 degradation_events.kind 同词表）
+```
+
+> **`trace` 的累积方式必须在实现时明确**：LangGraph 的 `TypedDict` 状态下，节点返回 `trace` 是**覆盖**语义。多节点追加需要 `Annotated[list[NodeTrace], operator.add]` 之类的 reducer，或改由统一回调收集后写 `qa_logs.node_timings`。**不写 reducer 的话只会留下最后一个节点的记录**。
 
 **历史（`history`）的来源与清洗规则**
 
@@ -1063,6 +1127,8 @@ facets        question
 ```
 
 **输出结构：facets + question**
+
+> ⚠️ **字段名在三个层面不同，别混**：模型输出的 JSON 字段叫 **`facets`**（本节点）；写进状态与 SSE 载荷时叫 **`clarify_facets`**（见 `RAGState` 与 3.7.2 的 `route` 事件）。前端读的是后者——**写成 `evt.facets` 会恒为 `undefined`，澄清选项永远渲染不出来**。
 
 澄清不能是泛泛的「请详细说明」，而要**先产出结构化的候选意图，再据此提问**：
 
@@ -1623,6 +1689,20 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
                                         pptx 本轮降级为下载——详见 4.2.2.6）
 ```
 
+**`POST /api/chat/stream` 请求体**（原方案只写了路径、未定义字段）
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `query` | ✓ | 用户问题 |
+| `session_id` | | **不传即新建会话**；传则续接已有会话 |
+| `request_id` | ✓ | 客户端生成，用于 3.2.4 的同会话幂等去重 |
+
+> **会话创建只有一条路径**：前端点「新建对话」只是清空本地 `session_id`，**不调 `POST /api/conversations`**——否则会话列表里会堆积没有消息的空会话。`POST /api/conversations` 保留给「先建空会话再改名」这类场景，正常问答流程不走它。
+>
+> **`session_created` 的触发条件**：仅当请求**未带** `session_id` 且服务端新建成功时下发；续接已有会话**不发**该事件。
+>
+> ⚠️ **请求体里没有 `user_id`**——一律从 JWT 取（附录 A 第 2 条）。
+
 **SSE 事件协议**
 
 | 事件 | 载荷 | 说明 |
@@ -1635,9 +1715,17 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
 | `token` | `text` | 逐字回答 |
 | `citations` | `Citation[]` | 引用列表 |
 | `verify` | `VerifyReport` | 后校验结果；前端据此标注无依据句 |
-| `refused` | `reason` | 触发拒答 |
-| `done` | `latency_ms` | 结束 |
-| `error` | `code, message` | 异常 |
+| `refused` | `reason, text, hint?` | 触发拒答。`reason` 取值见 5.2；**`text` 是服务端产出的固定话术**；`hint` 为可选补充提示（如「建议咨询教务处」） |
+| `done` | `latency_ms` | 结束。**`done` 是流的终止事件**（`error` 之后不再发 `done`） |
+| `error` | `code, message` | 异常。`code` 取值封闭：`timeout` / `upstream_error` / `context_length_exceeded` / `internal` |
+
+> **拒答文案由服务端产出、随 `refused` 事件下发（`text` 字段）**，前端只负责按 `reason` 决定样式。
+>
+> 原方案两处都说「服务端使用固定话术」（节点 9 / 节点 11），但 `refused` 载荷只有 `reason`，**话术没有下发通道**——前端只能自己硬编码一份。后果是：**用户当场看到的文案（前端硬编码）与刷新后从 `messages` 读回的文案（服务端入库的那份）不一致**，且节点 11 那句「可附带提示（建议咨询教务处）」永远到不了用户。
+>
+> **文案的唯一来源是服务端**；前端**不得**按 `reason` 自造文案。
+
+> **`error` 是终止事件**：发完 `error` 后**不再发 `done`**。前端收到 `error` 即停止 loading，并按 3.2.4 的约定**保留已流出的正文**（不整条清空）。
 
 > **两条拒答路径在 SSE 上如何区分**（两条路都很容易实现成不一样，必须钉死）：
 >
@@ -2059,7 +2147,7 @@ frontend/web/
 | **后校验标注** | 收到 `verify` 事件 → 把 `uncited_claims` / `invalid_markers` 对应的句子**置灰并加提示**（文案「未在资料中找到对应依据，建议核对」）。**完整实现方案见 4.2.1** |
 | 拒答展示 | 收到 `refused` → 差异化样式 + 提示补充咨询渠道 |
 | 断线处理 | 提示「连接中断，请重新发送」——**不自动重连**（SSE 无 event id/重放，重连拿不到内容，见 3.2.4） |
-| 澄清交互 | 收到 `route=clarify` → 反问作为助手消息展示，**`facets` 渲染为可点选项**，点击即作为下一轮输入发出 |
+| 澄清交互 | 收到 `route=clarify` → 反问作为助手消息展示，**`clarify_facets` 渲染为可点选项**，点击即作为下一轮输入发出 |
 
 ### 4.2.1 无依据句标注（置灰）的实现方案
 
@@ -2733,12 +2821,26 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 | # | 里程碑 | 交付内容 | 验收标准 |
 |---|---|---|---|
-| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、最简 React 聊天页 | **端到端跑通**：传文档 → 提问 → 流式作答 + 引用 |
-| **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样 | 检索指标有基线数据 |
-| **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | 多轮指代场景通过 |
-| **M3** | 生成与引用 | 上下文组装、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 点击引用可跳转原文；校验能标出无依据句 |
-| **M4** | React 两端 | User 端完整、管理端、仪表盘 | 全功能可用 |
-| **M5** | 评测与打磨 | **10–15 题拒答校准小集**、测试集构建（**分两阶段**）、ragas 接入、消融实验、测试补齐、**可观测性（OTel 接入 + trace_id 贯通 + 告警阈值标定，见 3.2.3）**、部署配置 | 消融实验表产出 + 测试通过 + 拒答四项指标有基线 + **按 trace_id 能还原单次请求全链路** |
+| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、**认证骨架（登录页 + JWT 签发/校验 + 路由守卫，见 3.2.2 / 3.7.1）**、**SSE 协议按 3.7.2 钉死（含 `Citation` / `VerifyReport` 的载荷 schema，见下）**、**加载层按附录 B + E.4/E.8 迁移并修复**、最简 React 聊天页 | **端到端跑通**：登录 → 传文档 → 提问 → 流式作答 + 引用 |
+| **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样、**刷新令牌与登出语义（见 3.7.1）** | ① 检索指标有基线数据（**指标定义见下**）② **ACL 隔离测试通过**：student 账号检索不到 `vis_admin` 的文档 |
+| **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | **多轮指代题通过**（题库来源见下） |
+| **M3** | 生成与引用 | 上下文组装（含 3.8 的预算 / 滚动压缩 / 四道防线）、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 点击引用可跳转原文；校验能标出无依据句 |
+| **M4** | React 两端 | **User 端补全（登录、会话列表、流式渲染与长列表 —— 即 4.2.4）+ 管理端 + 仪表盘** | 全功能可用 |
+| **M5** | 评测与打磨 | **10–15 题拒答校准小集**、测试集构建（**分两阶段**）、ragas 接入、消融实验、测试补齐、**可观测性（OTel 接入 + trace_id 贯通 + 告警阈值标定，见 3.2.3）**、CI（pytest + 契约 + 评测回归，见第六章）、部署配置、**扫描件与乱码字体 PDF 回归样本各一份（见下）** | 消融实验表产出 + 测试通过 + 拒答四项指标有基线 + **按 trace_id 能还原单次请求全链路** |
+
+**三个验收口径的补充定义**（否则上述验收项不可自证）
+
+| 项 | 定义 |
+|---|---|
+| **M1 的「检索指标」** | 固定一组**不少于 20 道的文号 / 专有名词题**（直接验证 BM25 的价值），跑 `Recall@5` 与 `MRR`，**记录数值即算达标**——M1 只要求"有基线"，不要求达到某阈值（阈值在 M5 用完整测试集标定） |
+| **M2 的「多轮指代题」** | 从 5.1 第一阶段题库（60–80 题）里的多轮指代型题目取用。**该题库必须在 M2 开始前建立**——不能等 M5，否则 M2 无法自证 |
+| **M5 的「回归样本」** | 需要**扫描件 PDF** 与**子集字体 / 乱码字体 PDF** 各一份。当前语料 95 页全是文字层完好的 PDF、扫描页为 0，**造不出**这两类样本，第二路分支与质量闸门会是一段从没跑过的代码（见 E.1 / E.9） |
+
+> **M0 的「钉死 SSE 协议」必须包含载荷 schema**，不只是事件名。原表述只说了「事件表」，而 `Citation` / `VerifyReport` 的字段级结构在节点 10（归 M3）——若 M0 只冻结事件名、任简实现自造载荷，M1 的前端照它写，M3 引用统一时结构一变就要返工，**正是"钉死协议"想避免的事**。
+>
+> **认证必须在 M0/M1 落地，不能拖到 M4**：M0 的「最简聊天页」在「所有接口要 JWT」（3.2.2）的前提下**无法发起请求**；M1 的 ACL 依赖「角色只能来自 JWT」，没有身份来源就只能拼一个 stub，M4 再返工。
+>
+> **附录 B + E.4/E.8 的施工项必须在 M0/M1 显式列入验收**：附录 B 自己写明加载层「会大量复用……必须在搬运时同步修复」，E.8.8 还给了三批顺序。若只写「传文档 → 提问」作为验收，这 13 条 B 修复与 7 条 E.8 施工项（竖排反转、质量闸门、按页限定 MinerU、缺失页清单等）会原样漏掉，而 M0 的验收根本测不出。
 
 **顺序理由**：M1 排在检索优先，因为检索质量是整个系统的天花板——检索不对，后续提示词优化无从发挥。且 M1 结束即可产出第一批可量化数据。
 
@@ -2746,13 +2848,17 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 **前端与后端并行推进**（决策）——前端**不等后端全量完成**。M0 起就有最简 React 聊天页与后端同步演进，每个后端里程碑落地时同步补上对应界面：
 
-| 后端里程碑落地 | 前端同步补 |
+| 里程碑 | 前端同步补 |
 |---|---|
-| M1 检索做对 | 引用展示：三层入口 + 聚合去重 + 图片（4.2.3） |
-| M2 查询理解 | 消解提示（`resolved`）与澄清交互（`route=clarify` 的 `facets`） |
-| M3 生成与引用 | 无依据句标注（4.2.1）与原文回跳（4.2.2） |
+| **M0** 骨架闭环 | 登录页 + 最简聊天页（能发 `POST /api/chat/stream`、渲染 `token` 流） |
+| **M1** 检索做对 | 引用展示：三层入口 + 聚合去重（4.2.3） |
+| **M2** 查询理解 | 消解提示（`resolved`）与澄清交互（`route=clarify` 的 `clarify_facets`） |
+| **M3** 生成与引用 | 无依据句标注（4.2.1）与原文回跳（4.2.2） |
+| **M4** React 两端 | **4.2.4（流式渲染 / 检索过程反馈 / 长列表）+ 会话列表 + 管理端（4.3）+ 仪表盘（4.4）** |
 
-> 因此 **M4 的定位是「补齐剩余页面」**（管理端 4.3、仪表盘 4.4），不是「前端从零开始」。
+> 因此 **M4 的定位是「补齐剩余页面」**——4.2.4（流式渲染 / 检索过程反馈 / 长列表）+ 会话列表 + 管理端（4.3）+ 仪表盘（4.4），**不含已在 M0–M3 同步做完的部分**（登录、最简聊天、引用展示、消解与澄清交互、置灰标注、原文回跳）。
+>
+> 原 M4 行写「User 端**完整**」与本注的「补齐剩余页面」是两种排期读法——已统一为后者。
 >
 > 并行的前提是 **M0 就把 SSE 协议钉死**（3.7.2 的事件表）——协议一改，前端已写的部分就要返工。新增事件（如 4.2.4.2 的 `stage`）应当是**追加**而非改动既有事件。
 
