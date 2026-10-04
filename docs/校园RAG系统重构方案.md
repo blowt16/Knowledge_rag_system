@@ -406,6 +406,22 @@ core/deps.py      构造 UserContext
 
 > 单独建表而不是塞进 `qa_logs.node_timings`：后者是**节点耗时**字段，把降级事件混进去会让仪表盘解析要特判。独立表还能直接 `COUNT(*) GROUP BY kind` 出"降级次数"。
 
+**`refusal_annotations`** — 拒答标注（管理端「拒答分析」的写入口，见 4.3.1.3）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| qa_log_id | TEXT FK | 关联 `qa_logs.id`，**唯一**（一条拒答记录只保留最新一次标注） |
+| suggested_document_id | TEXT FK | 建议补充的文档，可空 |
+| note | TEXT | 备注，可空 |
+| annotated_by | TEXT | 操作人（`users.id`） |
+| created_at | TEXT | |
+| updated_at | TEXT | |
+
+> 单独建表而不是给 `qa_logs` 加列：标注是**稀疏**的运维动作（绝大多数拒答不会被标注），生命周期也与 QA 日志不同——日志是只增的观测数据，标注是可反复修改的运维状态。理由同 `degradation_events`。
+>
+> `suggested_document_id` 与 `note` **至少填一个**，由接口层校验（见 4.3.1.3）。
+
 **`eval_cases`** — 测试集
 
 | 字段 | 类型 | 说明 |
@@ -1502,9 +1518,10 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
 文档：
   POST   /api/admin/documents/upload
   GET    /api/admin/documents/upload/{task_id}/stream   SSE 进度
-  GET    /api/admin/documents
+  GET    /api/admin/documents?status=&visibility=&q=&page=&page_size=
+                                                        ↑ 筛选参数见 4.3.1.1
   GET    /api/admin/documents/{group_id}/versions
-  PATCH  /api/admin/documents/{id}
+  PATCH  /api/admin/documents/{id}      ← 改可见范围/生效日期须重新索引，见 4.3.1.2
   POST   /api/admin/documents/{id}/disable
   POST   /api/admin/documents/{id}/enable
   DELETE /api/admin/documents/{id}
@@ -1513,13 +1530,18 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
   GET /api/admin/stats/overview
   GET /api/admin/stats/trend?days=30
   GET /api/admin/stats/retrieval
-  GET /api/admin/stats/refusals
+  GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
   GET /api/admin/stats/hot-questions
+
+拒答分析：
+  GET  /api/admin/refusals?page=&page_size=    分页明细，含 qa_logs.id
+  POST /api/admin/refusals/{log_id}/annotate   写标注，请求体见 4.3.1.3
 
 评测：
   POST /api/admin/eval/run
   GET  /api/admin/eval/runs
   GET  /api/admin/eval/runs/{id}
+  GET  /api/admin/eval/compare?run_ids=a,b,c   消融对比矩阵，见 4.3.1.4
 ```
 
 ---
@@ -2094,10 +2116,103 @@ PDF 之外（docx / pptx / md / txt）**跳文档预览页**，不走抽屉的 P
 
 | 页面 | 功能 |
 |---|---|
-| **文档管理** | 列表（筛选：状态/可见范围/关键词）、单文件与 ZIP 上传（SSE 进度条）、删除、启用/停用、编辑可见范围与生效日期 |
+| **文档管理** | 列表（筛选：状态/可见范围/关键词，参数见 4.3.1.1）、单文件与 ZIP 上传（SSE 进度条）、删除、启用/停用、编辑可见范围与生效日期（见 4.3.1.2） |
 | **版本管理** | 按 `doc_group_id` 折叠展示，展开显示历次版本；当前生效版本高亮 |
-| **拒答分析** | 拒答问题 Top N 列表 + 时间分布；标注"建议补充该文档" |
-| **评测** | 触发评测、历史记录、消融实验对比表（**亮点②的展示窗口**） |
+| **拒答分析** | 拒答问题明细 + 时间分布；标注「建议补充该文档」（接口见 4.3.1.3） |
+| **评测** | 触发评测、历史记录、消融实验对比表（**亮点②的展示窗口**，数据源见 4.3.1.4） |
+
+### 4.3.1 筛选、可见范围与三处接口的字段级定义
+
+> 上表里「筛选：状态/可见范围/关键词」「标注『建议补充该文档』」「消融实验对比表」三处原先只有功能描述、没有字段与接口定义。本节补齐，接口清单以 3.7.3 为准。
+
+#### 4.3.1.1 文档列表的筛选参数
+
+`GET /api/admin/documents`：
+
+| 参数 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `status` | `active` / `disabled` / `all` | `all` | 对应 `documents.status` |
+| `visibility` | `public` / `restricted` / `all` | `all` | 对应 `documents.visibility`（取值见 3.3.2） |
+| `q` | 关键词 | 空 | 模糊匹配文档标题 / 原始文件名 |
+| `page` | ≥ 1 | 1 | 分页 |
+| `page_size` | 1–100 | 20 | 分页上限与 3.7.1 的会话列表一致 |
+
+#### 4.3.1.2 可见范围选择器
+
+数据模型是「一个枚举 + 一个角色列表」（见 3.3.2）：`documents.visibility` 取 `public` / `restricted`；`documents.visible_roles` 是 TEXT(JSON)，**管理端写入的源**，进 Chroma 时展开成 `vis_<角色>` 布尔字段。
+
+```
+可见范围   ( • ) 公开 —— 所有登录用户可见
+           (   ) 受限 —— 仅下列角色可见
+                  ☑ 管理员(admin)   ☑ 教职工(staff)   ☐ 学生(student)
+```
+
+- 选「公开」→ `visibility = "public"`，`visible_roles` 不参与检索过滤（过滤表达式见 3.3.3）
+- 选「受限」→ `visibility = "restricted"`，**至少勾选一个角色**，写入 `visible_roles`
+- **角色清单来自 `users.role` 的取值集合**，不在表单里硬编码
+
+> ⚠️ **修改可见范围或生效日期必须触发重新索引，界面必须显式告知。**
+>
+> `visibility` / `effective_date` 冗余在 Chroma 的 chunk metadata 里（3.3.2），改 SQLite **不会**自动同步；而 Chroma 无法 join SQLite（3.3.2 末）。所以保存后要**重写该文档全部 chunk 的 metadata**（重新嵌入不是必需的，metadata 必须重写）。
+>
+> 这意味着这一步**不是"改完即生效"**——期间该文档的检索结果可能不一致。UI 应提示耗时并给出进度，不能做成静默的即时保存。
+>
+> 依据：附录 D 已写明「上传时就要设好 `effective_date` 和 `visibility`……**事后补改需要重新索引**」。
+>
+> 另：新增角色（如 `teacher`）需同步在 Chroma 加 `vis_teacher` 字段——这是该编码的已知代价（3.3.2）。
+
+#### 4.3.1.3 拒答标注（写接口）
+
+`GET /api/admin/stats/refusals` 是**聚合**（饼图 / Top N 计数），**不含可标注的记录标识**；而标注需要**明细**，因此有独立的一组接口：
+
+```
+GET  /api/admin/refusals?page=&page_size=   分页明细
+POST /api/admin/refusals/{log_id}/annotate  写标注
+```
+
+**为什么不砍掉这个交互**：3.5 已把「拒答数据的二次价值」定为闭环叙事——「学生问了但知识库答不上来」的清单反哺知识库补文档。只读列表形不成闭环。
+
+明细字段：
+
+| 字段 | 说明 |
+|---|---|
+| `id` | `qa_logs.id`，即标注接口的路径参数 |
+| `question` | 原始问题 |
+| `refusal_reason` | 取值见 5.2 的「拒答原因取值表」 |
+| `created_at` | |
+| `annotation` | 标注对象；未标注时为 `null` |
+
+`POST /api/admin/refusals/{log_id}/annotate` 请求体：
+
+```json
+{ "suggested_document_id": "…",   // 建议补充的文档；可空
+  "note": "…" }                    // 备注；可空
+```
+
+> 两个字段**至少填一个**，否则返回 400。
+>
+> 标注落在新表 **`refusal_annotations`**（见 3.3.1），沿用 `degradation_events` 的独立表先例。
+
+#### 4.3.1.4 消融对比表的数据源
+
+**决定：新增 `GET /api/admin/eval/compare?run_ids=a,b,c`，不由前端拼。**
+
+理由：
+
+- 对比表的**行是配置变体、列是指标**；指标全集由服务端掌握。不同 run 可能缺指标、指标名可能演进，前端拼会把这些逻辑复制到前端
+- `eval_runs.config` 是消融对照的关键（3.3.1），服务端一次返回**配置 + 对齐后的指标矩阵**，避免 N 次请求
+
+返回形状（示意）：
+
+```json
+{ "metrics": ["faithfulness", "answer_relevancy", "context_precision", "context_recall"],
+  "runs": [
+    { "run_id": "…", "config_label": "完整链路", "config": {}, "values": {} },
+    { "run_id": "…", "config_label": "关闭 BM25",  "config": {}, "values": {} }
+  ] }
+```
+
+> `config_label` 由服务端从 `eval_runs.config` 派生，保证同一消融项在各次运行间的命名一致——前端自己从 config 拼标签会因开关命名演进而不一致。
 
 ### 4.4 仪表盘
 
@@ -2106,7 +2221,7 @@ PDF 之外（docx / pptx / md / txt）**跳文档预览页**，不走抽屉的 P
 | 核心指标卡 | `stats/overview` | 数字卡：文档数 / chunk 数 / 问答量 / 拒答率 |
 | 问答量趋势 | `stats/trend` | 折线图（近 30 天） |
 | 检索性能 | `stats/retrieval` | 节点耗时分布柱状图 + 降级次数 |
-| 拒答分布 | `stats/refusals` | 列表 + 饼图 |
+| 拒答分布 | `stats/refusals`（**仅聚合**） | 饼图 + Top N 计数；明细列表由 `GET /api/admin/refusals` 提供（见 4.3.1.3） |
 | 高频问题 | `stats/hot-questions` | 横向柱状图 |
 
 ---
