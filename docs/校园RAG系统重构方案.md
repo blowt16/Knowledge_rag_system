@@ -212,7 +212,7 @@ HTTP 请求
    ↓
 Authorization: Bearer <JWT>
    ↓
-core/security.py  解码校验
+core/security.py  解码校验 + 比对 token_version
    ↓
 core/deps.py      构造 UserContext
    ↓
@@ -224,10 +224,12 @@ core/deps.py      构造 UserContext
 | 角色 | 权限 |
 |---|---|
 | `student` | User 端问答、查看自己的会话 |
-| `staff` | 同 student |
-| `admin` | 全部 + 管理端所有操作 |
+| `staff` | 同 student（**检索期可见范围不同**——由 `visible_roles` 决定，见 3.3.2 / 3.3.3） |
+| `admin` | 管理端所有操作；**检索期同样受 ACL 公式约束**（见 3.3.3） |
 
 **关键约束**：角色与身份**只能来自 JWT**，任何接口都不得接受客户端传入的 `user_id`。这是现有项目最大的安全缺陷（现在传谁的 id 就能读谁的资料）。
+
+**`token_version` 的校验**（撤销机制，见 3.7.1）：JWT 载荷带 `tv` 声明，`security.py` 解码后**与 `users.token_version` 比对**——不等即拒（401）。这一步是**每次请求一次查库**；`users` 表小、且按 `id` 主键查，开销可忽略。
 
 #### 3.2.3 可观测性
 
@@ -434,6 +436,7 @@ OTel Collector（单实例）
 | username | TEXT UNIQUE | |
 | password_hash | TEXT | bcrypt |
 | role | TEXT | student / staff / admin |
+| **token_version** | INTEGER | **令牌版本，默认 0**；自增即让该用户所有已签发令牌失效（见 3.7.1） |
 | created_at | DATETIME | |
 
 **`documents`** — 核心表
@@ -1739,6 +1742,27 @@ GET  /api/auth/me
 > **认证做到「完整」**（决策）：JWT + 刷新令牌 + 角色守卫。这是决策 #4「真实 ACL、检索期数据隔离」的地基——角色来自 JWT，不是客户端传参（见附录 A 第 2 条）。
 >
 > ⚠️ 上表原先**只有签发 `refresh_token`、没有使用它的接口**，本方案已补 `POST /api/auth/refresh`。前端需要在 `access_token` 过期时静默续期，不能把用户踢回登录页。
+
+**令牌生命周期与撤销（口径必须钉死）**
+
+**撤销机制用 `users.token_version`**（字段见 3.3.1）：JWT 载荷带 `tv` 声明，`security.py` 解码后与库里的 `token_version` 比对，**不等即 401**。
+
+| 接口 | 语义 |
+|---|---|
+| `POST /api/auth/login` | 签发 `access_token`（**15 分钟**）+ `refresh_token`（**7 天**），两者都带当前 `tv` |
+| `POST /api/auth/refresh` | 校验 `refresh_token` 的签名 + 未过期 + **`tv` 匹配**；通过后签发**新的 access_token**（`refresh_token` **原样返回、不轮换**） |
+| `POST /api/auth/logout` | **`token_version += 1`** → 该用户**所有已签发令牌立即失效**（access 与 refresh 都失效） |
+| `GET /api/auth/me` | 常规校验 |
+
+> **为什么 `refresh_token` 不轮换**：轮换（每次刷新换新的 refresh_token 并作废旧的）能防重放，但需要记录"哪个 refresh_token 已被用过"——那正是 `jti` 黑名单要解决的问题，本轮不引入（见下）。**用 `token_version` 做粗粒度撤销 + 短 TTL 的 access_token**，是复杂度与安全性的平衡点。
+>
+> **粒度是「用户级」**：登出会让该用户**所有设备**的令牌失效。这对校园问答场景可接受（学生一般单设备），且比"登出后令牌还能用"安全得多。
+>
+> **改密同样触发撤销**：修改密码时一并 `token_version += 1`。
+>
+> **明确不做**：`jti` 黑名单（能精确撤销单个令牌，但需要新表 + 定期清理 + 每请求查表）。若日后要多设备独立登出，再引入。
+
+> **`token_version` 的唯一代价**：每次请求多一次 `users` 表主键查询。表小、索引命中，开销可忽略——**这笔账换来的是"登出真的能登出"**。
 
 #### 3.7.2 User 端
 
