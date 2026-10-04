@@ -137,6 +137,8 @@
 backend/
 ├── app/
 │   ├── main.py                  FastAPI 入口、中间件、路由注册
+│   ├── cli.py                   ★ 引导脚本：init-db（建表）/ create-admin
+│   │                            （建首个管理员）——见附录 D.4。幂等，可重跑
 │   ├── core/
 │   │   ├── config.py            配置加载（YAML + .env，禁止硬编码密钥）
 │   │   ├── logging.py           结构化日志（JSON + trace_id 注入 + 脱敏，见 3.2.3.2）
@@ -146,7 +148,8 @@ backend/
 │   │   ├── exceptions.py        统一异常 + 全局处理
 │   │   └── metrics.py           业务指标落 SQLite + 运行指标 OTLP 导出（见 3.2.3.3）
 │   ├── api/
-│   │   ├── auth.py
+│   │   ├── auth.py              login / refresh / logout / me（见 3.7.1）
+│   │   ├── users.py             用户管理（/api/admin/users/*，见 3.7.3）
 │   │   ├── chat.py              User 端问答（SSE）
 │   │   ├── conversations.py
 │   │   ├── documents.py         管理端文档（/api/admin/documents/*）
@@ -1898,6 +1901,14 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
   GET /api/admin/stats/hot-questions     ← 业务指标，读 SQLite
 
+用户管理：
+  GET    /api/admin/users?role=&page=&page_size=   列表
+  POST   /api/admin/users                          建号（username / password / role）
+  PATCH  /api/admin/users/{id}                     改角色 / 停用
+  POST   /api/admin/users/{id}/reset-password      重置口令
+                                                    ← 三处写操作都要令
+                                                      token_version += 1（见 3.7.1）
+
 拒答分析：
   GET  /api/admin/refusals?page=&page_size=    分页明细，含 qa_logs.id
   POST /api/admin/refusals/{log_id}/annotate   写标注，请求体见 4.3.1.3
@@ -2724,6 +2735,7 @@ code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 |---|---|
 | **文档管理** | 列表（筛选：状态/可见范围/关键词，参数见 4.3.1.1）、单文件与 ZIP 上传（SSE 进度条）、删除、启用/停用、编辑可见范围与生效日期（见 4.3.1.2）、**分块预览**（见 4.3.2） |
 | **版本管理** | 按 `doc_group_id` 折叠展示，展开显示历次版本；当前生效版本高亮 |
+| **用户管理** | 用户列表（按角色筛选）、建号、改角色 / 停用、重置口令。**首个管理员由 CLI 种子脚本创建**（见附录 D.4），本页负责日常账号 |
 | **拒答分析** | 拒答问题明细 + 时间分布；标注「建议补充该文档」（接口见 4.3.1.3） |
 | **评测** | 触发评测、历史记录、消融实验对比表（**亮点②的展示窗口**，数据源见 4.3.1.4） |
 
@@ -3756,42 +3768,61 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 ### D.3 清理顺序
 
 ```
-1. 【备份】先归档整个 data/ 与 db/ 目录
+1. 【停服】停止 FastAPI 与任何持有 Chroma 连接的进程
+   —— Chroma 是 SQLite 持久化，运行中删除会留下损坏文件；
+      同样地，运行中「备份」拿到的也可能是损坏或不一致的快照
+
+2. 【备份】归档整个 data/ 与 db/ 目录
    —— 不只是"以防万一"：旧数据是评测集标注的参照，
       也是回滚到旧系统的唯一凭据
-
-2. 【停服】停止 FastAPI 与任何持有 Chroma 连接的进程
-   —— Chroma 是 SQLite 持久化，运行中删除会留下损坏文件
 
 3. 【清向量与稀疏索引】data/chromadb/ + BM25S 索引目录
 4. 【清去重与图片】data/md5_hex_store/ + data/extracted_images/
 5. 【清 SQLite】db/*.db
-6. 【启动新系统】由迁移脚本建表（见 D.4）
+6. 【启动新系统】建表 + 建首个管理员（见 D.4）
 ```
 
-> **顺序有讲究**：先备份、再停服、最后才删。**运行中删除 Chroma 目录会留下损坏的 SQLite 文件**，新系统启动时会报错。
+> **顺序有讲究：先停服、再备份、最后才删。**
+>
+> **「停服」必须排在「备份」之前**——原顺序把备份放最前，但**运行中热拷贝 `chroma.sqlite3` 同样可能拿到不一致甚至损坏的快照**。而这份备份的用途是「评测集标注的参照 + 回滚旧系统的唯一凭据」，真回滚时读不出来就失去了意义。
 
 ---
 
 ### D.4 初始化顺序（同样有讲究）
 
 ```
-① 建管理员账号
+① 建表
+   uv run python -m app.cli init-db            # 幂等，可重复执行
       ↓
-② 上传知识文件（用管理员身份）
+② 建首个管理员
+   uv run python -m app.cli create-admin       # 读 .env 的 ADMIN_* 或交互式输入
       ↓
-③ 建普通用户（学生 / 教师）
+③ 上传知识文件（用管理员身份）
       ↓
-④ 验证检索与权限隔离
+④ 建普通用户（学生 / 教师）—— 管理端「用户管理」页
+      ↓
+⑤ 验证检索与权限隔离
 ```
 
 **为什么是这个顺序**：
 
 | 步骤 | 不能调换的原因 |
 |---|---|
-| **① 管理员必须最先** | 上传文档的接口需要 `admin` 角色；没有管理员账号，文档传不进去 |
-| **② 文档要在建用户之前** | 新 metadata 的 `visibility` / `visible_roles` 在上传时确定；先建用户也没法用它检索（库里是空的） |
-| **③ 普通用户最后** | 建完可以直接用真实文档验证权限隔离（学生搜不到受限文档） |
+| **① 建表最先** | 后面每一步都要写库 |
+| **② 管理员必须次之** | 上传文档的接口需要 `admin` 角色；没有管理员账号，文档传不进去 |
+| **③ 文档要在建用户之前** | 新 metadata 的 `visibility` / `visible_roles` 在上传时确定；先建用户也没法用它检索（库里是空的） |
+| **④ 普通用户最后** | 建完可以直接用真实文档验证权限隔离（学生搜不到受限文档） |
+
+**账号的两个创建入口，职责分开**：
+
+| 入口 | 用途 | 说明 |
+|---|---|---|
+| **CLI 种子脚本**（`app/cli.py`） | **引导用**——建表 + 首个管理员 | 一次性，幂等可重跑。口令从 `.env` 的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 读，或交互式输入 |
+| **管理端「用户管理」页** | **日常用**——建学生 / 教职工账号、重置口令、停用 | 接口 `POST /api/admin/users` 等，见 3.7.3 |
+
+> **⚠️ 首个管理员创建后，立即清掉 `.env` 里的 `ADMIN_PASSWORD`**——它只是引导用的初始口令，长期留在环境变量里等于多一份明文凭据（与附录 A 第 1 条同类问题）。
+>
+> **不需要开放注册**：本项目「不对接学校统一认证」（1.1），且内网系统开放注册无法核实身份——账号一律由管理员建。
 
 **第②步的注意**：上传时就要设好 **`effective_date`**（默认今天）和 **`visibility`**——它们决定后续检索的过滤结果，**事后补改需要重新索引**。
 
