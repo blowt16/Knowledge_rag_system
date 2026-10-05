@@ -24,9 +24,10 @@
 | reranker 模型 | ✅ `models/BAAI/` 2.2 GB 在位 | M1 精排可用 |
 | 语料 | ✅ `corpus/guet/` 10 份公文 PDF | 与附录 E.1 画像一致 |
 | **嵌入模型维度** | ✅ **1024**（`qwen3.7-text-embedding`，实调 API 返回） | 与 Chroma collection 一致，**不需要重建维度** |
-| **DeepSeek 端点** | ⚠️ **是 relay，不是官方 API**：`GET /models` 只返回 `deepseek-flash` / `deepseek-v4-pro` | 见下方偏差表 |
-| `deepseek-chat` | ✅ 实调返回 200、`finish=stop`、无 reasoning | **定为主模型** |
-| `deepseek-v4-pro` / `flash` | ⚠️ 是**推理模型**：`reasoning_content` 120 字、`content` 为空（64 token 预算下） | **不用**：会给流式解析器加一层 reasoning 分流，且首字延迟高 |
+| **DeepSeek 端点** | ⚠️ **是中转站，不是官方 API**：`GET /models` 只返回 `deepseek-flash` / `deepseek-v4-pro` | 见 §1.0 附注 |
+| `deepseek-chat` | ⚠️ 能调通，但**官方已于 2026-07-24 停止该别名**（今天 10-05，已过期） | **不用它**——随时可能失效 |
+| **`deepseek-flash` + 关思考** | ✅ **定为主模型**：`reasoning_effort:"none"` 后 `ptok=10`、`reasoning=0`，与 `deepseek-chat` 行为逐项一致 | 用中转站自己 advertise 的名字，不依赖退役别名 |
+| `deepseek-v4-pro` | ⚠️ 思考模式：`reasoning_content` 占满预算、`content` 为空 | 不用：要给流式解析器加 reasoning 分流，首字延迟也高 |
 | 缺的依赖 | ❌ `bm25s` / `asyncpg` / `PyJWT` / `pptx`（`passlib` 可选，`bcrypt` 已在） | M0 补装；`pptx` 是坏包，见 B.1.1 |
 | 已在的依赖 | ✅ `langgraph` / `opentelemetry-sdk` / `mineru` / `chromadb` / `torch` / `jieba` | 不必装 |
 | `backend/app` vs 根 `app` 同名 | ✅ 已实测：`uvicorn app.main:app --app-dir backend` 能正确解析到 `backend/app` | 布局可行，无需改名 |
@@ -39,12 +40,41 @@
 
 | # | 文档原口径 | 本次口径 | 依据 / 代价 |
 |---|---|---|---|
-| **D-1** | 主模型 **qwen3-max**（窗口 262,144 / 最大输出 65,536） | **`deepseek-chat`**（走 `.env` 的 `DEEPSEEK_BASE_URL`） | 用户拍板。**代价**：3.8.2 的硬上限 ≈196K 失效，`context_window` 改配置项默认 **65536** 并标注"未标定"——该路径文档自述"几乎不会触发"（10 轮会话 ≈15K token），故不阻塞 |
+| **D-1** | 主模型 **qwen3-max**（窗口 262,144 / 最大输出 65,536） | **`deepseek-flash` + `reasoning_effort: "none"`**（走 `.env` 的 `DEEPSEEK_BASE_URL`） | 用户拍板用 DeepSeek。**不用 `deepseek-chat` 这个别名**——理由见下方 D-1 附注。窗口按官方 V4 标称 **1,048,576**（`context_window` 做成配置项；官方标称值，**中转站未实测**）。**代价**：3.8.2 的 ≈196K 硬上限数字变了，但该路径自述"几乎不会触发"（10 轮会话 ≈15K token），不阻塞 |
 | **D-2** | 摘要模型 **qwen-turbo**（因 qwen3-max 输出 24 元/百万 token） | 摘要也用 **`deepseek-chat`** | 主模型本身已便宜，再分一个小模型没有收益。**保留 `summary_model` 配置项**，将来要换只改配置 |
 | **D-3** | token 计数用 `dashscope.tokenizers.get_tokenizer("qwen3-max")` | **仍用该分词器，但定位为"近似"** | DeepSeek 分词器不可离线获取（要下 tokenizer 文件）。中文 BPE 量级相近，且水位线本身是成本目标而非硬限。**M3 用真实数据校准**（文档实测得 1.72 字符/token，本次记为上界近似） |
 | **D-4** | 视觉模型 `qwen-vl-max` / `qwen3.7-plus` | **本轮不接入** | 两路分支已删 VL 流水线【文档 E.4.5】，无消费方 |
 
 **未偏离、必须照做的关键口径**（易被"顺手简化"掉，列出以防）：`chunk_id = f"{document_id}:{chunk_index}"`；`page_num = batch_start + page_idx`（MinerU 页码重映射）；竖排检测**必须在清洗之前**；`--workers 1`；`/images` 静态挂载**必须删除**；advisory lock **必须与事务同生共死**。
+
+### 1.0 D-1 附注：为什么用 `deepseek-flash` 而不是 `deepseek-chat`（2026-10-05 实测）
+
+**先回答"`deepseek-chat` 是不是就是官方的 flash"——是同一个模型，但别用那个别名。**
+
+| 事实 | 证据 |
+|---|---|
+| 官方 V4 的模型名是 **`deepseek-v4-pro`** / **`deepseek-v4-flash`** | 官方 API 文档 2026-04-24 V4 预览版发布公告 |
+| **`deepseek-chat` / `deepseek-reasoner` 是旧别名**，官方公告写明**于 2026-07-24 停止使用**；过渡期内分别指向 `deepseek-v4-flash` 的**非思考 / 思考模式** | 同上 |
+| **⏰ 今天已是 2026-10-05——退役日期已过** | 系统日期 |
+| **我们这个端点是中国转站，不是官方 API**：`GET /models` 只返回 `deepseek-flash` / `deepseek-v4-pro`（注意：是 `deepseek-flash`，**比官方少个 `v4`**） | 实测 |
+| **`deepseek-chat` 在中转站上 = `deepseek-flash` 的非思考模式** | 实测：同一输入下两处 `prompt_tokens` **完全一致（10 = 10）**、`reasoning_content` 均为 0 字。对照：`deepseek-flash` 默认（思考开）是 `ptok=36`、`reason=180字` |
+
+**所以风险是**：中转站还在接 `deepseek-chat`，但**官方层面这个别名已经退役**——它随时可能被中转站一起摘掉，而摘掉那天整个应用会起不来。
+
+**做法**：配置里写中转站**自己 advertise 的** `deepseek-flash`，并显式关思考：
+
+```yaml
+llm:
+  provider: deepseek
+  model: deepseek-flash          # 不写 deepseek-chat（已退役的旧别名）
+  reasoning_effort: "none"       # 关思考模式，等价于原 deepseek-chat 的行为
+  context_window: 1048576        # 官方 V4 标称 1M；中转站未实测，做成配置项
+  max_output_tokens: 8192        # 保守起步（官方标称 384K），M5 按实际需要调
+```
+
+实测确认两个关思考的写法**都生效**（任选其一，配置化）：`reasoning_effort: "none"` 与 `thinking: {"type": "disabled"}`——两者都让 `ptok` 从 36 降到 10、`reasoning_content` 归零。**`enable_thinking: false` 不生效**（`ptok` 仍 36、`reason` 仍 200 字），别用它。
+
+> ⚠️ **关思考是必须的，不是优化**：思考模式下 `content` 可能为空（64 token 预算下实测 `content=0字 / reasoning=120字`），而 3.5.3 节点 9 的流式解析器**只认 `content` 里的 JSON**。开着思考会让首字延迟翻几倍，还要在解析器里多分一路 `reasoning_content`。
 
 ---
 
@@ -183,7 +213,7 @@ D:\Knowledge_rag_system\
 | 文件 | 改动 |
 |---|---|
 | `pyproject.toml` | 追加 `asyncpg`、`bm25s`、`pyjwt`、`langgraph`（已在）、`opentelemetry-*`、`httpx`、`python-jose`→否，用 `pyjwt`；**移出** `streamlit`（附录 A #10） |
-| `.env` | 追加 `PG_*`、`ADMIN_USERNAME`/`ADMIN_PASSWORD`、`JWT_SECRET`、`JWT_ALG`、`ACCESS_TTL`、`REFRESH_TTL` |
+| `.env` | 追加 `PG_*`、`ADMIN_USERNAME`/`ADMIN_PASSWORD`、`JWT_SECRET`、`JWT_ALG`、`ACCESS_TTL`、`REFRESH_TTL`；⚠️ **`DEEPSEEK_MODEL=deepseek-chat` 是旧系统的值，新后端不读它**（模型名走 `app.yaml` 的 `deepseek-flash`，见 §1.0） |
 | `front/README.md` | 顶部加「⚠️ 本目录已停用，对接的是旧后端接口」 |
 
 ### 5.2 任务
@@ -608,7 +638,8 @@ D:\Knowledge_rag_system\
 | R1 | **工程量巨大**，M0–M5 一次做完容易在中途失去方向 | 高 | 高 | 已定：**每个里程碑停下汇报**；每里程碑一个 tag，可回退 |
 | R2 | **MinerU 只成功过 1 次**（原症状 5 个任务全卡死） | 中 | 中 | M0 接入时**多跑几份**；失败则扫描件分支降级为「记缺失清单 + 前端可见」，**不阻塞主链路** |
 | R3 | **扫描件 / 乱码字体 PDF 样本当前造不出**（语料这两类为 0） | 高 | 中 | M5 专门造样本；**在此之前第二路分支属"从未跑过的代码"**，如实标注 |
-| R4 | DeepSeek 上下文窗口未标定（D-1） | 中 | 低 | `context_window` 做成配置项默认 65536；该路径文档自述几乎不触发 |
+| R4 | DeepSeek 上下文窗口未标定（D-1） | 中 | 低 | `context_window` 做成配置项默认 1,048,576（官方 V4 标称）；该路径文档自述几乎不触发 |
+| **R13** | **旧别名 `deepseek-chat` 已被官方退役（2026-07-24），中转站随时可能摘掉它** | 中 | **高**（摘掉则应用起不来） | 配置写 `deepseek-flash` 而非 `deepseek-chat`；**模型名与 `reasoning_effort` 都进 `app.yaml`**，要换只改配置不改代码；M0 起就按新名字开发 |
 | R5 | 前端工作是独立的一大块（React + shadcn + ECharts + PDF 高亮 + docx 预览） | 高 | 中 | 按 M0→M4 渐进，每步可运行；**不做移动端适配**（文档已排除） |
 | R6 | Chroma 内嵌 → **只能单 worker** | — | 中 | `--workers 1` 写进部署脚本与文档；**不要因为换了 PG 就以为能多 worker** |
 | R7 | 应用启动**硬依赖 Docker daemon** | 中 | 高 | 启动脚本 `docker compose up -d --wait`；答辩前先确认 Docker Desktop 已启动 |
