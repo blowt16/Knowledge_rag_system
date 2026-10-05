@@ -1033,6 +1033,81 @@ Minor 3 条已顺手修（`test_route` 里一句恒真断言、题库陈旧 note
 
 ---
 
+### 8.9 M3 完工交接（2026-10-05 实跑，**新会话先读这一节**）
+
+> 口径同 §5.9 / §6.9 / §7.9：**一半代码有、一半完全没有**（开工前实测已列在附录 H.3）。
+> 本轮实际做的是：三个节点的护栏 → 两条新链路（压缩 / 文件访问）→ 一整块前端（引用三层 + 置灰 + 抽屉）。
+> 过程中实测抓出 **9 处缺陷**，其中 3 处是「不实测绝对发现不了」的类型。
+
+#### 本阶段交付
+
+| # | 交付 | 落在哪 |
+|---|---|---|
+| 1 | **上下文预算与滚动压缩**（M3-1） | `app/services/context_service.py`、`config/prompts/summarize.txt`、`state.summary`、`generate.txt` 加 `$summary` |
+| 2 | **三个节点的护栏**（M3-2/3/4） | `tests/unit/test_build_context.py`(7)、`test_stream_json_parser.py`(18)、`test_cite.py`(21)、`test_prompts.py` 加四条硬约束 |
+| 3 | **压缩的 DB 往返与硬约束** | `tests/integration/test_compaction.py`(8)、`tests/unit/test_token_budget.py`(12) |
+| 4 | **原文访问接口 + 签名 URL**（M3-5） | `app/api/document_access.py`（`/file`、`/text`、`/images/{name}`）、`deps.current_user_optional`、`tests/integration/test_document_access_acl.py`(15) |
+| 5 | **前端引用三层 + 置灰 + 抽屉**（M3-6） | `src/markdown/{citationPlugin,uncitedAnnotation,MarkdownAnswer}.tsx`、`src/components/DocumentDrawer.tsx`、`ChatPage.tsx` |
+| 6 | **标注回归脚本**（§8.2 测试点 A） | `frontend/web/scripts/annotation_probe/run.ts`（`npx tsx` 跑，11 条） |
+| 7 | 修 9 处实测缺陷 | 见下表 |
+
+#### 实测证据（都能重跑复现）
+
+| 项 | 证据 |
+|---|---|
+| 测试 | `uv run pytest backend/tests -q` → **292 passed**（M2 结束时 200，本轮 +92） |
+| 摘要提示词 | 真模型跑通：146 字 / 94 token（上限 800），文号保留、`[n]` 已剥 |
+| 前端构建 | `npm run build` 过；`dist/assets/pdf.worker.min-*.mjs` 1.36 MB —— **本地 worker 确实进了产物**（不是 CDN） |
+| 标注回归脚本 | `npx tsx scripts/annotation_probe/run.ts` → **11/11** |
+| **端到端①（点引用跳原文）** | bsk 真浏览器：点角标 → 抽屉打开 → 真 PDF 渲染 → 提示「**定位方式：坐标高亮（10 个框）**」，10 个高亮落在被引用的正文上（红头 / 文号 / 标题 / 各单位 / 正文 / 落款 / 页码） |
+| **端到端②（无依据句标出）** | 问「学业预警分几级？每级有什么后果？」→ 末句「资料中未找到针对黄色、橙色、红色预警各自具体后果的进一步规定。」**标灰**（浅灰底 + 虚线 + 提示文案），上方另有「本回答含 1 处未证实内容」 |
+| 图片缩略图 | 同一轮问答里，引用面板的校徽缩略图按文件名现取签名 URL 后**真实加载出图** |
+| ACL 变异检验 | 把 `filters.can_access` 打成恒允许 → **6 条用例立刻变红**（证明用例有牙） |
+
+#### 本轮实测发现并修掉的九处缺陷（计划里都没有）
+
+| # | 缺陷 | 怎么发现的 | 影响 |
+|---|---|---|---|
+| **D-1** | 流式解析器把 **JSON 尾巴当正文**：`{"answer":…,"decision":…}` 时只在 `"`+`}` 收尾 | 写「decision 在后」的用例 | 答案里混进 `","decision":"ANSWERED`，并写进 `answer` —— cite/verify 拿这份文本算偏移，前端置灰跟着错 |
+| **D-2** | **上游中断被当成拒答**，且 `error` 之后继续发事件 | 同上 | 客户端先收 `error` 再收 `refused`+`done`（违反「降级五条」第 ③ 条），把「模型输出坏了」记成「知识库没有依据」 |
+| **D-3** | `precheck_prefix` 剥不掉「空白 → BOM → 围栏」 | 参数化用例 | 一条本来正常的流被误判成格式错误而中止 |
+| **D-4** | **一轮问答的两条消息时间戳完全相同**（`now()` 是事务时刻，实测库里每个多轮会话 `distinct created_at = 1`） | 写压缩的消息顺序用例 | 历史可能以「助手在用户之前」的形式进提示词 |
+| **D-5** | 标注「1 进 1 出」替换节点时**整段丢失**（只在节点数变化时才回写 children） | **回归脚本**坑③当场抓到 | `**30%**` 里的标注消失、外层照常 —— 看着像「只标了一半」 |
+| **D-6** | **两个 remark 插件顺序反了**：角标插件拆出的文本节点没有 position，置灰插件排在它后面就永远标不上 | 浏览器实测（摘要说「含 1 处」而正文一个灰标都没有） | 含 `[n]` 的段落永远标不上灰 |
+| **D-7** | 滚动锚点取到**页脚框**（Chroma 里 bbox 第一项常是页码行） | 浏览器实测（高亮全跑到视口外，y 为负） | 点引用打开后看不到高亮 |
+| **D-8** | react-pdf-highlighter 默认 worker 是 **unpkg CDN**，取不到时**静默**退回主线程假 worker | spike 阶段翻 performance 资源列表 | 内网/答辩现场退化成主线程解析，页面看着正常 |
+| **D-9** | `user=CurrentUser` 写成**默认值**导致依赖不解析 | 提权用例返回 404 | 提权分支永远走不到（Annotated 当默认值用，FastAPI 不解析） |
+
+#### 与计划的偏差
+
+| # | 计划口径 | 实际 | 依据 |
+|---|---|---|---|
+| E-1 | §8.1 把测试都放 `tests/unit/` | 按「要不要真库」拆成 unit + `integration/test_compaction.py` | 仓库既有惯例：unit 纯逻辑、integration 碰库 |
+| E-2 | §8.2 M3-5 写「审计**表**有记录」 | 做的是**结构化审计日志**（谁/何时/哪份文档/trace_id） | 方案三处原文都写「审计日志」，且 12 张表里没有审计表；开工计划第 3 条已与你确认 |
+| E-3 | §8.2 M3-1 的 B 路「真溢出时再裁检索上下文」 | **未实现那一档**：检索上下文已被 `build_context` 限死 8,000 token，对 100 万 token 的窗口裁它救不了任何东西。实现的是「先强制压缩历史 → 仍超则报 `context_length_exceeded`」 | 唯一可能无界增长的只有历史 |
+| E-4 | 「测最新版 PDF 阅读器」 | 最新版就是 `8.0.0-rc.0`（2024-09 发布、至今没转正），实测可用 | 你指定的加载项 |
+
+#### 已知问题（**未修**，如实记录）
+
+| # | 问题 | 影响 | 建议 |
+|---|---|---|---|
+| K-1 | 「资料中未找到 X」这类**元陈述会被算成结论句**并标灰 | 灰标文案本身不算误导（那句确实没有依据），但属误报；方案 §3.5.3 的结论句定义里「元陈述」本应排除 | **留给 M5**：改它会动 5.2 的幻觉率口径，要用真实数据校准 |
+| K-2 | L3 章节匹配依赖 `current_chapter`，实测 **125/148 非空** | 那 23 条 chunk 的引用会落到 L4（只跳页） | 可接受；要修先补章节抽取 |
+| K-3 | 前端主包 **811 kB**（pdfjs 全家桶随包） | 首屏变慢 | M4 做长列表/性能时用 `React.lazy` 把抽屉拆出去 |
+| K-4 | **bsk 整页截图在 Agent 窗口被遮挡时会定格**（两次不同滚动位置 md5 相同）；`bsk observe`/元素裁剪仍是最新的 | 只影响取证，不影响功能 | 验收时开新标签页，或让用户把 Agent 窗口置前 |
+| K-5 | 测试跑一轮会在 `data/tmp/`、`data/uploads` 累积文件 | 磁盘占用 | 已有 gitignore（K-6 同 M1） |
+| K-6 | 本轮验收用的截图留在 `data/tmp/`（已 gitignore） | 无 | 需要证据时直接看，不必重跑 |
+
+#### 下一里程碑开工前的提醒
+
+- M4 要动 `ChatPage` / 流式渲染 —— **不要改 `generate`/`cite` 的 SSE 事件顺序**（`test_refusal_paths.py` 有锁）
+- 前端 markdown 管道**不要引入 `rehype-sanitize`**：默认 schema 会剥 `class`，置灰**静默失效**
+- 两个 remark 插件的**顺序不能反**（置灰在前、角标在后），有回归脚本守着
+- `count_tokens` 只有一份（`services/context_service.py`），别在别处再写一个
+- 单 worker 仍是硬约束（A10）；跑测试/CLI 前先停后端
+
+---
+
 ## 9. M4 — React 两端
 
 **交付**：4.2.4（流式渲染 / 检索过程反馈 / 长列表）+ 会话列表 + 管理端（4.3）+ 仪表盘（4.4）。
