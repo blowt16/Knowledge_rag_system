@@ -29,7 +29,7 @@ from app.core.deps import UserContext
 from app.graph.state import Chunk
 from app.retrieval import bm25, vector
 from app.retrieval.embedding import embed_query
-from app.retrieval.filters import allowed_document_ids, build_where
+from app.retrieval.filters import allowed_document_ids, build_where, resolve_escalation
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +144,9 @@ async def _filter_by_documents(
     where = build_where(user, today=today, include_restricted=include_restricted)
     allowed = allowed_document_ids(where, docs, today=today)
 
-    out: list[Chunk] = []
-    for chunk in chunks:
-        if chunk.document_id in allowed:
-            if include_restricted and user.role == "admin":
-                row = next((d for d in docs if d["id"] == chunk.document_id), None)
-                if row is not None and not _visible_normally(row, user):
-                    chunk.escalated = True
-            out.append(chunk)
+    out = [chunk for chunk in chunks if chunk.document_id in allowed]
+    if resolve_escalation(user, include_restricted):
+        await _mark_escalated(conn, out, user, docs=docs)
     return out
 
 
@@ -166,6 +161,37 @@ def _visible_normally(doc: dict, user: UserContext) -> bool:
         except (ValueError, TypeError):
             roles = []
     return user.role in roles
+
+
+async def _mark_escalated(
+    conn: asyncpg.Connection, chunks: list[Chunk], user: UserContext,
+    *, docs: list[dict] | None = None,
+) -> None:
+    """把「本不该看见、因提权才拿到」的 chunk 标成 `escalated`（§3.3.3）。
+
+    ⚠️ **两路都要标**。`Citation.escalated` 是 5.3 ACL 对照实验直接读的字段；
+       只标一路的话，「哪些引用是越权拿的」就有一半查不出来 ——
+       而另一半看起来完全正常，比全都不标更难发现。
+
+    只在**确实提权**时调用（`resolve_escalation`），非提权场景不该多一次回库。
+    `docs` 可传调用方已取好的行，避免重复查询。
+    """
+    if not chunks:
+        return
+    if docs is None:
+        doc_ids = {c.document_id for c in chunks if c.document_id}
+        if not doc_ids:
+            return
+        rows = await conn.fetch(
+            "SELECT id, status, effective_date, visibility, visible_roles "
+            "  FROM documents WHERE id = ANY($1::text[])", list(doc_ids))
+        docs = [dict(r) for r in rows]
+
+    by_id = {d["id"]: d for d in docs}
+    for chunk in chunks:
+        row = by_id.get(chunk.document_id)
+        if row is not None and not _visible_normally(row, user):
+            chunk.escalated = True
 
 
 async def vector_retrieve(
@@ -191,17 +217,19 @@ async def vector_retrieve(
         return [c for c in chunks if not c.doc_group_id or c.version == latest.get(c.doc_group_id, c.version)]
 
     chunks = await _attempt(int(cfg("retrieval.oversample_first", 3)))
-    if len(chunks) >= k:
-        await fill_document_titles(conn, chunks)
-        return chunks[:k]
+    if len(chunks) < k:
+        # 重试：**整体替换**首次结果（不是叠加），替换后**重新折叠**
+        chunks = await _attempt(int(cfg("retrieval.oversample_retry", 6)))
+        logger.info("向量路召回不足触发重试", extra={
+            "event": "retrieve.oversample_retry", "node": "retrieve",
+        })
 
-    # 重试：**整体替换**首次结果（不是叠加），替换后**重新折叠**
-    retry_chunks = await _attempt(int(cfg("retrieval.oversample_retry", 6)))
-    logger.info("向量路召回不足触发重试", extra={
-        "event": "retrieve.oversample_retry", "node": "retrieve",
-    })
-    await fill_document_titles(conn, retry_chunks)
-    return retry_chunks[:k]
+    result = chunks[:k]
+    await fill_document_titles(conn, result)
+    # 提权取得的 chunk 必须标出来 —— 与 BM25 路同一套判定（§3.3.3）
+    if resolve_escalation(user, include_restricted):
+        await _mark_escalated(conn, result, user)
+    return result
 
 
 async def bm25_retrieve(
@@ -218,20 +246,38 @@ async def bm25_retrieve(
 
     # 映射表：下标 → chunk_id（§3.6），再由 chunk 回查 Chroma 拿 metadata。
     # 这里为了拿到 document_id 等字段，仍走一次 Chroma 的 get。
-    chunks: list[Chunk] = []
+    #
+    # ⚠️⚠️ `collection.get` **不保证**按传入 ids 的顺序返回（2026-10-05 实测：
+    #       传入顺序是 [最高分, 次高分]，返回顺序是反的）。
+    #       所以下面必须**按 `hits` 的顺序重建**，不能直接遍历 get 的返回 ——
+    #       否则 BM25 算出来的排序会被整条丢掉，这一路返回的是「任意 K 条」：
+    #       实测现场某 chunk 以 4.69 分排第一，却不在最终返回的 10 条里，
+    #       表现为「混合检索里 BM25 那一路好像没起作用」，且不报错。
     collection = vector.get_collection()
-    ids = [h.chunk_id for h in hits]
     try:
-        fetched = collection.get(ids=ids, include=["metadatas", "documents"])
+        fetched = collection.get(ids=[h.chunk_id for h in hits],
+                                 include=["metadatas", "documents"])
     except Exception:  # noqa: BLE001
         return []
 
-    score_by_id = {h.chunk_id: h.score for h in hits}
-    for i, chunk_id in enumerate(fetched.get("ids", [])):
-        meta = (fetched.get("metadatas") or [])[i] or {}
-        text = (fetched.get("documents") or [])[i] if fetched.get("documents") else ""
-        chunk = _to_chunk({"chunk_id": chunk_id, "text": text, "metadata": meta})
-        chunk.score = score_by_id.get(chunk_id, 0.0)
+    fetched_ids = fetched.get("ids", [])
+    metadatas = fetched.get("metadatas") or []
+    documents = fetched.get("documents") or []
+    by_id: dict[str, tuple[dict, str]] = {}
+    for i, chunk_id in enumerate(fetched_ids):
+        by_id[chunk_id] = (
+            dict(metadatas[i]) if i < len(metadatas) and metadatas[i] else {},
+            documents[i] if i < len(documents) else "",
+        )
+
+    chunks: list[Chunk] = []
+    for hit in hits:
+        found = by_id.get(hit.chunk_id)
+        if found is None:
+            continue          # 索引里有、向量库里已没有（孤儿条目）—— 丢掉
+        meta, text = found
+        chunk = _to_chunk({"chunk_id": hit.chunk_id, "text": text, "metadata": meta})
+        chunk.score = hit.score
         chunks.append(chunk)
 
     chunks = await _filter_by_documents(

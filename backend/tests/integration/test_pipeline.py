@@ -22,6 +22,7 @@ from app import db
 from app.core.config import repo_path
 from app.ingestion.pipeline import IngestRequest, ingest
 from app.retrieval import bm25, vector
+from tests.support import purge_documents
 
 CORPUS = repo_path("corpus", "guet")
 SAMPLE = next(iter(sorted(CORPUS.glob("09_*.pdf"))), None) if CORPUS.exists() else None
@@ -46,41 +47,12 @@ async def admin_id():
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
-async def _purge_documents(titles: list[str]) -> None:
-    """按 title 清掉测试造的文档：PG 两行 + **两处**索引。
-
-    ⚠️ 两处索引都要清。2026-10-05 实测：原实现只删 Chroma，
-       每跑一次测试就往 BM25 索引里漏一批死条目 ——
-       现场攒到「映射表 186 条 / 31 个 document_id，而库里只有 1 个文档」。
-       死条目会占满 BM25 的 Top-K 把真实结果挤出去，且**不报错**。
-    """
-    if not titles:
-        return
-    async with db.tx() as conn:
-        rows = await conn.fetch(
-            "SELECT id FROM documents WHERE title = ANY($1::text[])", titles)
-        doc_ids = [r["id"] for r in rows]
-        await conn.execute(
-            "DELETE FROM ingestion_tasks WHERE document_id = ANY($1::text[])", doc_ids)
-        await conn.execute("DELETE FROM documents WHERE id = ANY($1::text[])", doc_ids)
-    for doc_id in doc_ids:
-        try:
-            # chunk_id 必须在删 Chroma **之前**取：删完就查不到了，
-            # 只剩按条数推断这一个不可靠的路子
-            chunk_ids = [r["chunk_id"]
-                         for r in vector.get_chunks(doc_id, limit=100000)]
-            vector.delete_document(doc_id)
-            bm25.remove_document(chunk_ids)
-        except Exception:  # noqa: BLE001
-            pass
-
-
 @pytest_asyncio.fixture
 async def cleanup_docs():
     """记录测试产生的文档标题，用完清掉（PG 行 + Chroma + BM25S）。"""
     titles: list[str] = []
     yield titles
-    await _purge_documents(titles)
+    await purge_documents(titles)
 
 
 def _unique_copy(tag: str) -> Path:
@@ -302,7 +274,7 @@ async def test_cleanup_leaves_both_indexes_unchanged(admin_id, cleanup_docs):
     assert outcome.status == "done", outcome.message
     assert bm25.count() > before_bm25, "入库没写进 BM25，本用例就没有意义"
 
-    await _purge_documents([title])
+    await purge_documents([title])
 
     assert vector.count() == before_vector, "Chroma 有残留"
     assert bm25.count() == before_bm25, "BM25 有残留死条目"
