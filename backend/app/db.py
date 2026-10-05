@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -23,11 +24,29 @@ from app.core.config import cfg, pg_dsn
 _pool: asyncpg.Pool | None = None
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """每条连接建立时注册 JSONB 编解码器。
+
+    否则 JSONB 列只能收字符串（`invalid input for query argument: [] (expected str,
+    got list)`），每个调用点都得自己 `json.dumps` —— 迟早有人漏掉。
+    注册后 Python 的 list/dict 直接进出 JSONB 列。
+    """
+    for type_name in ("jsonb", "json"):
+        await conn.set_type_codec(
+            type_name,
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
+
 async def init_pool() -> asyncpg.Pool:
     """在应用 lifespan 启动时创建连接池。"""
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(dsn=pg_dsn(), min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(
+            dsn=pg_dsn(), min_size=2, max_size=10, init=_init_connection
+        )
     return _pool
 
 
