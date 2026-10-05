@@ -52,7 +52,7 @@
       "note": "省略补全 + 消解增益的正例（原句必挂、消解后 rank1）",
       "turns": [
         {"question": "退役复学有什么优待政策？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
-        {"question": "那成绩怎么算？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": ["退役", "复学"], "note": "省略：「成绩」是通用词、脱离上下文检索不到本文档。实测对照：「那成绩怎么算？」→ 10 号**不在 Top5**；「退役复学后成绩怎么算？」→ 10 号 **rank 1**。原题目是「那要办哪些手续？」，但实测「手续」在 10 号里 0 次出现（只在 01/04/05/06），那份文档根本答不了，属于标注错误，已换掉"}
+        {"question": "那需要什么条件？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": ["退役", "复学"], "note": "省略：含疑问词「需要/条件」且无制度名词 → 触发消解。实测对照：「那需要什么条件？」→ 10 号**在 Top5 之外**；「退役复学需要什么条件？」→ 10 号 **rank 3**。⚠️ 这一轮换过两次：原题「那要办哪些手续？」根本答不了（「手续」在 10 号里 0 次出现）；第二版「那成绩怎么算？」也不行 —— 「成绩」在制度名词表里，设计上判为**自足**、压根不触发消解。两次都是标注没核对到判据上，第三次才用探针把「触发」与「检索对照」两件事一起量过"}
       ]
     },
     {
