@@ -1,0 +1,256 @@
+# 校园 RAG 系统 — 应用配置
+# 依据：docs/校园RAG系统重构方案.md（v1.3）
+#
+# ⚠️ 密钥一律走环境变量，本文件只存「环境变量名」不存值（§3.2.1）。
+# ⚠️ 规则词表必须配置化，不写死在代码里（§3.5.3 节点 2）。
+
+app:
+  name: "校园 RAG 检索问答系统"
+  # 全站分页上限统一取 100，不在各处分别声明（§3.7.2）
+  page_size_default: 20
+  page_size_max: 100
+
+llm:
+  provider: deepseek
+  base_url_env: DEEPSEEK_BASE_URL        # 官方 https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  # 官方 id，不是已退役的 deepseek-chat 别名，也不加 v4（见施工计划 §1.0）
+  model: deepseek-flash
+  # ★ 非思考模式：实测 ptok 36→10、reasoning_content 归零
+  #   备用写法 thinking: {type: disabled} 同样实测生效（见施工计划 §1.0）
+  reasoning_effort: "none"
+  # 官方 /models 自报值
+  context_window: 1048576
+  max_output_tokens: 393216
+  # 运行时保守值（远低于上限）；M5 按实际需要调
+  max_output_tokens_runtime: 8192
+  temperature: 0.3
+  # 摘要用同一模型（用户口径：chat 模型都用 deepseek-flash 非思考模式）
+  summary_model: deepseek-flash
+  # token 计数用 dashscope 自带分词器（离线可用、零新增依赖）
+  # ⚠️ 定位是「近似」：DeepSeek 分词器不可离线获取（施工计划 D-3）
+  tokenizer_model: qwen3-max
+
+embedding:
+  provider: aliyun                        # ALIYUN / OLLAMA（可切换，§C.2.1）
+  api_key_env: ALIYUN_ACCESS_KEY
+  base_url_env: ALIYUN_BASE_URL
+  model: qwen3.7-text-embedding
+  # 实测确认（2026-10-05）：1024 维，与 Chroma collection 一致
+  dimension: 1024
+  # 批量向量化：20 chunk / 18000 字一批，指数退避重试（§3.4.1）
+  batch_max_count: 20
+  batch_max_chars: 18000
+  max_retries: 3
+
+chunking:
+  chunk_size: 500
+  chunk_overlap: 50
+  chunk_min_size: 5                       # 最小字符数，过滤噪声片段
+
+retrieval:
+  # K = 每路召回数（单个「查询 × 检索器」组合取多少条）
+  k: 10
+  # 固定过采样 + 一次重试（§3.3.4）—— 仅对向量路适用
+  oversample_first: 3                     # 首轮 n_results = 3 × K
+  oversample_retry: 6                     # 重试 n_results = 6 × K
+  # 融合后进入 rerank 的截断条数
+  fusion_limit: 40
+  # 最终进入 build_context 的条数
+  top_k: 5
+  rrf_k: 60                               # RRF 的 k —— 消融实验的调参对象
+  # 权重一律 1.0：若各类权重不等，消融表里三行查询的增益会混入权重差异（§3.5.3 节点 6）
+  rrf_weight: 1.0
+
+reranker:
+  model_path: models/BAAI/bge-reranker-v2-m3
+  device: cuda
+  batch_size: 10
+  max_length: 512
+  # GPU 信号量：同时处理几个请求（显存不足会直接 OOM，必须有）
+  max_concurrency: 2
+
+# 各节点超时（秒）—— 初始值，M5 用真实流量校准（§3.5.3 节点 6）
+timeouts:
+  resolve: 5
+  route: 5
+  rewrite: 15
+  retrieve: 10
+  rerank: 30
+  # 首字超时（TTFT）：覆盖消解→路由→检索→重排→生成首字
+  generate_ttft: 60
+  # 首字到达后，整条流另设上限 —— 与 TTFT 分别设置，否则长答案会被误杀
+  generate_total: 180
+  # 上传进度流等分钟级长连接的空闲超时
+  sse_stream_timeout: 600
+
+# 上下文预算（§3.8.2 / §3.8.3）
+# ⚠️ 这组数按「成本与延迟」定的显式目标值，不从窗口派生
+context:
+  history_token_budget: 16000
+  high_water_ratio: 0.8                   # H = 12800，触发线
+  low_water_ratio: 0.5                    # L = 8000，压到这里停
+  recent_messages_limit: 10               # 保留区大小，原文永不动
+  compression_min_messages: 6             # 单次至少压缩条数
+  summary_max_tokens: 800                 # 摘要产物自身上限（防无界膨胀）
+  retrieval_context_budget: 8000          # 检索上下文预算，优先级最高
+
+session:
+  # 长锁 TTL 与心跳（§3.2.4）
+  lock_ttl_seconds: 120
+  lock_heartbeat_seconds: 30
+  # request_id 幂等去重（不做持久化）
+  dedup_ttl_seconds: 600
+
+auth:
+  jwt_secret_env: JWT_SECRET
+  jwt_algorithm: HS256
+  access_token_minutes: 15
+  refresh_token_days: 7
+
+# ============================================================
+# 规则词表（§3.5.3 节点 2）—— resolve 前置闸门与 route 规则层共用同一份
+# ⚠️ 两处必须用同一判据：判据是「整条消息没有实际诉求」，
+#    不是「包含一个无信息量词」。拿不准时不跳过（knowledge > chat）。
+# ============================================================
+rules:
+  # 无信息量词表 = 问候词 + 语气/确认词
+  # ⚠️ 「继续」刻意不入表：它在多轮里是有效诉求（"接着说下去"）
+  gate_words:
+    - 你好
+    - 您好
+    - 在吗
+    - 在不在
+    - 谢谢
+    - 多谢
+    - 感谢
+    - 再见
+    - 拜拜
+    - 嗨
+    - 哈喽
+    - hi
+    - hello
+    - 嗯
+    - 哦
+    - 好的
+    - 收到
+    - ok
+    - OK
+
+  # 制度名词：命中即倾向 knowledge（与疑问词组合），也是 clarify 的「能定位主题」判据
+  # 与节点 2 规则层共用同一份，不另建（§3.5.3 节点 2）
+  policy_nouns:
+    - 缓考
+    - 补考
+    - 重修
+    - 挂科
+    - 学籍
+    - 转专业
+    - 专业分流
+    - 学位
+    - 毕业
+    - 选课
+    - 成绩
+    - 学分
+    - 奖学金
+    - 处分
+    - 申诉
+    - 退学
+    - 休学
+    - 复学
+    - 学业预警
+    - 考试
+    - 实习
+    - 参军
+    - 入伍
+    - 退役
+    - 保研
+    - 推免
+    - 教融合
+    - 管理规定
+
+  # 疑问词
+  question_words:
+    - 怎么
+    - 怎样
+    - 如何
+    - 什么
+    - 哪些
+    - 哪里
+    - 多久
+    - 多少
+    - 什么时候
+    - 是否
+    - 能不能
+    - 可不可以
+    - 需要
+    - 条件
+
+  # 代词（指代消解的触发依据）
+  # ⚠️ 必须 jieba 分词后按词匹配，不能子串匹配 —— 否则「其他」会误命中「他」
+  pronoun_words:
+    - 他
+    - 她
+    - 它
+    - 他们
+    - 她们
+    - 它们
+    - 这个
+    - 那个
+    - 这些
+    - 那些
+    - 此
+    - 该
+    - 其
+    - 上述
+    - 上面
+    - 前者
+    - 后者
+
+  # 文号正则：如 桂电教〔2025〕28号
+  doc_number_pattern: "[〔\\[]\\d{4}[〕\\]]\\s*\\d+\\s*号"
+
+clarify:
+  # 问题过短且无法定位主题 → 触发澄清（两个条件同时满足）
+  # 阈值 8 字是初始值，M2 用真实语料校准（§3.5.3 节点 2）
+  min_length: 8
+
+ingestion:
+  # 支持格式（决策 #6，不做 HTML）
+  allowed_extensions: [pdf, docx, pptx, md, txt]
+  text_encodings: [utf-8, gbk, gb18030]
+  max_file_size: 104857600               # 100 MB
+  max_zip_size: 524288000                # 500 MB
+  max_zip_total_size: 209715200          # 200 MB
+  zip_max_workers: 4
+
+  # PDF 文字层质量闸门（§E.8.1）—— 阈值照搬 RAGFlow / MinerU
+  # ⚠️ 前四项是「页级/框级」，后两项是「整份文档级」，不能混用
+  quality_gate:
+    page_garbled_ratio: 0.3               # 页级乱码率 ≥30% → 该页走 OCR
+    box_garbled_ratio: 0.5                # 框级乱码率 ≥50% → 该框走 OCR
+    subset_font_ratio: 0.3                # 子集字体占比 ≥0.3
+    subset_cjk_ratio: 0.05                # 且 CJK <0.05
+    subset_ascii_punct_ratio: 0.4         # 且 ASCII 标点 >0.4
+    min_chars_per_page: 50                # 整份级：平均每页有效字符 <50 判扫描件
+    image_coverage_ratio: 0.8             # 整份级：图片覆盖率 ≥0.8 判扫描件
+
+  # 竖排检测（§E.3.3）
+  # ⚠️ 阈值必须写成 >= 0.5，不能写 > 0.5 —— 文档 06 恰好卡在 50%
+  # ⚠️ 动作是「反转行序」恢复，不是丢弃；且必须在清洗之前
+  vertical_text_single_char_ratio: 0.5
+
+mineru:
+  token_env: MINERU_TOKEN
+  # 按页限定范围调用（§E.8.6）—— 不把整份 PDF 送出去
+  timeout: 900
+
+logging:
+  level_env: LOG_LEVEL
+  default_level: INFO
+  dir: logs
+  max_bytes: 10485760
+  backup_count: 5
+  # ⚠️ 脱敏是必须项：用户提问原文、检索片段、答案正文一律不进日志（§3.2.3.2）
+  #    只记 query_len 与 query_hash
+  redact_body: true
