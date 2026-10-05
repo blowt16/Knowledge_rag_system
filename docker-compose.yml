@@ -1,0 +1,32 @@
+# 校园 RAG 系统 — 服务编排
+#
+# 本文件当前只有 PostgreSQL（附录 G）。
+# M5 会追加三个可观测容器：OTel Collector（含 spanmetrics connector）、Prometheus、Jaeger。
+#
+# 启动：docker compose up -d --wait postgres
+# 应用启动硬依赖 Docker daemon —— 演示/答辩前先确认 Docker Desktop 已启动。
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: campus-rag-postgres
+    environment:
+      POSTGRES_DB: ${PG_DATABASE}
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # 只绑本机。容器端口默认绑 0.0.0.0，那等于把数据库暴露到局域网。
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # 必须有：应用起得比 PG 快，没有 healthcheck 时应用会连不上直接崩。
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DATABASE}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  # named volume，不用 bind mount —— Windows 下 bind mount 的权限与性能都有坑
+  pgdata:

@@ -249,12 +249,11 @@ D:\Knowledge_rag_system\
 - [ ] **不清理 git 历史**——附录 A #1 要求清历史，但清历史必须 force push，**与用户「禁止 force push」冲突**。改为：**密钥吊销重发由用户执行**（见下方"需用户执行的事项"）
 
 **Task M0-1 依赖与容器**
-- [ ] `uv add asyncpg bm25s pyjwt`；`uv add --force-reinstall python-pptx`；`uv run python -c "import pptx; print(pptx.__version__)"` **必须打印出版本号**（B.1.1 说上次只有 `dist-info` 没有 `pptx/` 目录）
-- [ ] 走一遍**附录 C.2.2 的依赖清理**：移除 `unstructured` / `markdown` / `openpyxl` / `aiofiles` / `langchain`(总包) / `python-magic` 六个；`modelscope` → `huggingface_hub`（**改代码**：`reorder_service.py:83` 的 `snapshot_download`）
-- [ ] ⚠️ 清理后**必须重跑支持格式回归**（C.2.2 的清单：txt/md/pdf/docx/pptx 各传一次）——**任何一项失败立刻回滚该依赖**
+- [x] `uv add asyncpg bm25s pyjwt`（实装 asyncpg 0.31.0 / bm25s 0.3.12 / pyjwt 2.15.1）；`uv add --force-reinstall python-pptx` → **实测 `import pptx` 成功、版本 1.0.2、`site-packages/pptx/` 真实存在**（B.1.1 的坏包装已修）
+- [ ] **附录 C.2.2 依赖清理** —— ⚠️ **已从 M0-1 挪到 M0-8 之后**：C.2.2 要求"删完必须跑一遍所有支持格式"，而加载器到 M0-7 才有，现在清理**测不了回归**。清理内容：移除 `unstructured`/`markdown`/`openpyxl`/`aiofiles`/`langchain`(总包)/`python-magic` 六个；`modelscope` → `huggingface_hub`（改 `reorder_service.py:83`）；`pyproject.toml` 移除 `streamlit`（**不删 `front/`**，附录 A #10）
+- [ ] ⚠️ 清理后**必须重跑支持格式回归**（txt/md/pdf/docx/pptx 各传一次）——**任何一项失败立刻回滚该依赖**
 - [ ] ⚠️ 「删 modelscope 会让 `rapid_doc`(753MB) 消失」**因果链未经证实**，实测确认，**别当既成收益写进结论**
-- [ ] 从 `pyproject.toml` **移除 `streamlit`**，但**不删 `front/`**（附录 A #10）
-- [ ] 写 `docker-compose.yml`（照抄附录 G），`docker compose up -d --wait postgres` → 期望 `healthy`
+- [x] 写 `docker-compose.yml`（照抄附录 G），`docker compose up -d --wait postgres` → **实测 `healthy`**、PG **17.11**、端口确认只绑 `127.0.0.1:5432`
 - [ ] 验：`docker exec ... psql -c 'select version()'` 看到 17.11；`netstat` 确认绑在 `127.0.0.1:5432` 而非 `0.0.0.0`
 - [ ] 提交 `config: PG 容器、后端新依赖与依赖清理`
 

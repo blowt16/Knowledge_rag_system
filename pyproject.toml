@@ -40,6 +40,9 @@ dependencies = [
     "mistune>=3.3.2",
     # MinerU — 扫描件 PDF 云端解析 (langchain-mineru)
     "langchain-mineru>=0.1.0",
+    "asyncpg>=0.31.0",
+    "bm25s>=0.3.12",
+    "pyjwt>=2.15.1",
 ]
 
 [[tool.uv.index]]
