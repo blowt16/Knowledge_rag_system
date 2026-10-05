@@ -46,11 +46,14 @@ async def admin_id():
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
-@pytest_asyncio.fixture
-async def cleanup_docs():
-    """记录测试产生的 doc_group，用完把两处索引与两张表的行都清掉。"""
-    titles: list[str] = []
-    yield titles
+async def _purge_documents(titles: list[str]) -> None:
+    """按 title 清掉测试造的文档：PG 两行 + **两处**索引。
+
+    ⚠️ 两处索引都要清。2026-10-05 实测：原实现只删 Chroma，
+       每跑一次测试就往 BM25 索引里漏一批死条目 ——
+       现场攒到「映射表 186 条 / 31 个 document_id，而库里只有 1 个文档」。
+       死条目会占满 BM25 的 Top-K 把真实结果挤出去，且**不报错**。
+    """
     if not titles:
         return
     async with db.tx() as conn:
@@ -62,9 +65,22 @@ async def cleanup_docs():
         await conn.execute("DELETE FROM documents WHERE id = ANY($1::text[])", doc_ids)
     for doc_id in doc_ids:
         try:
+            # chunk_id 必须在删 Chroma **之前**取：删完就查不到了，
+            # 只剩按条数推断这一个不可靠的路子
+            chunk_ids = [r["chunk_id"]
+                         for r in vector.get_chunks(doc_id, limit=100000)]
             vector.delete_document(doc_id)
+            bm25.remove_document(chunk_ids)
         except Exception:  # noqa: BLE001
             pass
+
+
+@pytest_asyncio.fixture
+async def cleanup_docs():
+    """记录测试产生的文档标题，用完清掉（PG 行 + Chroma + BM25S）。"""
+    titles: list[str] = []
+    yield titles
+    await _purge_documents(titles)
 
 
 def _unique_copy(tag: str) -> Path:
@@ -266,6 +282,30 @@ async def test_version_not_reused_after_failure(admin_id, cleanup_docs, monkeypa
     assert versions == [1, 2], f"版本号应连续且不复用，实得 {versions}"
     assert rows[0]["status"] == "failed"
     assert rows[1]["status"] == "active"
+
+
+async def test_cleanup_leaves_both_indexes_unchanged(admin_id, cleanup_docs):
+    """★ 回归锁：用例收尾必须把 Chroma **和 BM25S** 都清干净。
+
+    清理漏一处 → 每跑一次测试就往真实索引里漏一批死条目，
+    而平时完全看不出来（不报错、只让召回变差）。
+    """
+    before_vector = vector.count()
+    before_bm25 = bm25.count()
+
+    title = f"清理回归_{uuid.uuid4().hex[:8]}"
+    cleanup_docs.append(title)
+
+    req = _req(admin_id, title)
+    await _seed_task(req)
+    outcome = await ingest(req)
+    assert outcome.status == "done", outcome.message
+    assert bm25.count() > before_bm25, "入库没写进 BM25，本用例就没有意义"
+
+    await _purge_documents([title])
+
+    assert vector.count() == before_vector, "Chroma 有残留"
+    assert bm25.count() == before_bm25, "BM25 有残留死条目"
 
 
 async def test_bad_format_rejected_before_any_row(admin_id):

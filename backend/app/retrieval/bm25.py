@@ -16,6 +16,14 @@
 
 ⚠️ 二者只要有一个缺失或版本不匹配，即视为该路不可用 —— **不做部分恢复**：
    映射表错位会导致返回错误的 chunk，比降级更糟。
+
+⚠️ **分词结果必须与映射表同文件落盘**（v2 起）。
+   2026-10-05 实测的坑：原先分词结果只存在**进程内缓存**里，而 `add()` 重建索引时
+   要从缓存取老文档的 token —— 进程一重启缓存就空，于是所有老文档被写成空 token，
+   **从索引里静默消失**：不报错、不降级，只是"召回少一点"。
+   现场实测：映射表 186 条里 156 条 token 为 0，唯一现存文档的 6 个 chunk 全是 0，
+   拿它自己的正文去搜，前 10 名全是已删除文档的残留条目 —— 混合检索等于单路。
+   因此 v1 的落盘文件（只有 version + chunk_ids）**一律判为不可用**。
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from app.core.config import repo_path
 
 logger = logging.getLogger(__name__)
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
 
 @dataclass
@@ -76,7 +84,7 @@ _state: dict | None = None
 
 
 def _load_state() -> dict | None:
-    """从磁盘加载 {chunk_ids, tokens}。缺失或不匹配返回 None。"""
+    """从磁盘加载 {version, chunk_ids, tokens}。缺失或不匹配返回 None。"""
     global _state
     if _state is not None:
         return _state
@@ -92,12 +100,33 @@ def _load_state() -> dict | None:
         logger.warning("BM25 索引版本不匹配，视为不可用",
                        extra={"event": "bm25.index_invalid"})
         return None
+
+    chunk_ids = payload.get("chunk_ids") or []
+    tokens = payload.get("tokens")
+    # 两者条数必须一致：错位会让 add() 把 A 文档的 token 写到 B 文档名下，
+    # 返回错误的 chunk —— 比降级更糟，所以判为整路不可用
+    if not isinstance(tokens, list) or len(tokens) != len(chunk_ids):
+        logger.warning("BM25 映射表与分词结果条数不符，视为不可用",
+                       extra={"event": "bm25.index_invalid"})
+        return None
     _state = payload
     return _state
 
 
+def _drop_cache() -> None:
+    global _state
+    _state = None
+
+
 def is_available() -> bool:
-    """索引与映射表同生共死 —— 任一缺失或版本不匹配即该路不可用。"""
+    """索引与映射表同生共死 —— 任一缺失或版本不匹配即该路不可用。
+
+    ⚠️ 即使 `_state` 已缓存，也要重新确认两个文件仍在：
+       删掉文件后还报可用，上层会以为这一路是好的。
+    """
+    if not _index_path().exists() or not _mapping_path().exists():
+        _drop_cache()
+        return False
     return _load_state() is not None
 
 
@@ -108,18 +137,27 @@ def _persist(chunk_ids: list[str], tokens: list[list[str]]) -> None:
     retriever.index(tokens, show_progress=False)
     retriever.save(str(_index_path()))
 
+    payload = {"version": INDEX_VERSION, "chunk_ids": chunk_ids, "tokens": tokens}
     _mapping_path().write_text(
-        json.dumps({"version": INDEX_VERSION, "chunk_ids": chunk_ids},
-                   ensure_ascii=False),
-        encoding="utf-8",
-    )
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
     global _state
-    _state = {"version": INDEX_VERSION, "chunk_ids": chunk_ids}
-    # tokens 仅用于增量重建，单独缓存（不落盘，可由 chunk 正文重算）
-    _tokens_cache["tokens"] = tokens
+    _state = payload
 
 
-_tokens_cache: dict[str, list[list[str]]] = {}
+def _clear_files() -> None:
+    """索引空了就把落盘文件删掉 —— 空索引等于没有索引。
+
+    ⚠️ 不能写成「保存一个空索引」：BM25S 对全空语料会在
+       `tokenize` 阶段抛 `ValueError: max() iterable argument is empty`
+       （实测：删掉最后一份文档时崩在这里）。
+    """
+    path = _index_path()
+    if path.exists():
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+    _mapping_path().unlink(missing_ok=True)
+    _drop_cache()
 
 
 def rebuild(entries: list[tuple[str, str]]) -> int:
@@ -137,15 +175,16 @@ def add(entries: list[tuple[str, str]]) -> int:
     """
     incoming = {cid: text for cid, text in entries}
 
-    existing_ids = list((_load_state() or {}).get("chunk_ids", []))
-    existing_tokens = list(_tokens_cache.get("tokens", []))
+    state = _load_state() or {}
+    existing_ids = list(state.get("chunk_ids") or [])
+    existing_tokens = list(state.get("tokens") or [])
 
     kept_ids: list[str] = []
     kept_tokens: list[list[str]] = []
     for i, cid in enumerate(existing_ids):
         if cid not in incoming:
             kept_ids.append(cid)
-            kept_tokens.append(existing_tokens[i] if i < len(existing_tokens) else [])
+            kept_tokens.append(existing_tokens[i])
 
     for cid, text in incoming.items():
         kept_ids.append(cid)
@@ -160,18 +199,23 @@ def remove_document(chunk_ids: list[str]) -> int:
     if not chunk_ids or not is_available():
         return 0
     drop = set(chunk_ids)
-    existing_ids = list(_load_state()["chunk_ids"])
-    existing_tokens = list(_tokens_cache.get("tokens", []))
+    state = _load_state()
+    existing_ids = list(state["chunk_ids"])
+    existing_tokens = list(state["tokens"])
 
     kept_ids, kept_tokens = [], []
-    for i, cid in enumerate(existing_ids):
+    for cid, tokens in zip(existing_ids, existing_tokens):
         if cid in drop:
             continue
         kept_ids.append(cid)
-        kept_tokens.append(existing_tokens[i] if i < len(existing_tokens) else [])
+        kept_tokens.append(tokens)
 
-    _persist(kept_ids, kept_tokens)
-    return len(existing_ids) - len(kept_ids)
+    removed = len(existing_ids) - len(kept_ids)
+    if kept_ids:
+        _persist(kept_ids, kept_tokens)
+    else:
+        _clear_files()          # 删空了 —— 留个空索引会让 BM25S 崩
+    return removed
 
 
 def search(query: str, *, k: int) -> list[Bm25Hit]:
@@ -212,6 +256,5 @@ def count() -> int:
 
 
 def reset_cache() -> None:
-    global _state
-    _state = None
-    _tokens_cache.clear()
+    """清掉进程内状态 —— 测试用来模拟「进程重启」。"""
+    _drop_cache()
