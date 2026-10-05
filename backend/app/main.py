@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -29,8 +31,31 @@ from app.core import telemetry
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
 from app.core.logging import install as install_logging
+from app.retrieval import reranker
 
 logger = logging.getLogger(__name__)
+
+
+def _warm_reranker() -> None:
+    """后台预热精排模型（§3.5.3 节点 7）。
+
+    ⚠️ 冷启动实测 **23–80 秒**（首次 79.5s / 页缓存热 23s），加载后推理只要 0.4–3s。
+       不预热的话第一个知识型提问要等一分多钟 —— M0 结束时最大的体验问题。
+
+    放**后台线程**而不是启动时 await：服务秒起、`/health` 立即可用，
+    不必为了一个可选环节把启动堵住一分钟；若第一个提问恰好撞上预热，
+    它会在这把锁上等预热加载完（`reranker._load_lock`），不会加载两次。
+
+    失败不让启动失败 —— 精排本来就有降级链，记一行日志即可。
+    """
+    started = time.perf_counter()
+    ok = reranker.preload()
+    logger.info(
+        "精排模型预热%s",
+        "完成" if ok else "失败（后续请求走降级链）",
+        extra={"event": "rerank.preloaded", "node": "rerank", "ok": ok,
+               "ms": int((time.perf_counter() - started) * 1000)},
+    )
 
 
 @asynccontextmanager
@@ -38,10 +63,13 @@ async def lifespan(_app: FastAPI):
     install_logging()
     telemetry.setup_tracing(service_name=cfg("app.name", "campus-rag"))
     await db.init_pool()
+    # 握住引用，避免任务被 GC 掉
+    warmup = asyncio.create_task(asyncio.to_thread(_warm_reranker))
     logger.info("服务启动", extra={"event": "app.startup"})
     try:
         yield
     finally:
+        warmup.cancel()
         await db.close_pool()
         logger.info("服务停止", extra={"event": "app.shutdown"})
 

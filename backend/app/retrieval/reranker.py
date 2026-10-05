@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 
 from pathlib import Path
@@ -31,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 _model = None
 _load_failed = False
+
+# 加载互斥：预热跑在后台线程，请求路径跑在 to_thread 的工作线程里，
+# 两者会同时想加载模型。不加锁 = 加载两次（该模型实占 2.3–2.5 GB，显存直接翻倍），
+# 且后加载的实例会覆盖先加载的，预热等于白做。
+_load_lock = threading.Lock()
 
 # GPU 信号量：节点内的「显存不足 → 降级」是单请求内判断，
 # 跨请求没有信号量会直接 OOM（§3.2.4）
@@ -71,19 +77,23 @@ def _load_model():
     global _model, _load_failed
     if _model is not None or _load_failed:
         return _model
-    try:
-        from sentence_transformers import CrossEncoder
+    with _load_lock:
+        # 双重检查：等锁期间可能已被预热线程加载完
+        if _model is not None or _load_failed:
+            return _model
+        try:
+            from sentence_transformers import CrossEncoder
 
-        _model = CrossEncoder(
-            _model_dir(),
-            max_length=int(cfg("reranker.max_length", 512)),
-            device=cfg("reranker.device", "cuda"),
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("reranker 加载失败，后续请求直接降级",
-                         extra={"event": "rerank.load_failed", "node": "rerank"})
-        _load_failed = True
-        _model = None
+            _model = CrossEncoder(
+                _model_dir(),
+                max_length=int(cfg("reranker.max_length", 512)),
+                device=cfg("reranker.device", "cuda"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("reranker 加载失败，后续请求直接降级",
+                             extra={"event": "rerank.load_failed", "node": "rerank"})
+            _load_failed = True
+            _model = None
     return _model
 
 
@@ -92,7 +102,11 @@ def is_loaded() -> bool:
 
 
 def preload() -> bool:
-    """启动时预热（可选）。加载失败不影响服务启动 —— 只是该路降级。"""
+    """启动时预热（由 lifespan 在后台线程调用）。
+
+    加载失败**不影响服务启动** —— 只是该路降级（走降级链）。
+    并发安全由 `_load_lock` 保证：预热与请求路径只会加载一次。
+    """
     return _load_model() is not None
 
 
