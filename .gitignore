@@ -228,3 +228,7 @@ db/*.db-shm
 logs/*.log
 logs/*.log.*
 models/*/
+
+# 前端
+frontend/web/node_modules/
+frontend/web/dist/

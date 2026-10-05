@@ -74,6 +74,29 @@ def _to_chunk(hit: dict) -> Chunk:
     )
 
 
+async def fill_document_titles(
+    conn: asyncpg.Connection, chunks: list[Chunk]
+) -> None:
+    """补上文档标题 —— 引用面板要显示「《XX办法》」而不是一串 document_id。
+
+    ⚠️ 标题**不冗余进 Chroma**（改了标题不该触发重索引，见 §3.7.2），
+       所以只能在检索后回一次 PostgreSQL 取。
+       2026-10-05 浏览器实测发现：不补的话引用面板显示的是
+       `cca67a0eea4e45fa861665ebb3190415` 这样的裸 ID，用户完全看不懂。
+    """
+    if not chunks:
+        return
+    ids = {c.document_id for c in chunks if c.document_id and not c.document_name}
+    if not ids:
+        return
+    rows = await conn.fetch(
+        "SELECT id, title FROM documents WHERE id = ANY($1::text[])", list(ids))
+    titles = {r["id"]: r["title"] for r in rows}
+    for chunk in chunks:
+        if not chunk.document_name:
+            chunk.document_name = titles.get(chunk.document_id, "")
+
+
 async def latest_versions(
     conn: asyncpg.Connection, group_ids: set[str], *, today: date | None = None
 ) -> dict[str, int]:
@@ -169,6 +192,7 @@ async def vector_retrieve(
 
     chunks = await _attempt(int(cfg("retrieval.oversample_first", 3)))
     if len(chunks) >= k:
+        await fill_document_titles(conn, chunks)
         return chunks[:k]
 
     # 重试：**整体替换**首次结果（不是叠加），替换后**重新折叠**
@@ -176,6 +200,7 @@ async def vector_retrieve(
     logger.info("向量路召回不足触发重试", extra={
         "event": "retrieve.oversample_retry", "node": "retrieve",
     })
+    await fill_document_titles(conn, retry_chunks)
     return retry_chunks[:k]
 
 
@@ -217,4 +242,5 @@ async def bm25_retrieve(
     folded = [c for c in chunks
               if not c.doc_group_id or c.version == latest.get(c.doc_group_id, c.version)]
 
+    await fill_document_titles(conn, folded)
     return folded[:k]
