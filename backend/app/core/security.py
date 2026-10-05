@@ -45,7 +45,7 @@ def _now() -> datetime:
 def _encode(payload: dict[str, Any]) -> str:
     return jwt.encode(
         payload,
-        secret(cfg("auth.jwt_secret_env", "JWT_SECRET")),
+        secret("auth.jwt_secret"),
         algorithm=cfg("auth.jwt_algorithm", "HS256"),
     )
 
@@ -86,6 +86,6 @@ def decode_token(token: str) -> dict[str, Any]:
     """
     return jwt.decode(
         token,
-        secret(cfg("auth.jwt_secret_env", "JWT_SECRET")),
+        secret("auth.jwt_secret"),
         algorithms=[cfg("auth.jwt_algorithm", "HS256")],
     )

@@ -161,7 +161,7 @@ async def test_expired_access_token_is_401(client, user):
             "iat": datetime.now(timezone.utc) - timedelta(hours=2),
             "exp": datetime.now(timezone.utc) - timedelta(hours=1),
         },
-        secret(cfg("auth.jwt_secret_env", "JWT_SECRET")),
+        secret("auth.jwt_secret"),
         algorithm=cfg("auth.jwt_algorithm", "HS256"),
     )
     r = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {expired}"})

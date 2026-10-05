@@ -13,6 +13,133 @@
 
 ---
 
+## 附录 H：各里程碑开工提示词（新窗口直接粘贴）
+
+> 用法：新开一个窗口，把对应里程碑的整段提示词粘进去。
+> 每段都自带"开工读什么、这一阶段的坑在哪、完工要交什么"，不依赖上文记忆。
+
+### H.1 M1 开工提示词（当前待执行）
+
+```
+读 docs/superpowers/plans/2026-10-05-campus-rag-refactor.md，
+重点读 §0（施工规程）与 §5.9（M0 完工交接）。
+
+我是这个项目的负责人，你继续做 M1（检索做对）。几条前提：
+
+1. M1 的**代码已经存在**（做 M0 端到端时顺带建出来了），见 §5.9 的对照表。
+   **不要重建** —— 照 §6 原版 M1 从零写一遍是纯浪费。
+
+2. M1 实际剩下三件事：
+   ① 【先做】把 corpus/guet/ 的 10 份 PDF 全部重新上传入库。
+      现在库里只有 1 份 —— M0 修 Chroma $lte 那个 bug 时清空过索引，
+      只回填了 1 份验证。**不先补数据，基线数字就是错的。**
+   ② 补验收物：20 题文号/专有名词题库（tests/fixtures/eval_min20.json）
+      + Recall@5 / MRR 评测脚本；ACL 隔离集成测试（student 查不到 vis_admin 文档）。
+   ③ 补一个 M0 实测发现的缺口：reranker 启动预热。
+      实测冷启动 23–80 秒（首次 79.5s / 页缓存热 23s），加载后推理只要 0.4–3s。
+      现在第一个知识型提问要等一分多钟。预热做进 lifespan，别做成懒加载。
+
+3. 施工注意事项见 §0.3（A1–A12），其中最容易踩的是：
+   - A1 改动必须实测验证，不能只推理（M0 有 15 个 bug 是实测抓的）
+   - A2 文档的字面读法可能是错的，实测冲突时以实测为准
+   - A9 改 filters.py / state.py / 提示词要跑全量测试
+
+4. 环境命令见 §0.4。开工前先确认 PG 起着、66 项测试全过。
+
+5. 规矩：提交只进 refactor/campus-rag，禁止动 main、禁止 force push。
+   M1 做完停下汇报（交付 / 实测证据 / 偏差 / 已知问题），
+   并把「完工交接」小节写进本文档、打 tag m1-done。
+
+先给我一个 M1 的执行计划（三件事的先后与各自怎么验），我确认后再动手。
+```
+
+---
+
+
+> 约定：**每个里程碑都在新窗口里独立施工**，靠本文档交接，不靠上一轮的记忆。
+> 下面这套流程是 M0 实跑一遍后总结的 —— M0 用了一个超长会话，
+> 后半段明显感到设计约束在漂移，这就是要分窗的原因。
+
+### 0.1 开工三步（新窗口第一件事）
+
+1. **读本文档**（尤其 §0 与最近一个已完工的里程碑小节）。**不要重读 5665 行方案**——
+   只有需要查设计意图时才回原文翻对应章节。
+2. **读上一阶段的交接记录**：本文档里该里程碑的 `### 完工交接` 小节 + `git log --oneline -20`。
+   commit message 里写了每个 bug 的**成因**，比只看代码省时间。
+3. **确认环境**（见 §0.4），**尤其确认数据状态**——M0 就出现过「库里只剩 1 份语料，
+   直接建基线会得到错的数」这种坑。
+
+### 0.2 收工三步（里程碑完成时）
+
+1. 把「本阶段交付 / 实测证据 / 偏差 / 已知问题」写成本文档里的 `### 完工交接` 小节
+2. 提交 + 打 tag（`git tag mN-done`）+ 推送 `refactor/campus-rag`
+3. 跑一遍全量测试，把测试数写进交接小节
+
+### 0.3 施工注意事项（**每条都是 M0 实际踩过的坑**）
+
+| # | 注意 | 踩过什么 |
+|---|---|---|
+| **A1** | **改动必须实测验证，不能只推理** | M0 有 15 个 bug 是实测抓出来的，其中至少 5 个推理绝对发现不了（如「向量路 12 次全降级但链路看着正常」） |
+| **A2** | **文档的字面读法可能是错的** | 竖排恢复：文档只写「反转行序」，实测发现**必须同时合并各行**，否则成文日期被清洗规则吃掉。凡文档描述与实测冲突，**以实测为准并回写文档** |
+| **A3** | **新增节点必须写 `trace`** | 漏写会让 SSE 的 `_node_ran()` 判 False，**事件静默缺失**（decisions/citations 全不发）。有回归锁 `test_graph_trace.py` |
+| **A4** | **提示词里的 `$name` 是占位符，`{` 是普通字符** | 已改用 `string.Template`。**别退回 `str.format`** —— 会把 JSON 花括号当占位符，运行时才炸 `KeyError` |
+| **A5** | **往 Chroma 写日期必须用整数 YYYYMMDD** | `$lte` 只吃 int/float。写成 ISO 字符串会让**整条向量路静默降级** |
+| **A6** | **Chroma metadata 只能存标量** | 数组/对象存成 JSON 字符串；`collection.query` 与 `collection.get` 的返回**解析行为不同**，两路都要归一化（`search._json_field`） |
+| **A7** | **分层：`api/` 只做参数校验与响应封装** | M0 一度把 246 行业务写进 `api/chat.py`，已重构。**新接口照 `services/` 放** |
+| **A8** | **短锁必须与写操作同一事务** | `pg_advisory_xact_lock` 事务级，写成两次独立 execute = 锁在写之前就释放了 |
+| **A9** | **改了 `filters.py` / `state.py` / 提示词，要跑全量测试** | 这三处被多处依赖，改动的爆炸半径大 |
+| **A10** | **单 worker 是硬约束** | Chroma 内嵌，`--workers 1` 不能省。换了 PG 也不行 |
+| **A11** | **破坏性操作（删数据/清索引）先归档、再问用户** | M0 清 `data/` 时被权限分类器拦下，这是对的 |
+| **A12** | **提交只进 `refactor/campus-rag`，禁止动 main、禁止 force push** | 用户明令。main 是 L4 回滚的最后一道保险 |
+
+### 0.4 环境与命令
+
+```bash
+# 基础设施
+docker compose up -d --wait postgres          # PG 17-alpine，只绑 127.0.0.1
+
+# 后端（单 worker 是硬约束）
+cd backend && uv run uvicorn app.main:app --workers 1 --port 8090
+
+# 前端
+cd frontend/web && npx vite --port 5273        # 代理 /api → 127.0.0.1:8090
+
+# CLI
+cd backend && uv run python -m app.cli {init-db|create-admin|check-llm}
+
+# 测试（从仓库根跑）
+uv run pytest backend/tests -q
+
+# 浏览器验收（bsk）
+bsk daemon start --port 35000    # 端口必须显式 35000
+bsk status                        # 确认 browsers connected ≥ 1
+bsk session start --json
+bsk session stop <id>             # 用完必须停，否则堵住命令队列
+```
+
+### 0.5 目录结构说明（与方案 §3.1 的对应）
+
+```
+backend/app/
+├── core/       config logging telemetry security deps exceptions metrics(M5) prompts
+│               └─ config/ 下另有 app.yaml(应用配置) security.yaml(仅环境变量名) prompts/*.txt
+├── api/        只做参数校验与响应封装（A7）
+├── services/   业务：chat_service document_service conversation_service
+│               index_service qa_log_service stats_service(M4) eval_service(M5)
+├── graph/      state builder + nodes/(11 个，已齐)
+├── retrieval/  bm25 vector fusion reranker filters + search(编排) embedding
+├── ingestion/  file_type chunker enrich versioning pipeline + loaders/ + mineru_client
+└── schemas/    auth chat（conversation/document/eval 随对应里程碑补）
+```
+
+**未建目录的设计意图**：`api/{users,conversations,document_access,admin,eval}.py`
+与前端 `router/ layouts/ views/admin/` 都是**按里程碑排期未到**，不是遗漏；
+M3 补 `document_access`，M4 补其余，M5 补 `eval`。
+
+---
+
+---
+
 ## 0. 开工前的环境实测结论（2026-10-05 实跑，非推断）
 
 | 项 | 实测结果 | 对施工的影响 |

@@ -1,0 +1,41 @@
+# 密钥引用（方案 §3.2.1）
+#
+# ⚠️ 本文件**只存「环境变量名」，绝不存值**。
+#    真实值一律写在仓库根的 .env（已在 .gitignore 第 151 行，实测确认未被跟踪）。
+#
+# 为什么单独一个文件而不是并进 app.yaml：
+#   评审/答辩时要能一眼说明「配置里没有任何密钥」。混在 app.yaml 里，
+#   得逐个字段看才能确认；单独一个文件，扫一眼全是变量名即可。
+#
+# 用法（app/core/config.py）：
+#     from app.core.config import secret
+#     api_key = secret("deepseek_api_key")     # → 解析出实际值
+# 缺变量时**立刻报错**，不用空串兜底 —— 静默的空密钥会变成难查的 401。
+
+llm:
+  # DeepSeek 官方 API（施工计划 §1.0）
+  deepseek_api_key: DEEPSEEK_API_KEY
+  deepseek_base_url: DEEPSEEK_BASE_URL
+
+embedding:
+  # 阿里云百炼（dashscope 兼容模式），实测 1024 维
+  aliyun_access_key: ALIYUN_ACCESS_KEY
+  aliyun_base_url: ALIYUN_BASE_URL
+
+auth:
+  jwt_secret: JWT_SECRET
+
+database:
+  pg_user: PG_USER
+  pg_password: PG_PASSWORD
+
+ingestion:
+  # MinerU 云端解析（扫描件分支）
+  # ⚠️ 附录 A 第 1 条：旧密钥硬编码在 app/config/chroma.yaml 且**已进 git 历史**，
+  #    需吊销重发（施工计划 U-1，需用户在 MinerU 控制台操作）
+  mineru_token: MINERU_TOKEN
+
+# 引导用（附录 D.4）—— 建完首个管理员后应立即从 .env 清掉 ADMIN_PASSWORD
+bootstrap:
+  admin_username: ADMIN_USERNAME
+  admin_password: ADMIN_PASSWORD

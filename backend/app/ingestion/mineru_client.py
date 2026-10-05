@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app.core.config import cfg, require_env
+from app.core.config import cfg, secret
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class MinerUTokenExpired(MinerUError):
 def _client():
     from mineru import MinerU
 
-    token = require_env(cfg("mineru.token_env", "MINERU_TOKEN"))
+    token = secret("ingestion.mineru_token")
     return MinerU(token=token)
 
 
@@ -90,9 +90,8 @@ def extract_pages(pdf_path: Path, pages: str) -> list[dict[str, Any]]:
 
 def is_available() -> tuple[bool, str]:
     """探活。不实际发起解析（那要花钱与时间），只检查 token 是否存在。"""
-    import os
-
-    env_key = cfg("mineru.token_env", "MINERU_TOKEN")
-    if not os.getenv(env_key):
-        return False, f"未设置 {env_key}"
+    try:
+        secret("ingestion.mineru_token")
+    except (KeyError, RuntimeError) as e:
+        return False, f"MinerU token 不可用：{e}"
     return True, "ok"

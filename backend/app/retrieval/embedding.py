@@ -16,7 +16,7 @@ import logging
 
 import httpx
 
-from app.core.config import cfg, env, require_env
+from app.core.config import cfg, env, secret
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ class EmbeddingError(RuntimeError):
 
 
 def _endpoint() -> tuple[str, str, str]:
-    base = require_env(cfg("embedding.base_url_env", "ALIYUN_BASE_URL")).rstrip("/")
-    key = require_env(cfg("embedding.api_key_env", "ALIYUN_ACCESS_KEY"))
+    base = secret("embedding.aliyun_base_url").rstrip("/")
+    key = secret("embedding.aliyun_access_key")
     model = cfg("embedding.model", "qwen3.7-text-embedding")
     return base + "/embeddings", key, model
 
@@ -107,6 +107,10 @@ def dimension() -> int:
 
 
 def is_configured() -> bool:
-    base_env = cfg("embedding.base_url_env", "ALIYUN_BASE_URL")
-    key_env = cfg("embedding.api_key_env", "ALIYUN_ACCESS_KEY")
-    return bool(env(base_env) and env(key_env))
+    """密钥齐不齐 —— 走 security.yaml，与取值路径一致。"""
+    try:
+        secret("embedding.aliyun_base_url")
+        secret("embedding.aliyun_access_key")
+    except (KeyError, RuntimeError):
+        return False
+    return True

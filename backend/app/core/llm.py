@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from app.core.config import cfg, require_env
+from app.core.config import cfg, secret
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +33,12 @@ class LLMTimeout(LLMError):
 
 
 def _base() -> str:
-    return require_env(cfg("llm.base_url_env", "DEEPSEEK_BASE_URL")).rstrip("/")
+    return secret("llm.deepseek_base_url").rstrip("/")
 
 
 def _headers() -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {require_env(cfg('llm.api_key_env', 'DEEPSEEK_API_KEY'))}",
+        "Authorization": f"Bearer {secret('llm.deepseek_api_key')}",
         "Content-Type": "application/json",
     }
 
@@ -178,4 +178,4 @@ async def stream_raw(
 
 def is_configured() -> bool:
     import os
-    return bool(os.getenv(cfg("llm.api_key_env", "DEEPSEEK_API_KEY")))
+    return bool(os.getenv(secret("llm.deepseek_api_key")))

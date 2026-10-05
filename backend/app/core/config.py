@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
 CONFIG_FILE = BACKEND_DIR / "app" / "config" / "app.yaml"
+SECURITY_FILE = BACKEND_DIR / "app" / "config" / "security.yaml"
 
 # .env 在仓库根（已在 .gitignore 第 151 行）
 load_dotenv(REPO_ROOT / ".env")
@@ -58,9 +59,41 @@ def require_env(name: str) -> str:
     return value
 
 
-def secret(env_key: str) -> str:
-    """按键名取密钥 —— 配置里存的是环境变量名，这里才解析成实际值（§3.2.1）。"""
-    return require_env(env_key)
+@lru_cache(maxsize=1)
+def get_security() -> dict[str, Any]:
+    """加载 security.yaml（只含环境变量名，不含值）。"""
+    with open(SECURITY_FILE, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def secret(logical_name: str) -> str:
+    """按**逻辑名**取密钥，如 `secret("deepseek_api_key")`。
+
+    两跳：security.yaml 里查逻辑名 → 拿到环境变量名 → 取实际值。
+    ⚠️ 缺变量时立刻报错，不用空串兜底 —— 静默的空密钥会变成难查的 401。
+    """
+    node: Any = get_security()
+    for part in logical_name.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(
+                f"security.yaml 里没有 {logical_name!r}。"
+                f"可用：{_security_keys()}"
+            )
+        node = node[part]
+    return require_env(str(node))
+
+
+def _security_keys() -> list[str]:
+    out: list[str] = []
+
+    def walk(node, prefix=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{prefix}{k}.")
+        else:
+            out.append(prefix.rstrip("."))
+    walk(get_security())
+    return sorted(out)
 
 
 # ---- 常用路径 ----------------------------------------------------------
@@ -78,6 +111,6 @@ def pg_dsn() -> str:
     host = env("PG_HOST", "127.0.0.1")
     port = env("PG_PORT", "5432")
     db = env("PG_DATABASE", "campus_rag")
-    user = require_env("PG_USER")
-    password = require_env("PG_PASSWORD")
+    user = secret("database.pg_user")
+    password = secret("database.pg_password")
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"

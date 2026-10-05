@@ -18,7 +18,7 @@ from pathlib import Path
 
 import asyncpg
 
-from app.core.config import BACKEND_DIR, cfg, env, require_env
+from app.core.config import BACKEND_DIR, cfg, env, require_env, secret
 from app.core.security import hash_password
 
 MIGRATIONS_DIR = BACKEND_DIR / "migrations"
@@ -124,8 +124,8 @@ async def cmd_check_llm(_args: argparse.Namespace) -> int:
     """
     import httpx
 
-    base = require_env(cfg("llm.base_url_env", "DEEPSEEK_BASE_URL")).rstrip("/")
-    key = require_env(cfg("llm.api_key_env", "DEEPSEEK_API_KEY"))
+    base = secret("llm.deepseek_base_url").rstrip("/")
+    key = secret("llm.deepseek_api_key")
     model = cfg("llm.model", "deepseek-flash")
     effort = cfg("llm.reasoning_effort", "none")
 
