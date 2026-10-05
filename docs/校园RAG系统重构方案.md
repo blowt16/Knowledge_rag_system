@@ -1,6 +1,11 @@
 # 校园 RAG 检索问答系统 — 重构方案
 
-> 版本：v1.2 ｜ 日期：2026-10-04 ｜ 状态：待审批
+> 版本：v1.3 ｜ 日期：2026-10-04 ｜ 状态：待审批
+>
+> **v1.3 变更**：**元数据存储由 SQLite 改为 PostgreSQL**（**不含多租户**——面向单一学校，多租户本轮不做，见 C.1.2）；
+> **会话锁改为两层 PG 锁**（事务级 `pg_advisory_xact_lock` + `session_locks` 表），不再依赖进程内 `dict`；
+> 新增 **3.3.5**（驱动与连接管理）；改写 **3.2.4**（并发）、**附录 C.1.2**（选型记录）、
+> **附录 D**（数据初始化）、**附录 G**（PG 部署）。详见各处 ✅/⚠️ 标注。
 >
 > **v1.2 变更**：**M0 两条「开工前必验」已实测销项**（2026-10-04），新增**附录 F**（实测记录与施工指令）；
 > 据此修正 **E.5** 的显存口径（reranker 实占 2.3–2.5GB，推翻「6GB 无余量」前提）
@@ -23,6 +28,13 @@
 | 上线级质量 | 架构、测试、可观测性按生产标准做，**但不真上线** |
 
 **不做的事**：不对接学校统一认证、不做真实流量压测、**不建运维体系**。
+
+> **「不做多环境部署」与「现在换 PostgreSQL」怎么并存**（**v1.3 新增，用于消歧**）：
+> 换库**不代表现在要上线**——多环境部署、容量规划、运维体系**仍然不做**。
+>
+> 换的理由是**成本窗口**，不是需求已到：**全量重写是改表结构成本最低的唯一窗口**，
+> 等 M0–M5 做完再换，12 张表与附录 D 都要重写一遍。判据（后续新增决策按这条判）：
+> **「将来要改就得重写」的，现在就做**（换库）；**「将来加一层就行」的，继续不做**（多环境、容量规划、值班告警）。
 
 > **「不建运维体系」与「可观测性按生产标准做」不矛盾**——前者说的是**人和流程**，后者说的是**工具与数据**：
 >
@@ -47,6 +59,7 @@
 | 6 | 文档格式 | txt / pdf / md / pptx / docx（**不做 HTML**） |
 | 7 | 架构顺序 | 指代消解前置到 Query Router 之前 |
 | 8 | 策略 | 4 个亮点做深，其余模块够用即可 |
+| 9 | **元数据存储** | **PostgreSQL**。**SQLite 已弃用**——理由与代价见 C.1.2。**本轮不做多租户**（面向单一学校） |
 
 ### 1.3 四个亮点
 
@@ -117,19 +130,24 @@
                                  │
                  ┌───────────────┼───────────────┐
                  ↓               ↓               ↓
-            ┌────────┐    ┌──────────┐   ┌───────────┐
-            │ SQLite │    │  Chroma  │   │  BM25S    │
-            │ 结构化  │    │  向量库   │   │  稀疏索引  │
-            └────────┘    └──────────┘   └───────────┘
+           ┌──────────┐   ┌──────────┐   ┌───────────┐
+           │PostgreSQL│   │  Chroma  │   │  BM25S    │
+           │  结构化  │   │  向量库  │   │  稀疏索引 │
+           └──────────┘   └──────────┘   └───────────┘
 ```
 
 **三条存储分工明确**：
 
 | 存储 | 存什么 | 为什么 |
 |---|---|---|
-| SQLite | 用户、文档元数据、会话、问答日志 | 需事务、需 join、需统计聚合 |
+| **PostgreSQL** | 用户、文档元数据、会话、问答日志、评测集 | 需事务、需 join、需统计聚合；**异步驱动不阻塞 SSE 流**（见 3.3.5） |
 | Chroma | chunk 文本 + 向量 + 过滤字段 | 语义检索 |
 | BM25S | 稀疏索引（磁盘持久化） | 关键词精确匹配 |
+
+> **仍是「三处存储」，分工不变**——本版只换了第一处**用什么数据库**，没有增加第四处。
+> ⚠️ **别把 Chroma 内部的 SQLite 算进来**：Chroma 自己用 `chroma.sqlite3` 做持久化（见附录 D 与 E.1），
+> 那是**它自己的实现细节**，与本节讨论的元数据存储是两回事。全文凡提「SQLite」均指**已弃用的旧元数据库**，
+> 唯附录 D 的清理项与 E.1 的实测证据除外（那里指的是 Chroma 内部文件）。
 
 ---
 
@@ -150,7 +168,7 @@ backend/
 │   │   ├── security.py          JWT 签发/校验、密码哈希
 │   │   ├── deps.py              依赖注入：current_user、require_role
 │   │   ├── exceptions.py        统一异常 + 全局处理
-│   │   └── metrics.py           业务指标落 SQLite + 运行指标 OTLP 导出（见 3.2.3.3）
+│   │   └── metrics.py           业务指标落 PostgreSQL + 运行指标 OTLP 导出（见 3.2.3.3）
 │   ├── api/
 │   │   ├── auth.py              login / refresh / logout / me（见 3.7.1）
 │   │   ├── users.py             用户管理（/api/admin/users/*，见 3.7.3）
@@ -264,7 +282,7 @@ core/deps.py      构造 UserContext
 
 > **分两类，不可互相替代**——这是本节的组织原则：
 >
-> - **业务可观测**：答「系统答得好不好」。落 SQLite，供评测、仪表盘、消融实验。**已有设计，保留不变。**
+> - **业务可观测**：答「系统答得好不好」。落 PostgreSQL，供评测、仪表盘、消融实验。**已有设计，保留不变。**
 > - **运行时可观测**：答「刚才那次请求为什么慢 / 为什么错」。走 OTel 三支柱，供排障与告警。**本节新增——原方案这块基本空白。**
 
 **业务可观测（保留）**
@@ -374,7 +392,7 @@ OTel Collector（单实例）
 
 **关键点：`spanmetrics` connector 是「追踪数据能上仪表盘」的那一环**——它把 span 实时聚合成 Prometheus 指标（按 span 名、状态、耗时分桶）。**没有它，Jaeger 里的 trace 就只是一个个孤立的请求，出不了分位数与趋势**。这也是原方案「单容器 Jaeger 即可」不成立的原因。
 
-**仪表盘上能看到什么**（全部来自 Prometheus，不再从 SQLite 现算）：
+**仪表盘上能看到什么**（全部来自 Prometheus，不再从 PostgreSQL 现算）：
 
 | 面板 | 指标 | PromQL 形态（示意） |
 |---|---|---|
@@ -385,7 +403,7 @@ OTel Collector（单实例）
 | 检索召回条数 | 分布 | 直方图 |
 | 降级次数 | 按 `kind` 分组 | 来自 `degradation_events`（业务表，非 Prometheus） |
 
-> **`degradation_events` 仍走 SQLite**：它是**业务语义**的降级记录（重排超时、路由降级、BM25 索引失效……），不是运行指标。仪表盘的「降级次数」面板继续读它，与 Prometheus 那几块并列展示。
+> **`degradation_events` 仍走 PostgreSQL**：它是**业务语义**的降级记录（重排超时、路由降级、BM25 索引失效……），不是运行指标。仪表盘的「降级次数」面板继续读它，与 Prometheus 那几块并列展示。
 
 **「追踪的可观测数据」怎么落到仪表盘上**
 
@@ -415,7 +433,7 @@ OTel Collector（单实例）
 |---|---|---|
 | HTTP | `opentelemetry-instrumentation-fastapi` | `0.66b0` |
 | **图节点** | `opentelemetry-instrumentation-langchain` | `0.62.4` |
-| DB / HTTP 客户端 | SQLite、httpx 自动埋点 | 可选 |
+| DB / HTTP 客户端 | PostgreSQL、httpx 自动埋点 | 可选 |
 
 **需要起的组件**（见 3.2.3.3 的数据流）：
 
@@ -471,12 +489,71 @@ OTel Collector（单实例）
 
 **会话锁与幂等去重的落点（原方案未定义）**
 
+**锁分两层，用两种不同机制**（**v1.3 改写**：原设计用进程内 `dict[session_id, Lock]`）。
+
+| 层 | 机制 | 保护什么 | 生命周期 |
+|---|---|---|---|
+| **短锁** | 事务级 advisory lock：`pg_advisory_xact_lock(hashtext('session:' \|\| session_id))` | **消息追加、状态更新等毫秒级写操作** | **事务级**——提交/回滚即自动释放，**不会残留** |
+| **长锁** | **`session_locks` 表 + TTL**（表结构见 3.3.1） | **整个 LLM 生成过程** | 显式申请 / 释放；**TTL 到期即自动可抢**（防持有者崩溃） |
+
+**为什么必须分两层**（这是本设计的要点，不是随手选的）：
+
+- **短锁不能用表**：毫秒级写操作若走 `INSERT ... ON CONFLICT` 抢锁，等于为一次小写付两次往返；
+  而 advisory lock 是**内核态、零元数据**，且**事务级自动释放**——连 `finally` 都不需要写。
+- **长锁不能用 advisory lock**：LLM 生成可能几十秒，且**跨多个事务**（追加消息 → 更新状态 → 落 `qa_logs`）。
+  `pg_advisory_xact_lock` 要求整个生成期包在**一个**事务里——那会拖出一个超长事务，
+  **锁表膨胀 + 阻塞 vacuum**，代价远大于收益。所以长锁用**表 + TTL**。
+
+**长锁的获取：一句 SQL 原子完成「空闲则拿、过期则抢」**
+
+```sql
+INSERT INTO session_locks (session_id, holder, acquired_at, expires_at, heartbeat_at)
+VALUES ($1, $2, now(), now() + interval '120 seconds', now())
+ON CONFLICT (session_id) DO UPDATE
+   SET holder       = EXCLUDED.holder,
+       acquired_at  = EXCLUDED.acquired_at,
+       expires_at   = EXCLUDED.expires_at,
+       heartbeat_at = EXCLUDED.heartbeat_at
+ WHERE session_locks.expires_at < now()      -- ← 只在旧锁已过期时才抢
+RETURNING session_id;
+```
+
+> **`RETURNING` 有没有行，就是「拿没拿到锁」**：返回 **0 行** = 锁被他人持有且未过期 → 按下方策略处理。
+>
+> ⚠️ **`WHERE expires_at < now()` 必须有**：没有它，`ON CONFLICT DO UPDATE` 会**无条件抢占**，
+> 变成「后到者赢」——同一会话的两个并发请求会**同时开始生成**，锁等于没加。
+
+**长锁的释放**
+
+```sql
+DELETE FROM session_locks WHERE session_id = $1 AND holder = $2;
+```
+
+> ⚠️ **`holder` 必须出现在 `WHERE` 里**：否则一个已超时、锁被别人抢走的旧请求，
+> 在结束时会把**新持有者的锁删掉**——新持有者瞬间失去保护，两个生成同时跑。
+
+**TTL 与心跳**：默认 TTL **120 秒**；生成过程中每 **30 秒**续期一次
+（`UPDATE session_locks SET expires_at = now() + interval '120 seconds', heartbeat_at = now() WHERE session_id = $1 AND holder = $2`）。
+持有者崩溃 / 断连后，**最多 120 秒**该会话自动解锁——比进程内 `dict` 的「只能重启服务」更可控。
+
+**锁的释放必须覆盖三条路径**：① 正常结束 ② 超时 ③ **客户端断连**。用 `try/finally` 保证。
+**断连不释放是最危险的**——该会话会永久「正在生成」，前端按钮禁用 + 后端拒绝，学生只能重开会话。
+
+**⚠️ 但「单 worker」解除不了——不要把这次改动写成「可以多实例了」**
+
+锁搬到 PG **不等于**可以多 worker 部署。**Chroma 是进程内嵌的**（`PersistentClient` 直接打开
+`data/chromadb/chroma.sqlite3`，见 C.1.3），**多 worker 会争抢同一个文件**；BM25S 的磁盘索引同理。
+
+**所以「单 worker」仍是硬约束**，部署说明里**照旧要写 `--workers 1`**（见附录 G）。本次搬锁的真实收益是另外三条：
+
+1. **短锁补上了并发写的原子性**——单 worker 下 async 仍会并发处理多个请求，同一会话的两个请求（双击 / 多标签页）会**交错写消息**，事务级 advisory lock 正是为此
+2. **长锁可观测**——`SELECT * FROM session_locks` 能直接看见谁卡着、卡了多久；进程内 `dict` 是黑盒
+3. **为将来铺路**——把 Chroma 改成 server 模式那一步做完之后，锁已经是分布式的，**那时才谈得上多实例**
+
 | 项 | 约定 |
 |---|---|
-| **部署前提** | **单 worker**（`uvicorn` 不加 `--workers`）。多 worker 下进程内锁形同虚设——这一点必须写进部署说明，否则"锁"是假的 |
-| **锁的实现** | 进程内 `dict[session_id, Lock]`（单 worker 前提下足够，**不引入 Redis**） |
-| **锁的释放** | ⚠️ **必须覆盖三条路径**：① 正常结束 ② 超时 ③ **客户端断连**。用 `try/finally` 保证。**断连不释放是最危险的**——该会话会永久「正在生成」，前端按钮禁用 + 后端拒绝，学生只能重开会话 |
-| **`request_id` 去重** | 落 **`conversations` 表旁的一张轻量表**或进程内 LRU（TTL 10 分钟）。**不做持久化**——重启后重复提交的概率极低，不值得为它建表 |
+| **部署前提** | **单 worker**（`uvicorn --workers 1`）。**理由已从「进程内锁」改为「Chroma 内嵌」**——锁已不依赖进程内状态，但 Chroma 仍然依赖（见上） |
+| **`request_id` 去重** | 落 `conversations` 表旁的轻量表或进程内 LRU（TTL 10 分钟）。**不做持久化**——重启后重复提交的概率极低，不值得为它建表 |
 
 > **「断线自动重连」不做。** 原设计写了「SSE 断开自动重连 + 轮询兜底」，但 SSE 没有 event id / 重放机制，3.7.2 也没有可轮询的查询接口——**那是一句实现不了的承诺**。改为：断线后前端提示「连接中断，请重新发送」。
 >
@@ -486,7 +563,20 @@ OTel Collector（单实例）
 
 ### 3.3 数据层
 
-#### 3.3.1 SQLite 表结构
+#### 3.3.1 PostgreSQL 表结构
+
+**本版共 12 张表** = 原方案的 11 张 + 本版新增的 **`session_locks`**（会话长锁，见 3.2.4）。
+
+> **⚠️ 口径：本轮不做多租户**（面向单一学校）。因此表里**没有 `tenant_id`、不启用 RLS**。
+> **不要因为「PostgreSQL 支持 RLS」就顺手加上**——那会引入一层没人维护、也没人验证的隔离逻辑，
+> 比不加更糟。将来真要做多租户时再加不迟（代价见 C.1.2 的「下次再评估」）。
+
+**两条全局口径（先读这段，再看各表）**
+
+| 口径 | 约定 |
+|---|---|
+| **① 类型** | 主键保持 `TEXT`（不换 UUID 类型，与现有代码一致）；`DATETIME` → **`TIMESTAMPTZ`**（SQLite 无时区类型，跨时区是隐患）；`TEXT(JSON)` → **`JSONB`**（可加 GIN 索引、可做成员判断）；`INTEGER` 布尔位保持 |
+| **② 隔离只有一个维度：角色** | 即 3.3.3 的 `vis_<角色>` 布尔字段（亮点①）。**角色隔离仍在检索层做，不下沉到数据库**，与原方案一致——**没有第二个维度**（没有租户，没有 RLS） |
 
 **`users`**
 
@@ -497,7 +587,7 @@ OTel Collector（单实例）
 | password_hash | TEXT | bcrypt |
 | role | TEXT | student / staff / admin |
 | **token_version** | INTEGER | **令牌版本，默认 0**；自增即让该用户所有已签发令牌失效（见 3.7.1） |
-| created_at | DATETIME | |
+| created_at | TIMESTAMPTZ | |
 
 **`documents`** — 核心表
 
@@ -513,19 +603,19 @@ OTel Collector（单实例）
 | **effective_date** | DATE | 施行日期 |
 | **status** | TEXT | `indexing` / `active` / `disabled` / **`failed`**（**不含 `superseded`**——版本新旧由检索期解析，见下） |
 | **visibility** | TEXT | public / restricted |
-| **visible_roles** | TEXT(JSON) | restricted 时生效，如 `["admin"]` |
+| **visible_roles** | JSONB | restricted 时生效，如 `["admin"]` |
 | **source_path** | TEXT | **原文件**在服务器上的存储路径（原文回跳用） |
 | **normalized_text_path** | TEXT | **清洗后规范化文本**的路径（偏移的参照系） |
 | uploader_id | TEXT FK | |
 | chunk_count | INTEGER | |
-| created_at / updated_at | DATETIME | |
+| created_at / updated_at | TIMESTAMPTZ | |
 
 **状态机**：
 
 ```
 上传新版本
     ↓
-① 先插 documents 行，status = indexing（在同一 SQLite 事务内分配 version）
+① 先插 documents 行，status = indexing（在同一 PostgreSQL 事务内分配 version）
     ↓
 ② 索引写完后 → status = active        ← 这一步才是「完成」标记
     ↓
@@ -550,7 +640,7 @@ OTel Collector（单实例）
 > - `documents` 行**必须在写向量库之前插入**——否则并发上传同一 `doc_group_id` 时相互看不见对方未提交的行，事务内分配的 version 会撞车。配套加 `UNIQUE(doc_group_id, version)` 兜底。
 > - 行有了，`document_id` 就存在了 → **失败时才能「按 `document_id` 反向删除三个存储」**（原方案要求回填 `document_id`，但失败时它还是 NULL，回滚无从下手）。
 > - 半成品文档不会污染检索：`indexing` 不满足折叠规则里的 `status = "active"`，**自动被排除**——原方案下它会被折叠当成"现行版最大 version"，在上传窗口内把旧版挤掉。
-> - 「SQLite 最后写」的正确含义是 **「最后把 `status` 翻成 `active`」**，不是「最后才插行」。
+> - 「PostgreSQL 最后写」的正确含义是 **「最后把 `status` 翻成 `active`」**，不是「最后才插行」。
 
 **检索期如何解析「当前生效版本」**（关键设计）
 
@@ -582,7 +672,7 @@ OTel Collector（单实例）
 **实现方式**：不要在 Chroma 里表达"同组最大版本"（它做不到），改为**两段式**——
 
 1. 两路检索（Chroma 与 BM25）各自带 `status` / `effective_date` / ACL 过滤，含过采样
-2. **拿候选里的 `doc_group_id` 回查 SQLite**，得到每组「active 且 effective_date ≤ 今天」的 `max(version)`
+2. **拿候选里的 `doc_group_id` 回查 PostgreSQL**，得到每组「active 且 effective_date ≤ 今天」的 `max(version)`
 3. **丢弃 version ≠ 该最大值的 chunk**，剩下的**候选池**进入 RRF 融合与精排
 
 > **折叠作用于「两路候选的并集」，不是只作用于 Chroma 那一路**。BM25 对措辞雷同的旧版（v4）命中率天然更高，若它不做折叠，旧版会以高 RRF 分进入候选并可能被返回 —— 正是亮点①要防的场景。BM25 侧经「下标 → 映射表」回查时同样要取到 `doc_group_id` / `version` 参与组内最大值判定。
@@ -593,7 +683,7 @@ OTel Collector（单实例）
 >
 > 原表述「丢弃后**再取最终返回的 5 条**」读起来像折叠直接产出最终结果、跳过精排。按那种读法施工会**取消精排**（Top-5 退化成相似度排序），或把折叠挪到精排之后 —— 后者更糟：已废止的 v4 可能先被精排选中，再被折叠丢弃，最终凑不满 5 条，且旧版有机会漏出。
 
-> ⚠️ **第 2 步必须回查 SQLite，不能在召回集内取最大。** 若现行版 v5 的措辞与 query 不相似、而已废止的 v4 相似，Top-N 里只有 v4——在召回集内折叠会把 **v4 当成现行版本**返回，用户拿到已废止的政策，界面还按「当前生效」展示。**这会让亮点①的版本隔离彻底失效。**
+> ⚠️ **第 2 步必须回查 PostgreSQL，不能在召回集内取最大。** 若现行版 v5 的措辞与 query 不相似、而已废止的 v4 相似，Top-N 里只有 v4——在召回集内折叠会把 **v4 当成现行版本**返回，用户拿到已废止的政策，界面还按「当前生效」展示。**这会让亮点①的版本隔离彻底失效。**
 
 **代价与补偿**：过期版本会占用召回槽位（某制度有 8 个历史版本时，Top-30 可能被占满）。因此**版本折叠后的条数要纳入 3.3.4 的重试判据**——折叠后不足 K 条时同样触发放大重试。
 
@@ -613,7 +703,7 @@ OTel Collector（单实例）
 | **retry_count** | INTEGER | 同一文件被上传了几次（仅观测，见下方「失败与重试」） |
 | document_id | TEXT FK | 索引成功时回填（配合 3.3.1 的 `indexing` 状态） |
 | **uploader_id** | TEXT FK | 谁传的（管理端展示） |
-| created_at / updated_at | DATETIME | |
+| created_at / updated_at | TIMESTAMPTZ | |
 
 > **`batch_id` 与 `file_name` 是 ZIP 批量上传必需的**：一次 zip 会产生 N 条任务，而原表只有 `doc_group_id`（单值）——**整包进度、包内哪个文件失败都无处表达**。有了 `batch_id` 才能：① 聚合出「整包处理了 m/N」；② 管理端展开看到每个文件的状态。单文件上传时 `batch_id = id`，口径统一。
 >
@@ -624,10 +714,10 @@ OTel Collector（单实例）
 ```
 1. 删 Chroma 里该 document_id 的 chunk
 2. 删 BM25S 索引里该 document_id 的项
-3. SQLite：documents 行置 failed（不删行）；ingestion_tasks 行置 failed（不删行）
+3. PostgreSQL：documents 行置 failed（不删行）；ingestion_tasks 行置 failed（不删行）
 ```
 
-> **删除顺序是「先把向量与稀疏索引、后 SQLite」**，与写入顺序完全相反。原表述写「按 `document_id` **反向**删除三个存储（Chroma → BM25S → SQLite）」——**「反向」与括号里的顺序对不上**（写入顺序本来就是 Chroma → BM25S → SQLite），施工会有两种实现。现按「反序 = SQLite 最后」钉死。
+> **删除顺序是「先把向量与稀疏索引、后 PostgreSQL」**，与写入顺序完全相反。原表述写「按 `document_id` **反向**删除三个存储（Chroma → BM25S → PostgreSQL）」——**「反向」与括号里的顺序对不上**（写入顺序本来就是 Chroma → BM25S → PostgreSQL），施工会有两种实现。现按「反序 = PostgreSQL 最后」钉死。
 >
 > **两张表的行都必须保留**：`ingestion_tasks` 行承载「失败队列」——删了它管理端就看不到失败记录；`documents` 行保留但置 `failed`（取值见 3.3.1）。
 
@@ -640,7 +730,7 @@ OTel Collector（单实例）
 
 > 不做原地重跑的理由：补偿删除若中途失败会留下「半删状态」，自动重跑在脏状态上继续，风险高于收益。重新上传会走完整的校验与去重流程，状态可控。
 
-**version 分配必须在 SQLite 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。配套 `UNIQUE(doc_group_id, version)` 兜底（见 3.3.1 的 `documents`）。
+**version 分配必须在 PostgreSQL 事务内**：否则两个管理员同时上传同一 `doc_group` 会读到相同的"旧版 version"，产生重复版本号。配套 `UNIQUE(doc_group_id, version)` 兜底（见 3.3.1 的 `documents`）。
 
 **`conversations`**
 
@@ -653,8 +743,8 @@ OTel Collector（单实例）
 | **compressed_count** | INTEGER | 被摘要覆盖的消息条数 |
 | is_top | INTEGER | 0/1 置顶 |
 | delete_flag | INTEGER | 0/1 软删除 |
-| last_chat_time | DATETIME | 列表排序用 |
-| created_at | DATETIME | |
+| last_chat_time | TIMESTAMPTZ | 列表排序用 |
+| created_at | TIMESTAMPTZ | |
 
 **`messages`**
 
@@ -664,13 +754,29 @@ OTel Collector（单实例）
 | conversation_id | TEXT FK | |
 | role | TEXT | user / assistant |
 | content | TEXT | **原文**——助手消息含 `[n]` 标记，落库**不剥离** |
-| **citations** | TEXT(JSON) | 助手消息的引用列表（用户消息为空） |
+| **citations** | JSONB | 助手消息的引用列表（用户消息为空） |
 | **route** | TEXT | 用户消息被路由到哪一类 ← **`last_route` 的来源**（见 3.5.1） |
-| created_at | DATETIME | |
+| created_at | TIMESTAMPTZ | |
 
 > **落库时机很重要**：**存原始答案（含 `[n]` 标记）+ 独立的 `citations` 列**。若在落库时就剥掉标记，用户重新打开会话时回答里既没角标也没引用，**与验收标准「引用可点击跳原文」冲突**。
 >
 > 剥离只发生在**拼 `history` 时**（见 3.5.1 历史清洗规则与 **3.8 多轮对话的上下文工程**）——入库是完整的，入 prompt 才是干净的。
+
+**`session_locks`** — 会话长锁（**本版新增**，机制见 3.2.4）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| session_id | TEXT PK | 会话。**主键即锁**——同一会话在表里最多一行 |
+| holder | TEXT | 持有者标识（实例 id + pid），**排查「谁卡着」用** |
+| acquired_at | TIMESTAMPTZ | 申请时间 |
+| expires_at | TIMESTAMPTZ | **过期时间**。到点即可被他人抢走（3.2.4 的 `ON CONFLICT ... WHERE expires_at < now()`） |
+| heartbeat_at | TIMESTAMPTZ | 最近一次续期时间 |
+
+> **为什么 `session_id` 直接做主键**：锁的语义是「同一会话同时只允许一个生成」，
+> **主键唯一约束在数据库层就保证了这一点**，不依赖应用层判断——应用层判错就是并发跑两份。
+>
+> **过期行的清理**：`DELETE FROM session_locks WHERE expires_at < now()` 可定期跑，**但不是必须**——
+> 过期行会被下一个请求直接抢走，不阻塞。定期清理只是为了表不无限增长。
 
 **`qa_logs`** — 新增
 
@@ -707,7 +813,7 @@ OTel Collector（单实例）
 | node | TEXT | 发生降级的节点（rerank / route / bm25 / **compaction** …） |
 | kind | TEXT | 降级类型（timeout / oom / model_load_failed / index_invalid …） |
 | detail | TEXT | 补充信息 |
-| created_at | DATETIME | |
+| created_at | TIMESTAMPTZ | |
 
 > 单独建表而不是塞进 `qa_logs.node_timings`：后者是**节点耗时**字段，把降级事件混进去会让仪表盘解析要特判。独立表还能直接 `COUNT(*) GROUP BY kind` 出"降级次数"。
 >
@@ -736,12 +842,12 @@ OTel Collector（单实例）
 | id | TEXT PK | |
 | question | TEXT | 问题 |
 | ground_truth | TEXT | 标准答案 |
-| expected_doc_ids | TEXT(JSON) | 相关文档标注 |
-| expected_chunk_ids | TEXT(JSON) | 相关 chunk 标注 |
+| expected_doc_ids | JSONB | 相关文档标注 |
+| expected_chunk_ids | JSONB | 相关 chunk 标注 |
 | **case_type** | TEXT | `factual` / `cross_paragraph` / `doc_number` / `refusal` / **`restricted`** / `multi_turn`（对应 5.1 的分层） |
-| **turns** | TEXT(JSON) | **多轮用例的轮次脚本**——`[{question, ground_truth, expected_doc_ids}]` 的数组；单轮用例为 `null` |
-| **visible_roles** | TEXT(JSON) | **受限题专用**：该题要求的可见范围（如 `["admin"]`）。5.3 的 ACL 对照实验要用它挑题 |
-| created_at | DATETIME | |
+| **turns** | JSONB | **多轮用例的轮次脚本**——`[{question, ground_truth, expected_doc_ids}]` 的数组；单轮用例为 `null` |
+| **visible_roles** | JSONB | **受限题专用**：该题要求的可见范围（如 `["admin"]`）。5.3 的 ACL 对照实验要用它挑题 |
+| created_at | TIMESTAMPTZ | |
 
 > **为什么补 `turns` 与 `visible_roles`**：
 >
@@ -756,12 +862,12 @@ OTel Collector（单实例）
 |---|---|---|
 | id | TEXT PK | |
 | name | TEXT | 运行名称 |
-| **config** | TEXT(JSON) | 本轮配置 ← **消融实验的对照依据**（字段清单见下） |
+| **config** | JSONB | 本轮配置 ← **消融实验的对照依据**（字段清单见下） |
 | **role** | TEXT | 本轮以哪个角色跑（`student` / `staff` / `admin`）——**5.3 的 ACL 对照实验按它分组** |
 | **include_restricted** | INTEGER | 0/1，是否开启提权（见 3.3.3）——基准行必须为 1 |
 | status | TEXT | pending / running / done / failed |
-| **metrics** | TEXT(JSON) | 汇总指标（ragas 四指标 + 自定义指标） |
-| started_at / finished_at | DATETIME | |
+| **metrics** | JSONB | 汇总指标（ragas 四指标 + 自定义指标） |
+| started_at / finished_at | TIMESTAMPTZ | |
 
 **`config` 的字段清单**（原方案只说「如 `{"bm25": false, "rerank": true}`」，没有封闭词表——不定义就没法打消融表）：
 
@@ -782,11 +888,11 @@ OTel Collector（单实例）
 | id | TEXT PK | |
 | run_id | TEXT FK | |
 | case_id | TEXT FK | |
-| retrieved_ids | TEXT(JSON) | 实际召回的 chunk |
+| retrieved_ids | JSONB | 实际召回的 chunk |
 | answer | TEXT | 实际回答 |
 | **unauthorized_hits** | INTEGER | 本题返回的 chunk 中**属于当前角色不可见文档**的条数——**5.3 的「越权返回次数应为 0」直接读它** |
-| metrics | TEXT(JSON) | 该题的指标 |
-| created_at | DATETIME | |
+| metrics | JSONB | 该题的指标 |
+| created_at | TIMESTAMPTZ | |
 
 > 这三张表支撑 `POST /api/admin/eval/run`、`GET /api/admin/eval/runs`、`GET /api/admin/eval/runs/{id}` 三个接口（路径以 3.7.3 为准），以及 5.3 消融实验表的产出。**`eval_runs.config` 是消融对照的关键**——没有它就无法说明两次运行的差异来自哪个开关。
 
@@ -804,7 +910,7 @@ page, bbox, image_paths
 
 > **`vis_admin` / `vis_staff` 是布尔字段，不是 `visible_roles` 数组。**
 >
-> SQLite 侧 `documents.visible_roles` 仍是 `TEXT(JSON)`（管理端写入的源），但**进 Chroma 时必须展开成"每个角色一个布尔字段"**——因为 Chroma 的 `where` 只能在标量上做 `$eq`/`$in`，**对 JSON 字符串做不了成员判断**。布尔字段配 `$or` 兼容性最好，不依赖较新版本才有的数组 + `$contains` 能力。
+> PostgreSQL 侧 `documents.visible_roles` 现在是 `JSONB`（管理端写入的源），但**进 Chroma 时必须展开成"每个角色一个布尔字段"**——因为 Chroma 的 `where` 只能在标量上做 `$eq`/`$in`，**对 JSON 字符串做不了成员判断**。布尔字段配 `$or` 兼容性最好，不依赖较新版本才有的数组 + `$contains` 能力。
 >
 > 新增角色（如 `teacher`）时需同步加字段，这是该编码的代价。
 
@@ -818,7 +924,7 @@ page, bbox, image_paths
 >
 > **BM25 的映射表必须是「下标 → `chunk_id`」，不能只到 `document_id`**：只到文档粒度的话，① 同一 chunk 被两路命中时无法去重（违背 RRF 去重键的设计）；② BM25 侧命中拿不到 `char_start` / `char_end` / `page`，引用与原文回跳就缺了定位信息。
 >
-> **只加 `chunk_id` 进 metadata，不引入独立的 `chunks` 表**：chunk 正文与 metadata 都在向量库里，SQLite 侧不需要第二份（避免两处不同步）。
+> **只加 `chunk_id` 进 metadata，不引入独立的 `chunks` 表**：chunk 正文与 metadata 都在向量库里，PostgreSQL 侧不需要第二份（避免两处不同步）。
 
 > **`bbox` 是引用回跳的主定位依据**（格式与落点见 E.8.4）：存 RAGFlow 的 `@@{页号}\t{x0}\t{x1}\t{top}\t{bottom}##` 格式，**独立字段，不进 chunk 正文**。前端据此直接调 `react-pdf-highlighter` 按坐标高亮，不需要文本匹配。
 >
@@ -828,7 +934,7 @@ page, bbox, image_paths
 >
 > `page` 与 `page_start/page_end` 冗余，**统一保留 `page`**。
 
-**为什么要冗余**：Chroma 只能按自身 metadata 过滤，无法 join SQLite。若改为"先查 SQLite 拿合法文档 ID，再用 ID 列表查 Chroma"，文档一多该列表会超出查询上限。
+**为什么要冗余**：Chroma 只能按自身 metadata 过滤，无法 join PostgreSQL。若改为「先查 PostgreSQL 拿合法文档 ID，再用 ID 列表查 Chroma"，文档一多该列表会超出查询上限。
 
 #### 3.3.3 检索期过滤条件（亮点①）
 
@@ -899,6 +1005,44 @@ status = "active"                          ← 状态过滤
 
 ---
 
+#### 3.3.5 驱动与连接管理（本版新增）
+
+**选型口径**（原 SQLite 方案**没有这一层**，不写死会有两套写法）
+
+| 项 | 决定 |
+|---|---|
+| 驱动 | **`asyncpg`** —— 原生异步。FastAPI 是 async 的，同步驱动（`psycopg2`）会**阻塞事件循环**，SSE 流式输出期间尤其明显 |
+| ORM | **不用**，SQL 手写。与本文档「直接给表结构、显式钉死每条 SQL」的风格一致 |
+| 连接池 | `asyncpg.create_pool(min_size=2, max_size=10)`，随应用生命周期创建与关闭（lifespan） |
+| 迁移 | **暂不引入 Alembic**。建表脚本 + `migrations/00X_*.sql` 按序号手工推进（见附录 D）；表结构若后期频繁变更再评估 |
+
+> **为什么把「不用 ORM」也写进口径**：这不是技术偏好，是**防止实现者各选一套**——
+> `asyncpg` 完全可以配 SQLAlchemy 用，本轮只是不引。不写死的话，M1 合并时会出现两种写法。
+
+**连接池与事务边界**
+
+```python
+async with pool.acquire() as conn:
+    async with conn.transaction():          # ← 事务边界
+        await do_work(conn)
+```
+
+**⚠️ 短锁必须落在同一个事务里**（与 3.2.4 呼应，**这是本设计最容易踩的坑**）
+
+```python
+async with conn.transaction():
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('session:' || $1))", session_id)
+    await append_message(conn, ...)     # ← 这次写在锁保护下
+```
+
+> ⚠️ **advisory lock 与事务同生共死**：`pg_advisory_xact_lock` **只在当前事务内持有**，事务提交即释放。
+> 所以「加锁 → 写 → 提交」必须**在同一个事务里**。若写成两次独立的 `conn.execute`（各自自动提交），
+> **锁在真正写之前就已经释放了**——看着有锁，实际等于没加。
+>
+> 这个坑的特征是**不报错、只是偶尔并发跑两份**，测试很容易漏过去。**写这段时盯住事务边界。**
+
+---
+
 ### 3.4 文档摄入模块
 
 #### 3.4.1 主流程
@@ -939,11 +1083,11 @@ status = "active"                          ← 状态过滤
         ↓
         批量向量化（20 chunk / 18000 字一批，指数退避重试）
                   ↓
-        ┌─────────┼─────────┐
-        ↓         ↓         ↓
-     Chroma    BM25S     SQLite
-     写向量    增量索引   最后把 documents.status 翻成 active
-        └─────────┴─────────┘
+        ┌─────────┼───────────────┐
+        ↓         ↓               ↓
+     Chroma    BM25S         PostgreSQL
+     写向量    增量索引      最后把 documents.status 翻成 active
+        └─────────┴───────────────┘
                   ↓
             记录 MD5 指纹
 ```
@@ -1008,9 +1152,9 @@ version =   同组旧版     新建 group
 
 #### 3.4.4 索引一致性
 
-三处存储（SQLite / Chroma / BM25S）必须同步。策略：
+三处存储（PostgreSQL / Chroma / BM25S）必须同步。策略：
 
-- **写入顺序**：Chroma → BM25S → SQLite（SQLite 最后，作为"已完成"的标记）
+- **写入顺序**：Chroma → BM25S → PostgreSQL（PostgreSQL 最后，作为"已完成"的标记）
 - **失败处理**：任一步失败则整体回滚，记录到失败队列，管理端可见并可重试
 - **删除顺序**：先删索引，后删元数据
 
@@ -2244,11 +2388,11 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   DELETE /api/admin/documents/{id}
 
 仪表盘：
-  GET /api/admin/stats/overview          ← 业务指标，读 SQLite
-  GET /api/admin/stats/trend?days=30     ← 业务指标，读 SQLite
+  GET /api/admin/stats/overview          ← 业务指标，读 PostgreSQL
+  GET /api/admin/stats/trend?days=30     ← 业务指标，读 PostgreSQL
   GET /api/admin/stats/retrieval         ← ★ 运行指标，用 PromQL 查 Prometheus（见 3.2.3.3）
   GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
-  GET /api/admin/stats/hot-questions     ← 业务指标，读 SQLite
+  GET /api/admin/stats/hot-questions     ← 业务指标，读 PostgreSQL
 
 角色与用户：
   GET    /api/admin/roles                          角色清单（供可见范围选择器用，见 4.3.1.2）
@@ -2282,11 +2426,11 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 >
 > **GPU 争用**：评测会大量调用 rerank（与线上问答抢同一块 GPU）。**约定：评测任务与线上问答共用同一个 GPU 信号量**（见 3.2.4），即评测会让在线请求变慢，但不会 OOM。**不做优先级抢占**。
 
-> **`stats/retrieval` 是唯一读 Prometheus 的接口**：它返回节点耗时分位数、错误率、token 用量等**运行指标**，数据源是 Prometheus（PromQL 查询）。其余 `stats/*` 读 SQLite 的**业务指标**。
+> **`stats/retrieval` 是唯一读 Prometheus 的接口**：它返回节点耗时分位数、错误率、token 用量等**运行指标**，数据源是 Prometheus（PromQL 查询）。其余 `stats/*` 读 PostgreSQL 的**业务指标**。
 >
 > 两类的区别见 3.2.3 开头：业务指标答「系统答得好不好」，运行指标答「这次请求为什么慢」。
 >
-> **Prometheus 不可用时**该接口降级为返回 `null` 并附状态，**不能 500**——仪表盘的其他面板（读 SQLite）必须照常可用。
+> **Prometheus 不可用时**该接口降级为返回 `null` 并附状态，**不能 500**——仪表盘的其他面板（读 PostgreSQL）必须照常可用。
 
 ---
 
@@ -3171,7 +3315,7 @@ code: [['className', /^language-./]]            ← 只允许 language-* 前缀
 
 > ⚠️ **修改可见范围或生效日期必须触发重新索引，界面必须显式告知。**
 >
-> `visibility` / `effective_date` 冗余在 Chroma 的 chunk metadata 里（3.3.2），改 SQLite **不会**自动同步；而 Chroma 无法 join SQLite（3.3.2 末）。所以保存后要**重写该文档全部 chunk 的 metadata**（重新嵌入不是必需的，metadata 必须重写）。
+> `visibility` / `effective_date` 冗余在 Chroma 的 chunk metadata 里（3.3.2），改 PostgreSQL **不会**自动同步；而 Chroma 无法 join PostgreSQL（3.3.2 末）。所以保存后要**重写该文档全部 chunk 的 metadata**（重新嵌入不是必需的，metadata 必须重写）。
 >
 > 这意味着这一步**不是"改完即生效"**——期间该文档的检索结果可能不一致。UI 应提示耗时并给出进度，不能做成静默的即时保存。
 >
@@ -3252,15 +3396,15 @@ POST /api/admin/refusals/{log_id}/annotate  写标注
 
 **范围限定：只读预览，不做编辑。**
 
-编辑 chunk 正文意味着**重新嵌入该 chunk**，并同步 SQLite 与 Chroma 两处——属于独立特性。本轮不做，避免与 4.3.1.2 的「重新索引」复杂度叠加。
+编辑 chunk 正文意味着**重新嵌入该 chunk**，并同步 PostgreSQL 与 Chroma 两处——属于独立特性。本轮不做，避免与 4.3.1.2 的「重新索引」复杂度叠加。
 
 > 参考 MaxKB 的 `views/paragraph/`（逐段查看 + 编辑）：本项目**只取其中的「逐段查看」部分**。
 
 ### 4.4 仪表盘
 
-**分两块**：业务指标读 SQLite，运行指标读 Prometheus（数据流见 3.2.3.3）。
+**分两块**：业务指标读 PostgreSQL，运行指标读 Prometheus（数据流见 3.2.3.3）。
 
-**业务指标**（数据源：SQLite）
+**业务指标**（数据源：PostgreSQL）
 
 | 面板 | 接口 | 类型 |
 |---|---|---|
@@ -3464,7 +3608,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 | # | 里程碑 | 交付内容 | 验收标准 |
 |---|---|---|---|
-| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、SQLite + Chroma 接通、**认证骨架（登录页 + JWT 签发/校验 + 路由守卫，见 3.2.2 / 3.7.1）**、**SSE 协议按 3.7.2 钉死（含 `Citation` / `VerifyReport` 的载荷 schema，见下）**、**加载层按附录 B + E.4/E.8 迁移并修复**、**两条「开工前必验」出实测记录（见下）**、最简 React 聊天页 | ① **端到端跑通**：登录 → 传文档 → 提问 → 流式作答 + 引用 ② **两条必验有实测记录**（数值或结论写进附录对应位置） |
+| **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、PostgreSQL + Chroma 接通、**认证骨架（登录页 + JWT 签发/校验 + 路由守卫，见 3.2.2 / 3.7.1）**、**SSE 协议按 3.7.2 钉死（含 `Citation` / `VerifyReport` 的载荷 schema，见下）**、**加载层按附录 B + E.4/E.8 迁移并修复**、**两条「开工前必验」出实测记录（见下）**、最简 React 聊天页 | ① **端到端跑通**：登录 → 传文档 → 提问 → 流式作答 + 引用 ② **两条必验有实测记录**（数值或结论写进附录对应位置） |
 | **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样、**刷新令牌与登出语义（见 3.7.1）** | ① 检索指标有基线数据（**指标定义见下**）② **ACL 隔离测试通过**：student 账号检索不到 `vis_admin` 的文档 |
 | **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | **多轮指代题通过**（题库来源见下） |
 | **M3** | 生成与引用 | 上下文组装（含 3.8 的预算 / 滚动压缩 / 四道防线）、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 点击引用可跳转原文；校验能标出无依据句 |
@@ -3860,9 +4004,9 @@ ES 一个组件同时提供 BM25 与向量检索，是工业标准——但代�
 
 ---
 
-#### C.1.2 元数据存储：**SQLite**
+#### C.1.2 元数据存储：**PostgreSQL**
 
-**决策**（见 3.3.1，**11 张表**）
+**决策**（见 3.3.1，**12 张表** = 原 11 张 + `session_locks`）
 
 **为什么不继续用 JSONL 文件**（现有项目的做法）
 
@@ -3873,12 +4017,68 @@ ES 一个组件同时提供 BM25 与向量检索，是工业标准——但代�
 | 并发 | `threading.Lock` **不跨进程**，多 worker 部署失效 |
 | 能力 | 无事务、无索引、无 join——而版本管理、ACL、统计聚合都需要 |
 
-**为什么不选 MySQL / PostgreSQL**
+> 上表**不受本版换库影响**——它论证的是「不能停留在 JSONL」，这一条在新旧方案下都成立。
 
-本项目需要的是**事务 + join + 聚合**，SQLite 这三样都能做，且**免运维、单文件、易备份**。MySQL 是 RAGFlow 那种多租户、高并发的方案。
+**⚠️ 本版推翻了 v1.2 及以前的选择，先把话说清楚**
 
-**换库信号**：需要多实例部署、或写入并发超过单机 SQLite 的承受范围时。
+v1.2 的原决策是 **SQLite**，理由很明确：「本项目需要的是事务 + join + 聚合，SQLite 这三样都能做，
+且**免运维、单文件、易备份**」，并把 PostgreSQL 归为「RAGFlow 那种多租户、高并发的方案」而排除。
 
+**那段推理本身没错。换成 PG 不是因为 SQLite 变差了，而是两个前提变了**：
+
+1. **决策时机**：**全量重写是改表结构成本最低的唯一窗口**——此刻 12 张表还没建、数据还没迁；
+   等 M0–M5 做完再换，3.3.1、附录 D 和全部 SQL 都要重写一遍
+2. **「免运维」这笔账已经付出了一部分**：M5 的部署配置本来就要一并拉起三个可观测容器
+   （Collector / Prometheus / Jaeger，见 3.2.3.6）。**既然已经在跑容器，再加一个 PG 的边际成本不高**
+
+**换 PG 拿到什么（如实列，不夸大）**
+
+| 收益 | 说明 | 强度 |
+|---|---|---|
+| **数据库层能力** | 窗口函数、`JSONB` + GIN 索引、`pg_stat_statements`（慢查询可观测）、**多写者并发**（SQLite 是单写者） | 中 |
+| **真异步驱动** | `asyncpg` 原生异步。SQLite 的同步驱动会**阻塞事件循环**，SSE 流式输出期间尤其明显（`aiosqlite` 能缓解，但那是线程池包装，不是真异步） | 中 |
+| **将来可选性** | 之后若要做多租户 / 多实例 / 读写分离，**不必再换数据库** | 弱—中（**只是留门，本轮不做**） |
+
+**代价（同样如实列）**
+
+| 代价 | 说明 |
+|---|---|
+| **运行依赖** | PG 以容器运行（附录 G），**应用启动硬依赖 Docker daemon**。演示 / 答辩当天 Docker 没起来 = 起不来；SQLite 版则拷个文件就能跑 |
+| **备份变复杂** | `pg_dump` / `pg_restore` 取代了「拷一个文件」，附录 D 的备份步骤已相应改写 |
+| **资源占用** | 容器常驻约 100–200MB 内存，与 Ollama、reranker 同机 |
+| **改造量** | 12 张表 + 附录 D 初始化 + **新增驱动层**（原方案没有这一层，见 3.3.5） |
+
+> ⚠️ **换库信号并未触发——这一点口径必须诚实**
+>
+> 原决策写的换库信号是「**需要多实例部署、或写入并发超过单机 SQLite 的承受范围时**」。
+> 本版**两个都没触发**（1.1 明确不做多环境部署、不做容量规划）。
+>
+> 所以这是一次**基于「成本窗口」的前瞻性选择**，不是被压力逼出来的。
+> **若将来这些能力一个都没用上，这次换库就是超前投入**——这个风险要认，
+> **不要写成「信号已触发」来自圆其说**。判据见 1.1 新增的那条分界线。
+
+**本轮明确不做多租户（口径）**
+
+面向**单一学校**，本轮**不加 `tenant_id`、不启用 RLS**。理由：
+① 没有第二个租户，加了也没人验证；② **没人维护的隔离逻辑比没有隔离更危险**——它会给人「已经隔离好了」的错觉。
+
+> **但要记一笔代价**：正因为现在不加，**将来真要做多租户时仍要改全部业务表**。
+> 所以这次换 PG **并没有把多租户的门槛降到零**，只是把它从「换数据库」降成了「加列 + 加策略」。
+> **答辩被问到「为什么用 PG」时，别说成「为了多租户」**——准确说法是「为了成本窗口 + 数据库层能力」。
+
+**为什么不是 MySQL**
+
+两者在本项目需求上都能满足。选 PG 的原因是 `JSONB` 的索引与生态更好、
+且**将来若真加多租户时 RLS 是内建能力**（MySQL 要到 8.0 才有，语义更弱）。
+**这一条不是决定性因素**，如实记录，以免被追问时说不清。
+
+**换库信号（本版更新）**
+
+| | |
+|---|---|
+| ~~原信号~~ | ~~需要多实例部署、或写入并发超过单机 SQLite 的承受范围时~~ |
+| **本次依据** | **成本窗口**——全量重写期改动成本最低（**非信号触发**，见上） |
+| **下次再评估** | **多租户 / 多实例真正立项时**：届时确认单实例 PG 是否够用，还是要进一步读写分离 |
 ---
 
 #### C.1.3 向量库：**Chroma**
@@ -3899,9 +4099,9 @@ ES 一个组件同时提供 BM25 与向量检索，是工业标准——但代�
 
 `where` 过滤**只能在标量上做 `$eq`/`$in`**，对 JSON 字符串做不了成员判断。所以 3.3.2 才要把 `visible_roles` 展开成 `vis_admin` / `vis_staff` 布尔字段。
 
-**另一处局限**：无法表达跨条目聚合（"同组取最大版本"做不到），所以 3.3.1 才要回查 SQLite 做两段式折叠。
+**另一处局限**：无法表达跨条目聚合（"同组取最大版本"做不到），所以 3.3.1 才要回查 PostgreSQL 做两段式折叠。
 
-**换库信号**：文档量超过十万级、或需要多租户强隔离时。
+**换库信号**：文档量超过十万级、或需要多租户强隔离时（**本轮两者都不做**——多租户见 C.1.2 的口径）。
 
 ---
 
@@ -4213,10 +4413,27 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 |---|---|
 | Elasticsearch | 运维重组件，校园规模不需要（详见 C.1.1 / C.1.3） |
 | Milvus / Qdrant | 需独立部署，Chroma 内嵌已够（详见 C.1.3） |
-| MySQL / PostgreSQL | 单机规模 SQLite 足够（详见 C.1.2） |
+| ~~MySQL / PostgreSQL~~ | ⚠️ **本行已作废**：**PostgreSQL 已于 v1.3 选定**（见 C.1.2），不在「不做」之列。剩 **MySQL** 一条：与 PG 需求重叠，不重复评估 |
 | MinIO / 对象存储 | 单机文件系统够用；RAGFlow 用它是因为要支持集群 |
 | Neo4j / GraphRAG | 校园制度是**单跳事实查询**为主，多跳推理占比已从 20% 降到 5%（见 5.1），图数据库收益不成立 |
 | 微调专用意图分类模型 | 调研结论：小模型做意图识别**能力弱、稳定性差**，不如提示词 + 规则（见节点 2） |
+
+---
+
+#### C.2.4 数据库驱动：**asyncpg 裸驱动**（本版新增）
+
+> **✅ 已决策：`asyncpg`，不引 ORM、暂不引 Alembic。** 实现口径见 3.3.5。
+
+| 备选 | 为什么不选 |
+|---|---|
+| `psycopg2`（同步） | **阻塞事件循环**——SSE 流式输出期间，一次慢查询会卡住**所有正在输出的用户** |
+| `aiosqlite` + SQLite | 换 PG 后已不适用；且它只是**线程池包装**，不是真异步 |
+| SQLAlchemy ORM | 本项目 SQL 手写更直白，表结构已在 3.3.1 钉死；引 ORM 只多一层映射 |
+| Alembic 迁移 | **暂不引**。重写期表结构还会动，先用 `migrations/00X_*.sql` 手工推进；后期变更频繁再评估 |
+
+> **为什么要写进决策记录**：原 SQLite 方案**根本没有「驱动」这一层**（`sqlite3` 是标准库）。
+> 换 PG 后若不写死，实现者会各选一套（有人用 SQLAlchemy、有人用 psycopg），M1 合并时就有两套写法。
+> **这一条是补口径，不是技术偏好。**
 
 ---
 
@@ -4261,7 +4478,8 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | `data/chromadb/` | 37 MB | 1244 条旧向量 + 旧 metadata |
 | `data/md5_hex_store/` | 1 KB | 旧去重记录（**不清会导致重传被判为"重复"跳过**） |
 | `data/extracted_images/` | 15 MB | 旧提取图片（新 metadata 的 `image_paths` 会指向它们） |
-| `db/*.db` | 232 KB | 旧 SQLite（schema 完全不同） |
+| `db/*.db` | 232 KB | **旧系统**的 SQLite 文件（schema 完全不同）。本版起元数据改 PostgreSQL，**这些文件不再被任何代码读取**——保留仅为回滚参照 |
+| **PostgreSQL 数据卷** | 容器卷 | 新系统的库。**首次初始化不用清**；若要重跑 D.4，见下条注 |
 | `data/tmp/` | — | 临时文件 |
 | **BM25S 索引目录** | 新项目才有 | 与向量库必须同步清空 |
 | `logs/` | 228 KB | 可选，建议归档而非删除 |
@@ -4290,9 +4508,14 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 
 3. 【清向量与稀疏索引】data/chromadb/ + BM25S 索引目录
 4. 【清去重与图片】data/md5_hex_store/ + data/extracted_images/
-5. 【清 SQLite】db/*.db
-6. 【启动新系统】建表 + 建首个管理员（见 D.4）
+5. 【清旧 SQLite】db/*.db    ← 旧系统遗留文件，本版起不再被读取
+6. 【起 PG 容器】docker compose up -d postgres     ← 见附录 G
+7. 【建表】按序执行 migrations/*.sql（见 D.4）
+8. 【建首个管理员】见 D.4
 ```
+
+> **重跑 D.4 时的清库口径**：`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
+> ——**仅限本地重来**。生产意义上的库不做整库 drop，改用迁移脚本前滚（本项目不真上线，口径按本地来）。
 
 > **顺序有讲究：先停服、再备份、最后才删。**
 >
@@ -4303,8 +4526,9 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 ### D.4 初始化顺序（同样有讲究）
 
 ```
-① 建表
-   uv run python -m app.cli init-db            # 幂等，可重复执行
+① 起 PG + 建表
+   docker compose up -d postgres               # 见附录 G；等健康检查通过
+   uv run python -m app.cli init-db            # 幂等，按 migrations/*.sql 顺序执行
       ↓
 ② 建首个管理员
    uv run python -m app.cli create-admin       # 读 .env 的 ADMIN_* 或交互式输入
@@ -4322,7 +4546,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 |---|---|
 | **① 建表最先** | 后面每一步都要写库 |
 | **② 管理员必须次之** | 上传文档的接口需要 `admin` 角色；没有管理员账号，文档传不进去 |
-| **③ 文档要在建用户之前** | 上传时就要定好 `visibility`，并**展开成 `vis_<角色>` 布尔字段**写进 Chroma（见 3.3.2）；SQLite 侧同步写 `documents.visible_roles`。先建用户也没法用它检索（库里是空的） |
+| **③ 文档要在建用户之前** | 上传时就要定好 `visibility`，并**展开成 `vis_<角色>` 布尔字段**写进 Chroma（见 3.3.2）；PostgreSQL 侧同步写 `documents.visible_roles`。先建用户也没法用它检索（库里是空的） |
 | **④ 普通用户最后** | 建完可以直接用真实文档验证权限隔离（学生搜不到受限文档） |
 
 **账号的两个创建入口，职责分开**：
@@ -4338,13 +4562,15 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 
 **第②步的注意**：上传时就要设好 **`effective_date`**（默认今天）和 **`visibility`**——它们决定后续检索的过滤结果，**事后补改需要重新索引**。
 
-> ⚠️ **勘误：新 Chroma metadata 里没有 `visible_roles`**——只有 `visibility` + `vis_admin` / `vis_staff` 布尔字段（见 3.3.2）。`visible_roles` 是 **SQLite `documents` 表的源字段**，进 Chroma 时被展开成 `vis_*`。原文写「新 metadata 的 `visibility` / `visible_roles`」会把实现者引向**把数组写进 Chroma**——而 3.3.2 明确否定了数组字段（Chroma 的 `where` 对 JSON 字符串做不了成员判断）。
+> ⚠️ **勘误：新 Chroma metadata 里没有 `visible_roles`**——只有 `visibility` + `vis_admin` / `vis_staff` 布尔字段（见 3.3.2）。`visible_roles` 是 **PostgreSQL `documents` 表的源字段**，进 Chroma 时被展开成 `vis_*`。原文写「新 metadata 的 `visibility` / `visible_roles`」会把实现者引向**把数组写进 Chroma**——而 3.3.2 明确否定了数组字段（Chroma 的 `where` 对 JSON 字符串做不了成员判断）。
 
 ---
 
 ### D.5 验证清单
 
 ```
+□ **PG 容器起得来**：docker compose up -d --wait postgres 返回成功且健康
+□ **建表齐全**：12 张表都在（含新增的 session_locks）
 □ 管理员能登录，拿到 JWT
 □ 上传一份 PDF → 解析成功、chunk 数正常
 □ 检索命中该文档 → 引用里的**章节和页码正确**（验证附录 B.2.1 的修复）
@@ -5184,6 +5410,85 @@ print(sorted({b["page_idx"] for b in r.content_list}))     # → [0, 1]
 
 **关于最后一条的告诫**：原故障是「5 个任务全部卡死」，本次只跑了 **1 次**就成功。
 **一次成功不等于稳定修复**——别据此认定已彻底解决，**M0 接入时多跑几份再下结论**。
+
+---
+
+## 附录 G：PostgreSQL 部署（本版新增）
+
+**形态**：以容器运行，由 `docker-compose.yml` 一并拉起（与 M5 的三个可观测容器同文件）。
+
+```yaml
+services:
+  postgres:
+    image: postgres:17-alpine           # ← tag 须实测验证后再定稿，见下方注
+    environment:
+      POSTGRES_DB: campus_rag
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}  # 从 .env 注入，不进版本库
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"            # ← 只绑本机，不对外暴露
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d campus_rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+```
+
+> ⚠️ **镜像 tag 的版本号必须在实施时用 `docker pull` 验证后再定稿**——
+> 本文档写作时**本机 Docker daemon 未运行、Docker Hub 也不可达**，无法确认哪个 tag 实际可用。
+> **不要照抄 `17-alpine` 就直接上**：先 `docker pull` 试一次，失败就换一个已发布的大版本。
+
+**几条硬口径**
+
+| 项 | 约定 | 为什么 |
+|---|---|---|
+| **端口只绑 `127.0.0.1`** | `127.0.0.1:5432:5432` | 容器端口默认绑 `0.0.0.0`，**等于把数据库暴露到局域网**。校园网环境尤其要注意 |
+| **口令走 `.env`** | `${PG_PASSWORD}` 注入 | 与现有口径一致（`.env` 已在 `.gitignore`，实测确认未被跟踪） |
+| **数据卷用 named volume** | `pgdata:` | 不用 bind mount——Windows 下 bind mount 的权限与性能都有坑 |
+| **`restart: unless-stopped`** | 保留 | Docker Desktop 重启后自动拉起，避免「忘了起 PG」导致应用启动失败 |
+| **健康检查必须有** | `pg_isready` | **应用起得比 PG 快**，没有 healthcheck 时应用会连不上直接崩。启动脚本要配 `--wait` |
+
+**应用侧启动顺序**
+
+```bash
+docker compose up -d --wait postgres    # --wait：等 healthcheck 通过再返回
+uv run uvicorn app.main:app --workers 1
+```
+
+> ⚠️ **`--workers 1` 不能省**——理由已从「进程内锁」改为「**Chroma 内嵌**」（见 3.2.4）。
+> 换了 PG 之后「多 worker」看着可行了，**但 Chroma 仍然不支持，别顺手去掉这个参数**。
+
+**备份与恢复（取代原「拷贝一个文件」）**
+
+```bash
+docker compose exec postgres pg_dump -U "$PG_USER" -d campus_rag -Fc -f /tmp/backup.dump
+docker compose cp postgres:/tmp/backup.dump ./backup.dump
+```
+
+> **备份仍必须排在「停服」之后**（见 D.3）：PG 自身有 MVCC，快照一致性比热拷 SQLite 文件好得多，
+> 但**应用侧的写入状态**（写到一半的索引任务）仍会不一致。
+
+**`.env` 新增项**
+
+```
+PG_HOST=127.0.0.1
+PG_PORT=5432
+PG_DATABASE=campus_rag
+PG_USER=campus_rag
+PG_PASSWORD=                     # ← 真实口令只写本地 .env，不进版本库
+```
+
+> **只列变量名，不填真实值**——与 M5 部署配置的「环境变量清单（不含任何真实密钥）」口径一致。
+
+> **前置依赖（要认）**：本附录让**应用启动硬依赖 Docker daemon**。
+> 本机实测 `docker --version` 有（v29.5.2），但**daemon 当时未运行**（`docker info` 连不上）。
+> 演示 / 答辩前**先确认 Docker Desktop 已启动**，否则整个后端起不来——这是换 PG 之后新增的故障点。
 
 ---
 
