@@ -345,6 +345,62 @@ D:\Knowledge_rag_system\
 
 ---
 
+## 5.9 M0 完工时的实际状态（2026-10-05，**新会话先读这一节**）
+
+> 本计划写在 M0 开工**之前**。M0 施工过程中发现：**M1 的代码交付物已经在做 M0 端到端时被顺带建出来了**。
+> 照着下面原版的 M1 从零再建一遍是**纯浪费**。以下是与计划的偏差。
+
+### M0 实际完成范围（11 个任务全做完，tag `m0-done`）
+
+M0-0 数据归档清理 / M0-1 依赖+PG / M0-2 建表12张 / M0-3 日志+trace / M0-4 认证 /
+M0-5 filters / M0-6 两层锁 / M0-7 加载层 / M0-8 摄入流水线 / M0-9 SSE / M0-10 图 / M0-11 前端
+
+**验收已过**：bsk 驱动真实 Chromium 跑通「登录 → 提问 → 流式答案（含 `[1]`–`[5]` 句级引用）→ 引用面板 → 校验提示」。
+
+### ⚠️ M1 的代码已存在 —— 不要重建
+
+| 计划里的 M1 任务 | 实际状态 | 落在哪 |
+|---|---|---|
+| M1-1 BM25S + jieba + 下标→chunk_id 映射表 | **已实现** | `app/retrieval/bm25.py` |
+| M1-2 向量过采样 + 一次重试 | **已实现** | `app/retrieval/search.py::vector_retrieve` |
+| M1-3 版本折叠（回查 PG） | **已实现** | `search.py::latest_versions` / `fusion.py::fold_versions` |
+| M1-4 加权 RRF | **已实现** | `app/retrieval/fusion.py::weighted_rrf`，在 `nodes/retrieve.py` 调用 |
+| M1-5 精排 + 降级链 + GPU 信号量 | **已实现** | `app/retrieval/reranker.py` |
+| ACL + 版本过滤 | **已实现** | `app/retrieval/filters.py` |
+| 刷新令牌与登出语义 | **已实现** | `app/api/auth.py` |
+
+**所以 M1 剩下的不是「施工」，是三件事**：
+
+1. **补验收物**：20 题检索基线题库（`tests/fixtures/eval_min20.json`）+ Recall@5 / MRR 脚本；ACL 隔离集成测试
+2. **补一个 M0 实测发现的缺口**：**reranker 启动预热**（见下）
+3. **重新入库 10 份语料**（见下）
+
+### M0 实测得出的、计划里没有的新事实
+
+| # | 事实 | 影响 |
+|---|---|---|
+| N-1 | **reranker 冷启动要 23–80 秒**（页缓存热 23s / 冷 79.5s），加载后推理只要 0.4–3s | 必须加**启动预热**，否则第一个知识型提问要等一分多钟。这是当前最大的体验问题 |
+| N-2 | **Chroma 的 `$lte` 只接受 int/float**，不接受字符串 | 已修（`filters.date_key`）；**任何往 Chroma 写日期的代码都必须用整数 YYYYMMDD** |
+| N-3 | 节点漏写 `trace` 会让 SSE 的 `_node_ran()` 判 False，**导致事件静默缺失** | 已修 + 加了回归锁 `tests/integration/test_graph_trace.py`。**新增节点时必须写 trace** |
+| N-4 | `str.format()` 会吃掉 prompt 里的字面 JSON 花括号 | 5 处已修；**新增 prompt 时花括号必须双写** |
+| N-5 | Chroma metadata 的数组字段是 JSON 字符串，**两路（`query` 与 `get`）解析行为不同** | 已用 `search._json_field` 归一化 |
+
+### 当前运行状态
+
+```
+PG       docker compose up -d --wait postgres    → campus_rag 库，12 张表
+后端     cd backend && uv run uvicorn app.main:app --workers 1 --port 8090
+前端     cd frontend/web && npx vite --port 5273   （代理 /api → 127.0.0.1:8090）
+CLI      cd backend && uv run python -m app.cli {init-db|create-admin|check-llm}
+测试     uv run pytest backend/tests -q            → 66 项
+```
+
+⚠️ **数据库里目前只有 1 份语料**（`09_应届毕业班学生参军入伍优待政策_试行.pdf`）。
+M0 修 `$lte` 那个 bug 时清空过索引，只回填了 1 份用于验证。
+**M1 建检索基线前必须把 `corpus/guet/` 的 10 份全部重新上传**（经 `/api/admin/documents/upload`，用 admin 账号）。
+
+---
+
 ## 6. M1 — 检索做对
 
 **交付**：jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 固定过采样、刷新令牌与登出语义（已在 M0 做，此处回归）。
