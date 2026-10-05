@@ -23,6 +23,8 @@ from fastapi.responses import JSONResponse
 
 from app import db
 from app.api import auth as auth_api
+from app.api import chat as chat_api
+from app.api import documents as documents_api
 from app.core import telemetry
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
@@ -94,3 +96,5 @@ async def health():
 
 
 app.include_router(auth_api.router)
+app.include_router(chat_api.router)
+app.include_router(documents_api.router)
