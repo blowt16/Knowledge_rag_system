@@ -56,3 +56,21 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+# 新后端在 backend/ 下，而仓库根还有旧的 app/ —— pythonpath 必须显式指向 backend，
+# 否则 `import app` 会解析到旧代码
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]
+asyncio_mode = "auto"
+# asyncpg 的连接池绑定在创建它的事件循环上。若 fixture 与用例分属不同循环，
+# 会报 ConnectionDoesNotExistError / WinError 10038 —— 故统一到 session 级。
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+filterwarnings = ["ignore::DeprecationWarning"]
