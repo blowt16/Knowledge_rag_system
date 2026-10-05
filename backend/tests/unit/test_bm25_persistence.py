@@ -162,3 +162,78 @@ def test_v1_payload_without_tokens_is_rejected(tmp_path):
     bm25.reset_cache()
     assert bm25.INDEX_VERSION != 1, "升版后本用例才有意义"
     assert not bm25.is_available()
+
+
+# ---- 索引与映射表必须互相对得上 ----------------------------------------
+
+def test_token_count_mismatch_is_rejected(tmp_path):
+    """★ mapping 里 tokens 与 chunk_ids 条数不等 → 整路不可用。
+
+    条数不等的后果不是「少几条」，而是**按位置取到别人的 token**：
+    add() 会把 A 文档的分词写到 B 文档名下，检索回来的是错的 chunk。
+    """
+    bm25.rebuild([("a:0", "缓考"), ("b:0", "学籍")])
+    payload = json.loads((tmp_path / "mapping.json").read_text(encoding="utf-8"))
+    payload["tokens"] = payload["tokens"][:1]          # 少一条
+    (tmp_path / "mapping.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    bm25.reset_cache()
+    assert not bm25.is_available()
+
+
+def test_index_doc_count_mismatch_is_rejected(tmp_path):
+    """★ BM25S 索引里实际收了 N 篇，映射表却写 M 条 → 整路不可用。
+
+    真实现场（M1 开工前实测）：归档的 `params.index.json` 写着 `num_docs=12`，
+    而同期的 `mapping.json` 有 **186** 条 chunk_id。
+    因为空 token 的文档会被 bm25s **跳过**，落盘索引里根本没有它们 ——
+    于是 `search()` 拿到的下标去查 186 条的映射表，**取回来的是别人的 chunk_id**。
+    这比「召回少」更糟：它返回的是错的东西，而且一切看起来都正常。
+    """
+    bm25.rebuild([("a:0", "缓考"), ("b:0", "学籍")])
+    payload = json.loads((tmp_path / "mapping.json").read_text(encoding="utf-8"))
+    payload["chunk_ids"].append("c:0")                 # 映射表多一条，索引里没有
+    payload["tokens"].append(["退役"])
+    (tmp_path / "mapping.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    bm25.reset_cache()
+    assert not bm25.is_available()
+
+
+# ---- 磁盘上有索引但不可用时，增量重建必须被拒绝 ------------------------
+
+def test_add_refuses_when_index_on_disk_is_unusable(tmp_path):
+    """★★ 不能把「有索引但我不敢用」当成「还没有索引」从零重建。
+
+    修复前的失败形态：磁盘上留着上一个版本的索引 →
+    `is_available()` 判它不可用（正确）→ 但 `add()` 把 `_load_state() is None`
+    读成「空库」→ 重建出一个**只含本次新增文档**的索引，
+    **已有文档被静默清空**，且随后 `is_available()` 还报健康。
+
+    这正是 B-1（重启后老文档从索引里消失）的同一症状、另一扇门，
+    而且 `INDEX_VERSION` 一升级就会踩到 —— M1 刚升过一次。
+    """
+    bm25.rebuild([("old:0", "本科生缓考申请流程")])
+    _assert_matches("缓考", "old:0")
+
+    # 模拟「磁盘上的索引是上一代格式」（v1：只有 version + chunk_ids）
+    (tmp_path / "mapping.json").write_text(
+        json.dumps({"version": 1, "chunk_ids": ["old:0"]}, ensure_ascii=False),
+        encoding="utf-8")
+    bm25.reset_cache()
+    assert not bm25.is_available(), "前置条件：这份索引应被判为不可用"
+
+    with pytest.raises(RuntimeError, match="不可用"):
+        bm25.add([("new:0", "新文档：学籍管理规定")])
+
+
+def test_add_still_works_on_a_truly_empty_slot(tmp_path):
+    """反向对照：从没建过索引时，add() 必须照常工作（别把正常路径也堵死）。"""
+    assert not (tmp_path / "mapping.json").exists()
+    assert not bm25.is_available()
+
+    bm25.add([("a:0", "本科生缓考申请流程")])
+
+    _assert_matches("缓考", "a:0")

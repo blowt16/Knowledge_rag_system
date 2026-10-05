@@ -220,6 +220,7 @@ async def cmd_eval_retrieval(args: argparse.Namespace) -> int:
     try:
         user = UserContext(id="eval", username="eval", role=args.role, token_version=0)
         rows_out: list[dict] = []
+        degradations: list[str] = []
         for case in cases:
             q = case["question"]
             async with db.tx() as conn:
@@ -232,7 +233,10 @@ async def cmd_eval_retrieval(args: argparse.Namespace) -> int:
             ])
             # 用同步入口：批处理不需要并发，且能避开 Windows 上
             # asyncio.to_thread(torch) 在退出时的 0xC000071C（见 reranker.rerank_sync）
-            ranked = rerank_sync(q, fused, top_k=top_k).chunks
+            outcome = rerank_sync(q, fused, top_k=top_k)
+            ranked = outcome.chunks
+            if outcome.degraded:
+                degradations.append(outcome.degraded_kind or "unknown")
 
             rows_out.append({
                 "id": case["id"],
@@ -265,6 +269,16 @@ async def cmd_eval_retrieval(args: argparse.Namespace) -> int:
         print(f"  {r['id']:<7}{mark:<4}{str(r['rank'] or '-'):<6}"
               f"{'✅' if r['vec_hit5'] else '·':<5}{'✅' if r['bm_hit5'] else '·':<6}"
               f"{r['question'][:20]:<22}{r['expected'][:30]}")
+
+    if degradations:
+        # ⚠️ 降级时这一轮的排序**不是精排给的**，而是 RRF 顺序。
+        #    照写不误的话，产物里那张「链路 = …→ 交叉编码器精排→」的口径表
+        #    就是一纸空文，而 M5 要拿它标定阈值。
+        print(f"\n⚠️ 精排降级了 {len(degradations)} 次（{sorted(set(degradations))}）——"
+              f"本轮排序来自 RRF，**不是**精排结果。")
+        print("   因此不写入基线文件。请先修好精排（模型路径 / 显存）再重跑。")
+        await asyncio.get_running_loop().shutdown_default_executor()
+        return 1
 
     if args.out:
         out = Path(args.out)

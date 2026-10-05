@@ -109,8 +109,33 @@ def _load_state() -> dict | None:
         logger.warning("BM25 映射表与分词结果条数不符，视为不可用",
                        extra={"event": "bm25.index_invalid"})
         return None
+
+    # 落盘索引与映射表必须同代：条数对不上就是按位置错位，
+    # 返回的是**别人的 chunk** —— 比降级糟得多，直接判整路不可用
+    num_docs = _index_num_docs()
+    if num_docs is not None and num_docs != len(chunk_ids):
+        logger.warning(
+            "BM25 索引与映射表不同代（索引 %s 篇 / 映射表 %s 条），视为不可用",
+            num_docs, len(chunk_ids), extra={"event": "bm25.index_invalid"})
+        return None
+
     _state = payload
     return _state
+
+
+def _index_num_docs() -> int | None:
+    """BM25S 落盘索引里**实际收录**的文档数（params.index.json 的 num_docs）。
+
+    ⚠️ 它不是冗余信息：空 token 的文档会被 bm25s **跳过**，落盘索引里根本没有它们。
+       M1 开工前的现场就是「索引 num_docs=12，而映射表 186 条」——
+       于是 `search()` 拿索引里的下标去查 186 条的映射表，**取回来的是别人的 chunk_id**。
+       所以它必须与 `len(chunk_ids)` 一致，不一致就是错位，整路不可用。
+    """
+    try:
+        raw = (_index_path() / "params.index.json").read_text(encoding="utf-8")
+        return int(json.loads(raw)["num_docs"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _drop_cache() -> None:
@@ -175,7 +200,23 @@ def add(entries: list[tuple[str, str]]) -> int:
     """
     incoming = {cid: text for cid, text in entries}
 
-    state = _load_state() or {}
+    state = _load_state()
+
+    # ⚠️⚠️ 「磁盘上有索引但我不敢用」**不等于**「还没有索引」。
+    #   把前者当后者从零重建，会造出一个只含本次新增文档的索引 ——
+    #   **已有文档被静默清空**，且重建后 is_available() 立刻报健康，
+    #   从头到尾不报错。这正是 B-1（重启后老文档从索引里消失）的同一症状、
+    #   另一扇门，而且 INDEX_VERSION 一升级就会踩到（M1 刚升过一次）。
+    #   宁可让这次上传失败（流水线会补偿删除并把任务置 failed —— 可见、可排查），
+    #   也不要静默毁掉已有索引。
+    if state is None and _mapping_path().exists():
+        raise RuntimeError(
+            "BM25 索引存在但不可用（版本不匹配 / 索引与映射表不同代 / 文件损坏）——"
+            "拒绝在它之上做增量重建，以免静默清空已有文档。"
+            "请重建索引：删掉 data/bm25s 后重新入库。"
+        )
+
+    state = state or {}
     existing_ids = list(state.get("chunk_ids") or [])
     existing_tokens = list(state.get("tokens") or [])
 
