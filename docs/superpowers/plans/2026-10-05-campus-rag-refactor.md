@@ -53,7 +53,7 @@
 先给我一个 M1 的执行计划（三件事的先后与各自怎么验），我确认后再动手。
 ```
 
-### H.2 M2 开工提示词（当前待执行）
+### H.2 M2 开工提示词（已执行，tag `m2-done`，交接见 §7.9）
 
 ```
 读 docs/superpowers/plans/2026-10-05-campus-rag-refactor.md，
@@ -84,6 +84,61 @@
    并把「完工交接」小节写进本文档、打 tag m2-done。
 
 先给我一个 M2 的执行计划（任务顺序与各自怎么验），我确认后再动手。
+```
+
+### H.3 M3 开工提示词（当前待执行）
+
+```
+读 docs/superpowers/plans/2026-10-05-campus-rag-refactor.md，
+重点读 §0（施工规程）、§7.9（M2 完工交接）与 §8（M3 原文 —— 那才是你要做的）。
+
+我是这个项目的负责人，你接着做 M3（生成与引用）。几条前提：
+
+1. **M3 与 M1/M2 不同形：这次是一半代码有、一半完全没有。**
+   下面是我开工前实测摸过的（不是照 §8.1 推断的），直接按它排计划：
+
+   | §8.2 任务 | 代码实际状态 |
+   |---|---|
+   | M3-1 上下文预算 + 滚动压缩 | ❌ **完全没有**。`conversations` 表已有 `compressed_summary` / `compressed_count` 列，但没有任何压缩逻辑；`conversation_service.load_history` 里留着一句注释「M3 换成 count_tokens(摘要) + …」 |
+   | M3-2 build_context | ✅ 已有（`build_evidence`：整块丢弃 / 分组排序 / **先裁后编号** / `evidence`）—— 要补测试 |
+   | M3-3 generate | ✅ 已有（`StreamJsonParser` 四条细节、`precheck_prefix`、`_stream_generate`、`extract_markers`、`is_conclusion_sentence`）—— 要补测试 + 核对提示词四条硬约束 |
+   | M3-4 cite | ✅ 已有（`build_citations` / `build_verify_report` / `cite_node`）—— 要补测试 |
+   | M3-5 原文回跳后端 | ❌ **完全没有**：没有 `/file`、`/images/{name}`、`/text`，也没有签名 URL |
+   | M3-6 前端引用三层 | ❌ **完全没有**：前端只有 9 个文件（登录页 + 最简聊天页），**连 markdown 渲染依赖都没装**（remark / react-markdown 都要新增） |
+
+   所以 M3 的量比 M2 大：两条新链路（压缩 / 文件访问）+ 一整块前端 + 三个节点的护栏测试。
+
+2. **开工第一件事：`uv run pytest backend/tests -q` 应是 200 passed**；PG 起着。
+
+3. ⚠️ **§8.2 M3-6 写「复用 data/tmp/d6_probe/ 脚本回归」—— 那个脚本不在本仓库，
+   也从未进过 git 历史**（它是旧项目的产物，方案 §3086 提到的）。别去找，找不着：
+   前端那一层的验证方式要你另定（重建探针页 / 按 §11 用 bsk 真浏览器验收），
+   并把这个偏差写进交接。
+
+4. 施工注意事项见 §0.3（A1–A12）。M1/M2 又添了这些**实测**教训（§6.9 / §7.9）：
+   - **别让中间层（Chroma / PG / 任何 get 类接口）的返回顺序决定最终排序**（M1 的 B-2）
+   - **新增节点必须写 trace**，漏写会让 SSE 事件静默缺失（A3）
+   - **兜底必须留痕**：节点静默兜底却不写 `degraded`，评测护栏就拦不住（M2 评审 I2）
+   - **做对照实验时，两腿只能差一个变量**（M2 评审 I1：消解对照最初把「消解」和
+     「查询扩展」一起变了，差就归因不到消解头上）
+   - **提示词改动**：`tests/unit/test_prompts.py` 锁着每个提示词的占位符集合 ——
+     改 `generate.txt` 或新增提示词要同步登记 `EXPECTED_PLACEHOLDERS`；
+     提示词文件开头的 `#` 注释会被剥掉、不进模型
+   - **拒答路径的 SSE 事件序列有锁**（`tests/integration/test_refusal_paths.py`）：
+     M3 会动 `generate`/`cite`，动了事件顺序会立刻红
+   - **批处理入口（CLI）不要引入 `to_thread(torch)`**：Windows 上「asyncpg 连接池 +
+     to_thread(torch)」同存时，解释器退出会撞 `0xC000071C`（退出码 127）
+
+5. 环境：PG 起着；测试 200 passed；后端单 worker 起在 8090。
+   ⚠️ **跑测试或跑 CLI 之前先停掉后端**（Chroma 内嵌，A10）。
+   ⚠️ **GPU 显存吃紧**（§7.9 K-7）：桌面基线实测已占 ~3.0 GB，reranker 要 2.3–2.6 GB，
+   6 GB 卡只剩几百 MB；本机已出现过「评测卡死在首次精排」。跑评测前先关掉占显存的程序。
+
+6. 规矩：提交只进 refactor/campus-rag，禁止动 main、禁止 force push。
+   M3 做完停下汇报（交付 / 实测证据 / 偏差 / 已知问题），
+   并把「完工交接」小节写进本文档、打 tag m3-done。
+
+先给我一个 M3 的执行计划（任务顺序与各自怎么验），我确认后再动手。
 ```
 
 ---
