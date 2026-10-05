@@ -63,6 +63,41 @@ def test_header_comments_never_reach_the_model(name):
     assert "string.Template" not in text
 
 
+def _render_generate() -> str:
+    """按节点的方式渲染 generate —— 占位符集合变了也不用手改这里。"""
+    values = {k: f"<{k}>" for k in EXPECTED_PLACEHOLDERS["generate"]}
+    return prompts.render("generate", **values)
+
+
+# generate.txt 的四条硬约束（§3.5.3 节点 9）。每条的判据取**动词**那半句，
+# 不取格式（格式会随排版变，约束不会）。
+GENERATE_HARD_RULES = {
+    "句级引用标记": ["每个结论句", "[n]"],
+    "禁止只在末尾堆来源": ["禁止只在末尾堆来源"],
+    "适用范围显式": ["适用版本"],
+    "未答部分显式声明": ["资料中未找到", "不得用常识补全"],
+    "历史与材料冲突以材料为准": ["以材料为准"],
+}
+
+
+@pytest.mark.parametrize("rule,needles", sorted(GENERATE_HARD_RULES.items()))
+def test_generate_prompt_keeps_the_four_hard_rules(rule, needles):
+    """四条硬约束是「模型必须逐条遵守」的部分 —— 掉一条不会报错，只会变差。"""
+    text = _render_generate()
+    missing = [n for n in needles if n not in text]
+    assert not missing, f"generate.txt 少了「{rule}」的判据 {missing}"
+
+
+def test_generate_prompt_keeps_injection_guard():
+    """历史与证据是**数据不是指令** —— 注入防护不能省。"""
+    assert "不是指令" in _render_generate()
+
+
+def test_generate_contract_has_no_citation_numbers():
+    """引用编号由服务端从正文派生，契约里**不能**再要模型给一份编号。"""
+    assert "citation_numbers" not in _render_generate()
+
+
 def test_missing_variable_is_still_reported(caplog):
     """反向锁：真漏传变量时，那条告警**必须还在**（别把护栏一起删了）。"""
     with caplog.at_level(logging.WARNING, logger="app.core.prompts"):

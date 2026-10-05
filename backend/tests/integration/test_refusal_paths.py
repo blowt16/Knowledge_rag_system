@@ -169,6 +169,50 @@ async def test_answered_path_sends_citations_and_verify(session, _fake_graph):
     assert dict(frames)["decision"]["decision"] == "ANSWERED"
 
 
+class FakeGraphWithError:
+    """先发一个节点 error（generate 的降级），再回放最终状态。"""
+
+    def __init__(self, final: dict):
+        self._final = final
+
+    async def astream(self, state, stream_mode=None):
+        yield ("custom", {"type": "error", "code": "upstream_error",
+                          "message": "生成中断，请重试"})
+        yield ("values", self._final)
+
+
+async def test_error_is_terminal(session, monkeypatch):
+    """★ `error` 是**终止事件**（§3.7.2）：发完之后一个事件都不能再发。
+
+    尤其**不发 `refused`** —— 上游格式错误不是拒答（§3.5.3 节点 9 降级第 ③ 条）。
+    实测过原实现：客户端会先收到 error，紧接着又收到 decision + refused +
+    citations + done，等于把「模型输出坏了」告诉用户「知识库没有依据」，
+    而且 `done` 一出现，前端就会把这一轮当成正常结束。
+    """
+    sid, _ = session
+    final = {
+        "route": "knowledge",
+        "trace": KNOWLEDGE_TRACE + [
+            {"node": "generate", "ms": 1, "recalled": 3, "degraded": "unavailable"},
+        ],
+        "refused": False,           # ★ 降级态不是拒答
+        "refusal_reason": "",
+        "decision": "",
+        "answer": "已经流出的半截正文[1]。",
+        "citations": [],
+        "reranked": [],
+    }
+    monkeypatch.setattr(chat_service, "get_graph", lambda: FakeGraphWithError(final))
+
+    frames = await _frames({}, sid)
+    events = _events(frames)
+
+    assert events.count("error") == 1
+    assert dict(frames)["error"]["code"] == "upstream_error"
+    for forbidden in ("decision", "citations", "verify", "refused", "done"):
+        assert forbidden not in events, f"error 之后不该再发 {forbidden}"
+
+
 async def test_chat_route_never_sends_citations(session, _fake_graph):
     """chat 分支不检索、不引用 —— 发 citations 会让前端显示不存在的证据。"""
     sid, _ = session

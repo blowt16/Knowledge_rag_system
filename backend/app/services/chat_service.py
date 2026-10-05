@@ -123,6 +123,9 @@ async def stream_chat(
         final: dict = {}
         emitted_route = False
         emitted_token = False
+        # 节点自己发的 error（generate 的降级、chat/clarify 的上游故障）——
+        # `error` 是**终止事件**，见下面的收尾段
+        emitted_error = False
 
         async for mode, payload in get_graph().astream(
             state, stream_mode=["custom", "values"]
@@ -162,6 +165,7 @@ async def stream_chat(
                     emitted_token = True
                     yield sse("token", {"text": payload["text"]})
                 elif payload.get("type") == "error":
+                    emitted_error = True
                     yield sse("error", {"code": payload.get("code", "upstream_error"),
                                         "message": payload.get("message", "")})
 
@@ -169,6 +173,16 @@ async def stream_chat(
         decision = final.get("decision") or ""
         latency_ms = int((time.perf_counter() - started) * 1000)
         generate_ran = node_ran(final, "generate")
+
+        # ⚠️ `error` 是**终止事件**（§3.7.2）：发完 error 之后不再发
+        #    decision / citations / verify / refused / done。
+        #    尤其**不发 `refused`** —— 上游格式错误不是拒答（§3.5.3 节点 9
+        #    降级规则第 ③ 条），发了就把「模型输出坏了」记成「知识库没依据」。
+        #    落库照旧：坏掉的这一轮也要能在 qa_logs 里排查。
+        if emitted_error:
+            await _persist(session_id, query, final, latency_ms, user, decision,
+                           route=final.get("route", ""))
+            return
 
         # ⚠️ 保底：chat / clarify 走非流式兜底路径时不会产生 token 事件，
         #    用户会看到**完全空白**的回复（不报错、也没有内容）——

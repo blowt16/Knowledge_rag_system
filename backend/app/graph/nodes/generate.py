@@ -55,9 +55,31 @@ class StreamParseState:
     answer: str = ""
     buffering: bool = True          # decision 未到时先缓冲，不下发
     answer_started: bool = False
+    # 答案字符串已收尾（见到 `"` + 空白 + `}` 或 `"` + 空白 + `,` + 别的字段）。
+    # 与 `finished` 分开：answer 收尾 ≠ 整条流结束 —— decision 可能还在后面，
+    # 没收到 decision 就断流要按「降级」处理（见下）。
+    answer_done: bool = False
     finished: bool = False
     error: str | None = None
     pending: str = field(default="")  # 尾部回退缓冲
+
+
+# 答案字符串收尾后，JSON 里还能接的字段名（契约里只有 decision 一个）。
+# 用「去掉空白后逐字符比对前缀」判断，这样 `, "decision" :` 这种带空白的写法也算。
+_AFTER_ANSWER = ',"decision":'
+
+
+def _probe_status(probe: str) -> str:
+    """按住中的 `,` + 后续字符，判断它是不是「答案收尾 + 下一个字段名」。
+
+    返回 `end`（确认收尾）/ `keep`（还看不出来，继续按住）/ `content`（是正文）。
+    """
+    skeleton = "".join(probe.split())
+    if skeleton.startswith(_AFTER_ANSWER):
+        return "end"
+    if _AFTER_ANSWER.startswith(skeleton):
+        return "keep"
+    return "content"
 
 
 class StreamJsonParser:
@@ -71,9 +93,12 @@ class StreamJsonParser:
     | **`answer` 何时结束** | **不能见到 `"` 就当结束** —— 答案正文里可能有引号（文号、引语）。以「**尾部 `"` + 可选空白 + `}`**」为结束标志，且**回退缓冲 N 个字符**（N ≥ 8）后才提交 |
     | **「降级」降成什么** | ① 停止下发 `token` ② 发 `error`（`code="upstream_error"`）③ **不发 `refused`**（这是上游格式错误，不是拒答）④ **保留已流出的 token** ⑤ **不自动重试** |
     | **`decision` 不在最前怎么办** | 提示词要求 `decision` 是第一个字段，但**服务端不能假设**。做法：`decision` 到达前收到的 token **先缓冲、不下发**；若流结束仍未见 `decision`，按下一条的「降级」处理 |
+    | **`"` 后面是 `,` 怎么办** | 两种都合法：① 答案到此结束、后面还有别的字段（`decision` 可能在后）② 正文里的裸引号恰好后跟逗号。**不能靠一个字符下结论** —— 先按住，看逗号后面是不是 `"decision"`；是 → 答案收尾（这段 JSON 尾巴**不能**当正文发出去），不是 → 回退补发。2026-10-05 实测：没有这条时，`{"answer":"…","decision":"…"}` 的答案里会混进 `","decision":"ANSWERED` 这串垃圾 |
     """
 
     LOOKBACK = 12          # ≥ 8
+    # 「`"` 后面是 `,`」的观察窗口上限：超过就认定是正文，不再按住
+    PROBE_MAX = 40
     _DECISION_RE = re.compile(r'"decision"\s*:\s*"([A-Z_]+)"')
 
     _UNESCAPE = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
@@ -104,8 +129,13 @@ class StreamJsonParser:
     # ---- 首字符校验（服务端行为第 4 条）-----------------------------
     @staticmethod
     def precheck_prefix(text: str) -> bool:
-        """去掉 BOM / 前导空白 / ```json 围栏后仍不以 `{` 开头 → 立即中止。"""
-        cleaned = text.lstrip("﻿").strip()
+        """去掉 BOM / 前导空白 / ```json 围栏后仍不以 `{` 开头 → 立即中止。
+
+        ⚠️ BOM 与空白要**一起剥**，不能先剥 BOM 再 strip 空白 ——
+           实测 `"  \\ufeff```json\\n{…"`（空白在前、BOM 在后）按原来的顺序
+           剥不掉 BOM，会让一条本来正常的流被误判成格式错误而中止。
+        """
+        cleaned = text.lstrip("﻿ \t\r\n").strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[-1].strip()
         if not cleaned:
@@ -119,16 +149,19 @@ class StreamJsonParser:
         if self.state.error:
             return []
 
-        if not self.state.answer_started and self.require_decision:
-            if not self.state.decision:
-                match = self._DECISION_RE.search(self._raw)
-                if match:
-                    self.state.decision = match.group(1)
-                    # decision 到了，但 answer 还没开始 —— 继续等
-                else:
-                    return []
+        if self.require_decision and not self.state.decision:
+            match = self._DECISION_RE.search(self._raw)
+            if match:
+                self.state.decision = match.group(1)
+            elif not self.state.answer_started:
+                # decision 未到、答案也还没开始 —— 先缓冲、不下发（不假设字段顺序）
+                return []
 
-        return self._consume_answer(piece)
+        out = self._consume_answer(piece)
+        # 答案已收尾 + decision 已到手 = 整条流可以停了
+        if self.state.answer_done and (self.state.decision or not self.require_decision):
+            self.state.finished = True
+        return out
 
     def _consume_answer(self, piece: str) -> list[str]:
         # 定位 answer 键
@@ -155,6 +188,29 @@ class StreamJsonParser:
 
         out: list[str] = []
         for ch in chunk:
+            if self.state.answer_done:
+                # 答案已收尾，后面是 JSON 结构（可能还在等 decision），一个字符都不发
+                break
+
+            if getattr(self, "_probing", False):
+                # 按住的 `"` + 空白 + `,`，看后面是不是别的字段名
+                self._probe += ch
+                status = _probe_status(self._probe)
+                if status == "keep" and len(self._probe) <= self.PROBE_MAX:
+                    continue
+                self._probing = False
+                head, probe = getattr(self, "_probe_head", ""), self._probe
+                self._probe_head = self._probe = ""
+                if status == "end":
+                    # 答案到此为止 —— 这段 JSON 尾巴绝不能当正文发出去
+                    self.state.answer_done = True
+                    break
+                # 是正文里的引号：连同按住的头部一起补发
+                for tch in head + probe:
+                    self._answer_chars.append(tch)
+                    out.append(tch)
+                continue
+
             if self._escape:
                 self._escape = False
                 decoded = self._UNESCAPE.get(ch)
@@ -194,6 +250,15 @@ class StreamJsonParser:
                     continue
                 if ch == "}":
                     self.state.finished = True
+                    self.state.answer_done = True
+                    self._maybe_end = False
+                    self._tail = ""
+                    continue
+                if ch == ",":
+                    # 见类文档最后一条：先按住，看逗号后面是不是别的字段
+                    self._probe_head = getattr(self, "_tail", "")
+                    self._probe = ","
+                    self._probing = True
                     self._maybe_end = False
                     self._tail = ""
                     continue
@@ -343,8 +408,12 @@ async def generate_node(state) -> dict:
 
     if writer is not None:
         decision, answer, error = await _stream_generate(prompt, writer, timeout)
-        if error or not decision:
-            return _refuse_insufficient(started, len(answer or ""))
+        if error:
+            # ⚠️ 上游格式错误/中断 **不是拒答**（§3.5.3 节点 9「降级」五条第 ③ 条）：
+            #    不能换成拒答文案、更不能置 `refused` —— 那会把「模型输出坏了」
+            #    记成「知识库没有依据」，用户与评测都会被误导。
+            #    已流出的正文保留；但要留痕（degraded），否则评测护栏看不出这轮是坏的。
+            return _degraded(started, answer or "")
     else:
         try:
             data = await llm.complete_json(
@@ -390,6 +459,22 @@ def _trace(started: float, recalled: int, degraded: str | None):
     return NodeTrace(node="generate",
                      ms=int((time.perf_counter() - started) * 1000),
                      recalled=recalled, degraded=degraded)
+
+
+def _degraded(started: float, answer: str) -> dict:
+    """降级态（区别于拒答）：保留已流出的正文，不置 `refused`。
+
+    `degraded` 取 `unavailable` —— 词表见 §4.1（timeout/oom/model_load_failed/
+    index_invalid/unavailable）。这里没有「上游格式错误」这一档，取语义最近的
+    「上游不可用」，不新造取值（词表是契约）。
+    """
+    return {
+        "decision": "",
+        "answer": answer,
+        "refused": False,
+        "refusal_reason": "",
+        "trace": [_trace(started, len(answer), "unavailable")],
+    }
 
 
 def _refuse_insufficient(started: float | None = None, recalled: int = 0) -> dict:
