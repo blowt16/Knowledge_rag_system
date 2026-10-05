@@ -218,15 +218,25 @@ __marimo__/
 .streamlit/secrets.toml
 
 # RAG System runtime data
+# ⚠️ 这里列的必须是**派生产物**：能由 corpus/ + 上传动作重建出来的，一律不进版本库。
+#    2026-10-05 补：bm25s / uploads / normalized 是 M0 新建的运行时目录，
+#    当时漏加进本文件，结果被提交了 141 个文件（索引二进制 + 按 doc_id 命名的中间产物）。
+#    它们每次重新入库都会变，带进 git 只会让每次提交都拖着几 MB 二进制差异。
 data/chromadb/
 data/extracted_images/
 data/tmp/
 data/md5_hex_store/
+data/bm25s/
+data/uploads/
+data/normalized/
+data_backup_*/
 db/*.db
 db/*.db-wal
 db/*.db-shm
 logs/*.log
 logs/*.log.*
+# 应用写的是 .jsonl，原先的 logs/*.log 匹配不到（跑到代码就把工作区弄脏）
+logs/*.jsonl
 models/*/
 
 # 前端
