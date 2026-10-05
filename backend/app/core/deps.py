@@ -76,6 +76,24 @@ async def current_user(
 CurrentUser = Annotated[UserContext, Depends(current_user)]
 
 
+async def current_user_optional(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> UserContext | None:
+    """可选身份：没带令牌返回 None，带了就照常校验（校验失败照常 401）。
+
+    为什么需要它：**签名 URL 不能要求 JWT**。`<img src>` 带不上 Authorization 头，
+    图片靠签名自证；但同一条路由也要能用 JWT 去换签名 URL。
+    若把必需身份写进依赖，FastAPI 会在进入函数体之前就 401 ——
+    签名分支永远走不到（2026-10-05 实测踩过）。
+    """
+    if credentials is None or not credentials.credentials:
+        return None
+    return await current_user(credentials)
+
+
+OptionalUser = Annotated[UserContext | None, Depends(current_user_optional)]
+
+
 def require_role(*roles: str):
     """路由守卫：只允许指定角色访问。"""
 
