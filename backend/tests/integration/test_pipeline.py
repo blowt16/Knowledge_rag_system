@@ -67,10 +67,24 @@ async def cleanup_docs():
             pass
 
 
+def _unique_copy(tag: str) -> Path:
+    """复制样本并追加唯一字节，得到唯一 MD5。
+
+    ⚠️ 必须这么做：**MD5 判重是全局的（不看 title）** ——
+       同一份文件内容换个标题上传，仍会被判 `duplicate` 跳过（这是 §3.3.1 的既定行为）。
+       若各用例共用同一份样本，第一个用例入库后，其余用例全会拿到 `duplicate`，
+       表现为「测试莫名失败」，且**与运行顺序、以及库里是否已有该 MD5 有关**。
+    """
+    out = Path(repo_path("data", "tmp")) / f"{tag}_{uuid.uuid4().hex}.pdf"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(SAMPLE.read_bytes() + f"\n%{uuid.uuid4().hex}".encode())
+    return out
+
+
 def _req(admin_id: str, title: str, tmp_name: str | None = None) -> IngestRequest:
     task_id = uuid.uuid4().hex
     return IngestRequest(
-        source_path=SAMPLE,
+        source_path=_unique_copy(title),
         filename=tmp_name or SAMPLE.name,
         uploader_id=admin_id,
         task_id=task_id,
@@ -121,15 +135,22 @@ async def test_ingest_produces_chunks_in_both_indexes(admin_id, cleanup_docs):
 
 
 async def test_duplicate_upload_is_skipped(admin_id, cleanup_docs):
-    """★ 测试点①：同一文件（MD5 相同）再传 → duplicate，不重复入库。"""
+    """★ 测试点①：同一文件（MD5 相同）再传 → duplicate，不重复入库。
+
+    本用例是唯一**刻意复用同一份内容**的：判重的前提就是内容相同。
+    """
     title = f"判重测试_{uuid.uuid4().hex[:8]}"
     cleanup_docs.append(title)
 
+    shared = _unique_copy("dup")
+
     first = _req(admin_id, title)
+    first.source_path = shared
     await _seed_task(first)
     assert (await ingest(first)).status == "done"
 
     second = _req(admin_id, title)
+    second.source_path = shared          # 同一份内容 —— 这次才该判重复
     await _seed_task(second)
     outcome = await ingest(second)
     assert outcome.status == "duplicate", outcome.message
