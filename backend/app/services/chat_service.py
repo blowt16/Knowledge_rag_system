@@ -41,9 +41,9 @@ from app.graph.state import UserContextLite, new_state
 from app.services.conversation_service import (
     append_messages,
     create_conversation,
-    load_history,
     touch_conversation,
 )
+from app.services import context_service
 from app.services.qa_log_service import write_qa_log
 
 logger = logging.getLogger(__name__)
@@ -109,15 +109,20 @@ async def stream_chat(
 
         heartbeat_task = asyncio.create_task(_heartbeat(session_id, holder))
 
-        history = await load_history(session_id)
+        # 历史 = 摘要 + messages[compressed_count:]；超水位会在这里**同步压缩**
+        #（§3.8.3）。压缩失败只记降级，本轮照常作答 —— 绝不变用户 500。
+        slice_ = await context_service.load_context(session_id)
         state = new_state(
             query=query,
             session_id=session_id,
             user=UserContextLite(id=user.id, role=user.role),
-            history=history,
+            history=slice_.messages,
+            summary=slice_.summary,
             last_route=await _last_route(session_id),
             # 非 admin 传了按 false 处理 —— filters.resolve_escalation 兜底
             include_restricted=bool(include_restricted) and user.role == "admin",
+            # 压缩的耗时与降级要进 node_timings（静默兜底 = 评测护栏看不见）
+            trace=[slice_.trace()],
         )
 
         final: dict = {}

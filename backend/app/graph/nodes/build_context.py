@@ -35,26 +35,8 @@ import time
 
 from app.core.config import cfg
 from app.graph.state import Chunk, NodeTrace, RAGState
-
-# token 计数用 dashscope 自带分词器（离线可用、零新增依赖）
-_tokenizer = None
-
-
-def count_tokens(text: str) -> int:
-    global _tokenizer
-    if _tokenizer is None:
-        try:
-            from dashscope.tokenizers import get_tokenizer
-            _tokenizer = get_tokenizer(cfg("llm.tokenizer_model", "qwen3-max"))
-        except Exception:  # noqa: BLE001 —— 拿不到分词器时退到保守估算
-            _tokenizer = False
-    if _tokenizer:
-        try:
-            return len(_tokenizer.encode(text))
-        except Exception:  # noqa: BLE001
-            pass
-    # 保守估算：中文约 0.7 token/汉字（文档实测 1.72 字符/token）
-    return int(len(text) * 0.7)
+# token 计数只留一份 —— 本节点与 context_service 的水位线必须同一口径
+from app.services.context_service import count_tokens
 
 
 def build_evidence(chunks: list[Chunk]) -> tuple[str, list[Chunk]]:

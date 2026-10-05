@@ -16,17 +16,12 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 
 import asyncpg
 
 from app import db
 from app.core.config import cfg
-from app.graph.state import Message
-
-# 拼 history 时剥掉助手消息里的 [n] 标记（落库保留原文）
-_MARKER_RE = re.compile(r"\[\d+\]")
 
 
 async def create_conversation(session_id: str, user_id: str, *, title: str = "") -> None:
@@ -45,48 +40,28 @@ async def create_conversation(session_id: str, user_id: str, *, title: str = "")
         )
 
 
-async def load_history(session_id: str, *, limit: int | None = None) -> list[Message]:
-    """加载历史。
-
-    ⚠️ 截断口径以 §3.8.3 为准（token 预算 + 高/低水位）。M0 先用保留区条数占位；
-       M3 换成 `count_tokens(摘要) + count_tokens(messages[compressed_count:]) > H`。
-
-    ⚠️ 这里读到的天然**不含本轮** —— 本轮消息在回答生成完成后才写库。
-    """
-    keep = limit or int(cfg("context.recent_messages_limit", 10))
-    async with db.tx() as conn:
-        rows = await conn.fetch(
-            """SELECT role, content FROM messages
-                WHERE conversation_id = $1
-                ORDER BY created_at DESC LIMIT $2""",
-            session_id, keep,
-        )
-
-    history: list[Message] = []
-    for row in reversed(rows):
-        content = row["content"] or ""
-        if row["role"] == "assistant":
-            # 剥掉 [n] 标记：上一轮答案带着 [1][2] 进历史，模型会模仿旧编号，
-            # 而本轮证据可能只有 2 条，写出 [3] 立刻变成无效标记
-            content = _MARKER_RE.sub("", content)
-        history.append(Message(role=row["role"], content=content))
-    return history
-
-
 async def append_messages(conn: asyncpg.Connection, session_id: str, question: str,
                           answer: str, citations: list, route: str) -> None:
     """追加本轮问答。**必须在调用方的事务内、且在短锁保护下执行。**
 
     用户消息带 `route` —— 它是 `last_route` 的来源（§3.3.1）。
+
+    ⚠️ **两条消息的时间戳必须错开**（2026-10-05 实测）：`now()` 是**事务开始时刻**，
+       同一事务里插入的两行拿到的是**同一个**时间戳 —— 于是
+       `ORDER BY created_at` 排不出「先问后答」，历史可能以「助手在用户之前」
+       的形式进提示词。给助手消息加 1 毫秒，顺序就定了（一轮问答不可能在
+       1 毫秒内完成，跨轮不受影响）。
+
+       实测证据：库里每个多轮会话 `count(distinct created_at) = 1`。
     """
     await conn.execute(
-        """INSERT INTO messages (id, conversation_id, role, content, route)
-           VALUES ($1, $2, 'user', $3, $4)""",
+        """INSERT INTO messages (id, conversation_id, role, content, route, created_at)
+           VALUES ($1, $2, 'user', $3, $4, now())""",
         uuid.uuid4().hex, session_id, question, route or None,
     )
     await conn.execute(
-        """INSERT INTO messages (id, conversation_id, role, content, citations)
-           VALUES ($1, $2, 'assistant', $3, $4)""",
+        """INSERT INTO messages (id, conversation_id, role, content, citations, created_at)
+           VALUES ($1, $2, 'assistant', $3, $4, now() + interval '1 millisecond')""",
         uuid.uuid4().hex, session_id, answer, citations or [],
     )
 

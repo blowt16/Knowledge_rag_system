@@ -102,6 +102,9 @@ class RAGState(TypedDict, total=False):
 
     # ---- 生成 ----
     context: str
+    # 滚动压缩产出的历史摘要（§3.8.3）—— 拼 prompt 时排在历史**之前**，
+    # 顺序见 §3.8.5：[系统][摘要][messages[compressed_count:]][检索上下文][本轮问题]
+    summary: str
     answer: str
     # ★ ANSWERED | REFUSED_NO_EVIDENCE —— 条件边读它
     decision: str
@@ -136,6 +139,7 @@ def new_state(**overrides: Any) -> RAGState:
         "retrieval_confidence": None,
         "rerank_degraded": False,
         "context": "",
+        "summary": "",
         "answer": "",
         "decision": "",
         "citations": [],

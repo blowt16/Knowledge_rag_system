@@ -24,7 +24,9 @@ EXPECTED_PLACEHOLDERS = {
     "clarify": {"history", "query"},
     "rewrite": {"query"},
     "chat": {"query"},
-    "generate": {"history", "context", "query"},
+    # summary 是滚动压缩的产物（§3.8.5 的组装顺序里排在 history 之前）
+    "generate": {"summary", "history", "context", "query"},
+    "summarize": {"previous", "messages"},
 }
 
 

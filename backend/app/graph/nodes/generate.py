@@ -32,6 +32,8 @@ from typing import AsyncIterator
 from app.core import llm
 from app.core.prompts import render
 from app.core.config import cfg
+from app.services import context_service
+from app.services.context_service import count_tokens, hard_prompt_limit
 
 logger = logging.getLogger(__name__)
 
@@ -398,10 +400,36 @@ async def generate_node(state) -> dict:
             "trace": [_trace(started, 0, None)],
         }
 
-    prompt = render("generate", history=_format_history(state.get("history") or []),
+    prompt = render("generate",
+        # 顺序即 §3.8.5：[系统][摘要][messages[compressed_count:]][检索上下文][本轮问题]
+        summary=(state.get("summary") or "").strip() or "（无）",
+        history=_format_history(state.get("history") or []),
         context=context,
         query=query,
     )
+
+    # ---- B 路的最后一道闸（§3.8.2 / §3.8.3 溢出兜底）------------------
+    # 历史预算是**成本目标**不是硬限；这里才是真硬限。
+    # ⚠️ 真撞上时**不能裁检索上下文**：它已被 build_context 限死在 8,000 token，
+    #    对着 100 万 token 的窗口裁它救不了任何东西 —— 唯一可能无界增长的只有历史。
+    #    所以这里的兜底是「先把历史压掉再试」；压完还超就按契约报
+    #    context_length_exceeded（**不是**拒答）。
+    if count_tokens(prompt) > hard_prompt_limit():
+        session_id = state.get("session_id") or ""
+        if session_id:
+            slice_ = await context_service.force_compact(session_id)
+            prompt = render("generate",
+                summary=(slice_.summary or "").strip() or "（无）",
+                history=_format_history(slice_.messages),
+                context=context,
+                query=query,
+            )
+        if count_tokens(prompt) > hard_prompt_limit():
+            writer = _stream_writer()
+            if writer is not None:
+                writer({"type": "error", "code": "context_length_exceeded",
+                        "message": "上下文超出模型窗口，请新开会话"})
+            return _degraded(started, "")
 
     timeout = float(cfg("timeouts.generate_ttft", 60))
     writer = _stream_writer()
@@ -492,10 +520,17 @@ def _refuse_insufficient(started: float | None = None, recalled: int = 0) -> dic
 
 
 def _format_history(history) -> str:
+    """拼历史。
+
+    ⚠️ **不再截断**（原实现取 `history[-6:]`）：进 state 的历史已经是
+       `context_service` 按 token 预算压过的 `messages[compressed_count:]`。
+       在这里再按条数切一刀，会出现「数的是 20 条、发的是 6 条」——
+       水位线算的历史与实际下发的历史不是同一份，压缩就永远不收敛。
+    """
     if not history:
         return "（无）"
     lines = []
-    for msg in history[-6:]:
+    for msg in history:
         role = "用户" if getattr(msg, "role", "") == "user" else "助手"
         # ⚠️ 拼 history 时剥掉助手消息里的 [n] 标记（落库保留原文）
         content = re.sub(r"\[\d+\]", "", getattr(msg, "content", "") or "")

@@ -83,6 +83,9 @@ timeouts:
   generate_total: 180
   # 上传进度流等分钟级长连接的空闲超时
   sse_stream_timeout: 600
+  # 滚动压缩：压缩在**请求路径内同步执行**，所以超时必须短于用户耐心 ——
+  # 宁可这一轮不压缩（退回未压缩历史作答），也不能让用户干等
+  compaction: 20
 
 # 上下文预算（§3.8.2 / §3.8.3）
 # ⚠️ 这组数按「成本与延迟」定的显式目标值，不从窗口派生
@@ -94,6 +97,8 @@ context:
   compression_min_messages: 6             # 单次至少压缩条数
   summary_max_tokens: 800                 # 摘要产物自身上限（防无界膨胀）
   retrieval_context_budget: 8000          # 检索上下文预算，优先级最高
+  # 整个 prompt 的硬上限用的安全余量（§3.8.2）：窗口 − 最大输出 − 本值
+  safety_margin: 500
 
 session:
   # 长锁 TTL 与心跳（§3.2.4）
