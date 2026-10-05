@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "note": "M2 多轮指代题库（方案 §5.1 第一阶段的「多轮指代型」+ 路由/澄清负例）。每题是一段对话，逐轮标注四样：expected_route（路由准确率）、should_clarify（澄清误报率/命中率的分母与分子）、expected_document（该轮检索应命中哪份文档，null=只判路由不判检索）、resolved_must_contain_any（消解后的问题里必须出现的主题锚点，null=自足问题、不要求消解）。",
+  "caveat": [
+    "expected_document 用文档标题而不是 document_id —— 同 eval_min20，id 每次重新入库都会变。",
+    "锚点词的出现次数是**实测核对**过的（data/normalized/<document_id>.txt 逐份 grep 计数），不是凭印象：转专业=43@01、学业预警=16@03、缓考=8@05、学生申诉处理=15@07、退役复学=9@10、入伍奖励金=1@09。",
+    "「挂科」「重修」在 10 份语料里**一次都没出现**（口语说法）—— 这两类题只判路由与澄清，不判检索（expected_document 为 null）。",
+    "「退学」不具区分度（03=26 / 06=18 / 04=16），所以涉及退学的轮次一律用「学业预警」当锚点。",
+    "带 probe=true 的轮次是**边界探针**：期望值由文档口径推得，但实现未必覆盖，首跑大概率暴露缺口。首跑报告里与常规题分开统计。"
+  ],
+  "cases": [
+    {
+      "id": "mt-01",
+      "type": "multi_turn",
+      "note": "代词指代 + 连续省略：t2 的「那」与 t3 的省略都指 t1 的主题",
+      "turns": [
+        {"question": "转专业的申请条件是什么？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "那需要提交哪些材料？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "resolved_must_contain_any": ["转专业"], "note": "省略：原句无主题词，不消解必然检索不到"},
+        {"question": "办理流程要多久？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "resolved_must_contain_any": ["转专业"], "note": "连续省略：第二轮就没有主题词"}
+      ]
+    },
+    {
+      "id": "mt-02",
+      "type": "multi_turn",
+      "note": "代词指代：t2 的「它」指上一轮的「学业预警」",
+      "turns": [
+        {"question": "学业预警是怎么规定的？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "它多久触发一次？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "resolved_must_contain_any": ["学业预警"], "note": "「它」+「多久」都会命中触发条件"}
+      ]
+    },
+    {
+      "id": "mt-03",
+      "type": "multi_turn",
+      "note": "代词指代：t2 是最典型的「它+条件」",
+      "turns": [
+        {"question": "缓考的申请流程是怎样的？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "它需要什么条件？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": ["缓考"], "note": "§7.2 M2-1 ① 的原题"}
+      ]
+    },
+    {
+      "id": "mt-04",
+      "type": "multi_turn",
+      "note": "省略补全的边界探针：t2 用「那」+「多长时间」，两者都不在代词表/疑问词表里",
+      "turns": [
+        {"question": "学生申诉处理办法里规定了什么？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "那要在多长时间内提出？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "resolved_must_contain_any": ["申诉"], "probe": true, "note": "探针：省略特征三条都判不出来（「那」不在代词表、「多长时间」不在疑问词表、长度>8），预期会静默跳过消解"}
+      ]
+    },
+    {
+      "id": "mt-05",
+      "type": "multi_turn",
+      "note": "代词指代（话题切换到优待政策）",
+      "turns": [
+        {"question": "退役复学有什么优待政策？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "那要办哪些手续？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": ["退役", "复学"], "note": "省略：含疑问词「哪些」且无制度名词"}
+      ]
+    },
+    {
+      "id": "mt-06",
+      "type": "multi_turn",
+      "note": "粘性对照：t2 是自足问题，不消解也该对；考的是路由不被上一轮带偏",
+      "turns": [
+        {"question": "应届毕业班学生参军入伍有什么优待？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "09_应届毕业班学生参军入伍优待政策_试行", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
+        {"question": "入伍奖励金是多少？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "09_应届毕业班学生参军入伍优待政策_试行", "resolved_must_contain_any": null, "note": "自足问题，不要求消解 —— 这轮只验路由与检索"}
+      ]
+    },
+    {
+      "id": "mt-07",
+      "type": "multi_turn",
+      "note": "闲聊→指代无先行词→澄清→收敛：澄清命中率的完整链路（§7.2 M2-2 ④ + M2-3）",
+      "turns": [
+        {"question": "你好", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "闸门：不走 LLM，不走检索"},
+        {"question": "那这个要多久啊", "expected_route": "clarify", "should_clarify": 1, "expected_document": null, "resolved_must_contain_any": null, "note": "上轮是 chat，**不得被粘成 chat**；「这个」无先行词 → resolve_unresolved → 澄清"},
+        {"question": "学业预警的", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "resolved_must_contain_any": null, "note": "用户回答澄清；含制度名词 → 不再澄清"}
+      ]
+    },
+    {
+      "id": "mt-08",
+      "type": "multi_turn",
+      "note": "短问触发澄清 → 收敛（澄清命中率第二条链路）",
+      "turns": [
+        {"question": "怎么办？", "expected_route": "clarify", "should_clarify": 1, "expected_document": null, "resolved_must_contain_any": null, "note": "触发条件二：长度<8 且规则层未命中制度名词/文号"},
+        {"question": "学业预警方面的问题", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "resolved_must_contain_any": null, "note": "回答澄清后进检索"}
+      ]
+    },
+    {
+      "id": "mt-09",
+      "type": "route_negative",
+      "note": "§7.2 M2-1 ③ 的原题：短问 + 口语词，**不得判成闲聊**",
+      "turns": [
+        {"question": "挂科了怎么办", "expected_route": "knowledge", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "「挂科」在制度名词表里；语料里 0 次出现，故不判检索"}
+      ]
+    },
+    {
+      "id": "mt-10",
+      "type": "route_priority",
+      "note": "§7.2 M2-2 ② 的原题：问候+实义诉求 → knowledge（优先级 knowledge>chat）",
+      "turns": [
+        {"question": "你好，我想问下缓考", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "命中闸门词表但**不是**「整条消息无诉求」"},
+        {"question": "那要提前几天申请？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": ["缓考"], "note": "省略：含疑问词「几天」（不在疑问词表，靠①以外的路径）—— 与 mt-04 同类探针"}
+      ]
+    },
+    {
+      "id": "mt-11",
+      "type": "route_negative",
+      "note": "两个负例：自足短问不澄清；寒暄走 chat",
+      "turns": [
+        {"question": "缓考", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "长度 2 < 8，但含制度名词 → **不得澄清**（澄清误报率的分母）"},
+        {"question": "谢谢", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "闸门"}
+      ]
+    },
+    {
+      "id": "mt-12",
+      "type": "route_negative",
+      "note": "§15 #6 的长问句：不得触发澄清",
+      "turns": [
+        {"question": "我想问一下，本科生学业预警以及学业退学实施细则里面，对于一个学期内不及格课程达到一定学分的同学，学校具体是怎么处理的，会有什么措施？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "resolved_must_contain_any": null, "note": "长度远超阈值"}
+      ]
+    },
+    {
+      "id": "mt-13",
+      "type": "route_negative",
+      "note": "§15 #6 的纯符号输入：期望路由由文档推得（不闲谈、不澄清 → knowledge），属口径解释",
+      "turns": [
+        {"question": "？？？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "probe": true, "note": "探针：当前实现大概率判成 clarify（短且无制度名词）。§15 #6 要求「不误判成闲聊、不触发无意义澄清」"}
+      ]
+    }
+  ]
+}
