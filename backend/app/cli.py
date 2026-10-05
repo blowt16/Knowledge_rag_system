@@ -369,6 +369,343 @@ def _baseline_markdown(payload, rows, top_k, role, recall, mrr, vec_recall, bm_r
     return "\n".join(lines)
 
 
+# ============================================================
+# eval-multiturn —— 多轮指代与查询理解（M2 验收）
+# ============================================================
+
+async def _drive_to_retrieve(graph, state: dict) -> dict:
+    """把图跑到 retrieve 之后**停下**（精排由调用方用同步入口补，见 `_rank_top`）。
+
+    ⚠️ 为什么停在 generate 之前：M2 考的是**查询理解**（消解/路由/澄清/扩展）。
+       跑到底会多付一次 LLM 调用，还会把 M3 生成侧的缺陷混进 M2 的指标里 ——
+       到时候失败原因分不清是「没消解对」还是「没答好」。
+
+    ⚠️ 为什么用**真实图**而不是在评测器里重搭一条链路：重搭的那份迟早和
+       `builder.py` 漂移，而漂移之后指标照样好看、只是不再反映线上行为。
+    """
+    from app.services.chat_service import node_ran
+
+    final: dict = {}
+    async for mode, payload in graph.astream(state, stream_mode=["custom", "values"]):
+        if mode != "values":
+            continue
+        final = payload or {}
+        # chat / clarify 会自然走到 END；knowledge 在 retrieve 之后截断
+        if node_ran(final, "retrieve"):
+            break
+    return final
+
+
+def _rank_top(final: dict, top_k: int) -> tuple[list[str], bool]:
+    """按图的最终顺序精排，返回 (文档名列表, 是否降级)。
+
+    ⚠️ 精排走**同步入口** `rerank_sync`，不调图里的 `rerank` 节点 —— 与
+       `eval-retrieval` 同一条理由（见 `reranker.rerank_sync` 的说明）：
+       Windows 上 `asyncio.run` + `to_thread(torch/CUDA)` 在解释器退出时会于
+       executor shutdown 撞 `0xC000071C`（退出码 127）。
+
+       M2 实测把成因收窄了一步：**必须同时存在 asyncpg 连接池**才复现 ——
+       只有连接池、或只有 `to_thread(torch)`，两者单独跑都是退出码 0；
+       连接池 + torch 在主线程也是 0。评测器天然两者都有，所以踩得到。
+
+       两条路的排序完全相同（`rerank()` 就是 `to_thread(rerank_sync)`），
+       差别只有「跑在哪个线程」。
+    """
+    from app.retrieval.reranker import rerank_sync
+
+    candidates = final.get("candidates") or []
+    if not candidates:
+        return [], False
+    query = final.get("resolved_query") or final.get("query", "")
+    outcome = rerank_sync(query, candidates, top_k=top_k)
+    return [c.document_name for c in outcome.chunks], outcome.degraded
+
+
+async def _raw_control(query: str, user_lite, top_k: int) -> list[str]:
+    """对照：**不做消解**，拿原句直接进同一条检索链路。
+
+    这是「消解到底有没有用」的硬证据 —— 与 M1 的「单路对照」同一个道理：
+    只看「消解后命中率 = 1.0」不能说明什么，得看到「不消解时会掉到多少」。
+    """
+    from app.graph.nodes.retrieve import retrieve_node
+    from app.graph.state import new_state
+
+    state = new_state(
+        query=query,
+        session_id="eval-multiturn",
+        user=user_lite,
+        retrieval_queries=[{"text": query, "target": "both",
+                            "weight": 1.0, "source": "verbatim"}],
+    )
+    state.update(await retrieve_node(state))
+    names, _ = _rank_top(state, top_k)
+    return names
+
+
+async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
+    """多轮指代题库：路由准确率 / 澄清误报率 / 澄清命中率 + 消解对照。
+
+    ⚠️ 与 `eval-retrieval` 的区别：那个绕过图直达检索（指标只反映检索本身）；
+       这个**走真实图的前半段**，因为要考的正是图里 resolve/route/rewrite
+       三个节点的判断 —— 绕过它们等于什么都没测。
+    """
+    import json
+
+    from app import db
+    from app.core.deps import UserContext
+    from app.graph.builder import get_graph
+    from app.graph.state import Message, UserContextLite, new_state
+
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = BACKEND_DIR / fixture
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    cases = payload["cases"]
+    top_k = args.top_k
+
+    await db.init_pool()
+    try:
+        graph = get_graph()
+        user_lite = UserContextLite(id="eval", role=args.role)
+
+        rows_out: list[dict] = []
+        rows_by_case: dict[str, list[dict]] = {}
+        degradations: list[str] = []
+
+        for case in cases:
+            history: list[Message] = []
+            last_route = ""
+            case_rows: list[dict] = []
+
+            for idx, turn in enumerate(case["turns"], start=1):
+                q = turn["question"]
+                state = new_state(
+                    query=q,
+                    session_id="eval-multiturn",
+                    user=user_lite,
+                    history=list(history),
+                    # 与 chat_service 同源：上一轮被路由到哪一类（只有 knowledge 参与粘性）
+                    last_route=last_route,
+                    include_restricted=False,
+                )
+                final = await _drive_to_retrieve(graph, state)
+
+                route = final.get("route", "")
+                pred_clarify = route == "clarify"
+                want_clarify = bool(turn["should_clarify"])
+                names, rerank_degraded = _rank_top(final, top_k)
+                expected = turn["expected_document"]
+                resolved = final.get("resolved_query") or ""
+                anchors = turn["resolved_must_contain_any"] or []
+
+                # 只有「需要消解的轮次」才跑对照 —— 它要额外过一次精排
+                raw_names: list[str] | None = None
+                if anchors and expected:
+                    raw_names = await _raw_control(q, user_lite, top_k)
+
+                for entry in (final.get("trace") or []):
+                    if entry.get("degraded"):
+                        degradations.append(f"{entry['node']}:{entry['degraded']}")
+                if rerank_degraded:
+                    degradations.append("rerank:degraded")
+
+                row = {
+                    "case": case["id"], "turn": idx, "type": case["type"],
+                    "question": q, "probe": bool(turn.get("probe")),
+                    "route": route, "expected_route": turn["expected_route"],
+                    "route_ok": route == turn["expected_route"],
+                    "route_source": final.get("route_source", ""),
+                    "pred_clarify": pred_clarify, "want_clarify": want_clarify,
+                    "clarify_ok": pred_clarify == want_clarify,
+                    "resolved": resolved,
+                    "skip_reason": final.get("resolve_skipped_reason", ""),
+                    "anchors": anchors,
+                    "resolved_ok": (any(a in resolved for a in anchors)
+                                    if anchors else None),
+                    "expected": expected,
+                    "hit": (expected in names) if expected else None,
+                    "raw_hit": ((expected in raw_names)
+                                if (expected and raw_names is not None) else None),
+                    "top1": names[0] if names else "(空)",
+                }
+                case_rows.append(row)
+                rows_out.append(row)
+
+                # 下一轮的历史：本轮用户原话 + 本轮助手回复（澄清问句也算回复）
+                history.append(Message(role="user", content=q))
+                history.append(Message(role="assistant",
+                                       content=final.get("answer") or ""))
+                last_route = route
+
+            rows_by_case[case["id"]] = case_rows
+    finally:
+        await db.close_pool()
+
+    # ---- 汇总 ----------------------------------------------------------
+    n = len(rows_out)
+    route_acc = sum(1 for r in rows_out if r["route_ok"]) / n
+
+    negatives = [r for r in rows_out if not r["want_clarify"]]
+    false_clarify = [r for r in negatives if r["pred_clarify"]]
+    clarify_fp = len(false_clarify) / len(negatives) if negatives else 0.0
+
+    missed_clarify = [r for r in rows_out if r["want_clarify"] and not r["pred_clarify"]]
+
+    # 澄清命中率：**期望澄清且确实触发了**的轮次里，紧接着那一轮收敛了没有
+    converge: list[bool] = []
+    for case in cases:
+        rs = rows_by_case[case["id"]]
+        for i, r in enumerate(rs[:-1]):
+            if r["want_clarify"] and r["pred_clarify"] and rs[i + 1]["expected"]:
+                converge.append(bool(rs[i + 1]["hit"]))
+    clarify_hit = (sum(converge) / len(converge)) if converge else 0.0
+
+    anchor_rows = [r for r in rows_out if r["anchors"]]
+    resolved_ok = (sum(1 for r in anchor_rows if r["resolved_ok"]) / len(anchor_rows)
+                   if anchor_rows else 0.0)
+
+    with_target = [r for r in anchor_rows if r["expected"]]
+    resolved_hit = (sum(1 for r in with_target if r["hit"]) / len(with_target)
+                    if with_target else 0.0)
+    raw_hit = (sum(1 for r in with_target if r["raw_hit"]) / len(with_target)
+               if with_target else 0.0)
+
+    rule_hits = sum(1 for r in rows_out if r["route_source"] == "rule")
+    skip_counts: dict[str, int] = {}
+    for r in rows_out:
+        skip_counts[r["skip_reason"]] = skip_counts.get(r["skip_reason"], 0) + 1
+
+    timeouts = [r for r in rows_out if r["skip_reason"] == "timeout"]
+
+    # ---- 控制台 --------------------------------------------------------
+    print(f"\n题库 {fixture.name}   {len(cases)} 段对话 / {n} 轮   top_k={top_k}   "
+          f"视角角色={args.role}")
+    print(f"  路由准确率   = {route_acc:.3f}")
+    print(f"  澄清误报率   = {clarify_fp:.3f}   （{len(false_clarify)}/{len(negatives)} 个不该澄清的轮次）")
+    print(f"  澄清命中率   = {clarify_hit:.3f}   （{sum(converge)}/{len(converge)} 个触发后收敛）")
+    print(f"  澄清漏报     = {len(missed_clarify)} 轮")
+    print(f"  消解命中率   = {resolved_ok:.3f}   （锚点轮 {len(anchor_rows)} 个）")
+    print(f"  ── 消解对照：消解后检索命中 = {resolved_hit:.3f}   不消解（原句）= {raw_hit:.3f}"
+          f"   （{len(with_target)} 轮有检索目标）")
+    print(f"  规则层命中   = {rule_hits}/{n}（其余走 LLM）")
+    print(f"  消解跳过原因 = {skip_counts}")
+    print()
+    print(f"  {'case':<8}{'轮':<4}{'路由':<10}{'期望':<10}{'澄清':<6}{'消解':<6}"
+          f"{'检索':<6}{'快照':<5}query")
+    for r in rows_out:
+        mark = "✅" if r["route_ok"] else "❌"
+        clar = ("✅" if r["clarify_ok"] else "❌") if r["want_clarify"] or r["pred_clarify"] else "·"
+        res_ok = "·" if r["resolved_ok"] is None else ("✅" if r["resolved_ok"] else "❌")
+        hit = "·" if r["hit"] is None else ("✅" if r["hit"] else "❌")
+        print(f"  {r['case']:<8}{r['turn']:<4}{r['route']:<10}{r['expected_route']:<10}"
+              f"{clar:<6}{res_ok:<6}{hit:<6}{mark:<5}"
+              f"{'[探针]' if r['probe'] else ''}{r['question'][:22]}")
+
+    if degradations or timeouts:
+        print(f"\n⚠️ 本轮有降级/超时：降级 {sorted(set(degradations))}，"
+              f"消解超时 {len(timeouts)} 次。")
+        print("   这时的指标**不反映链路的设计行为**，因此不写入评测文件。请先修好再重跑。")
+        await asyncio.get_running_loop().shutdown_default_executor()
+        return 1
+
+    if args.out:
+        out = Path(args.out)
+        if not out.is_absolute():
+            out = Path(repo_root()) / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            _multiturn_markdown(payload, rows_out, rows_by_case, top_k, args.role,
+                                route_acc, clarify_fp, clarify_hit, missed_clarify,
+                                resolved_ok, resolved_hit, raw_hit, rule_hits, n),
+            encoding="utf-8")
+        print(f"\n已写入 {out}")
+
+    # Windows + torch：必须在事件循环还活着的时候关掉默认线程池（同 eval-retrieval）
+    await asyncio.get_running_loop().shutdown_default_executor()
+    return 0
+
+
+def _multiturn_markdown(payload, rows, rows_by_case, top_k, role,
+                        route_acc, clarify_fp, clarify_hit, missed, resolved_ok,
+                        resolved_hit, raw_hit, rule_hits, n) -> str:
+    anchors = [r for r in rows if r["anchors"] and r["expected"]]
+    lines = [
+        "# 多轮指代与查询理解评测（M2 验收）",
+        "",
+        "> 由 `app.cli eval-multiturn` 生成，可直接重跑复现。",
+        "",
+        "## 口径",
+        "",
+        "| 项 | 值 |",
+        "|---|---|",
+        f"| 题库 | `backend/tests/fixtures/eval_multiturn.json`"
+        f"（{len(payload['cases'])} 段对话 / {n} 轮） |",
+        "| 链路 | **真实图**：resolve → route →（chat/clarify 结束）或 "
+        "rewrite → retrieve；精排走**同步入口** `rerank_sync`（同 eval-retrieval），"
+        "**在 generate 之前截断** |",
+        f"| 视角 | `{role}`（`include_restricted=false`） |",
+        "| LLM | 参与（消解 / 路由兜底 / 查询扩展）—— 与 eval-retrieval 的关键区别 |",
+        "| 澄清误报率 | 不该澄清却澄清的比例（分母：标了 `should_clarify=0` 的轮次） |",
+        "| 澄清命中率 | **确实触发**澄清的轮次里，其下一轮收敛"
+        "（route=knowledge 且命中期望文档）的比例 |",
+        "| 消解命中率 | 标了锚点的轮次里，`resolved_query` 含该锚点的比例 |",
+        "",
+        "## 结果",
+        "",
+        "| 指标 | 值 |",
+        "|---|---|",
+        f"| **路由准确率** | **{route_acc:.3f}** |",
+        f"| **澄清误报率** | **{clarify_fp:.3f}** |",
+        f"| **澄清命中率** | **{clarify_hit:.3f}** |",
+        f"| 澄清漏报 | {len(missed)} 轮 |",
+        f"| 消解命中率 | {resolved_ok:.3f} |",
+        f"| 规则层命中（省下的 LLM 调用） | {rule_hits}/{n} |",
+        "",
+        "## 消解对照（这一节才是「消解有用」的证据）",
+        "",
+        "只报「消解后命中 = 1.0」说明不了什么 —— 得看**不消解**时会掉到多少。"
+        "同 M1 的单路对照：",
+        "",
+        "| 轮次 | 原句（不消解） | 消解后 | 期望文档 | 消解结果 |",
+        "|---|---|---|---|---|",
+    ]
+    for r in anchors:
+        lines.append(
+            f"| {r['case']}#{r['turn']} | {'✅' if r['raw_hit'] else '❌'} | "
+            f"{'✅' if r['hit'] else '❌'} | {r['expected']} | `{r['resolved']}` |")
+    lines += [
+        "",
+        f"> 汇总：消解后 Recall@{top_k} = **{resolved_hit:.3f}**，"
+        f"不消解 Recall@{top_k} = **{raw_hit:.3f}**（{len(anchors)} 轮有检索目标）。",
+        "",
+        "## 逐轮明细",
+        "",
+        "| case | 轮 | query | 路由 | 期望路由 | 来源 | 澄清 | 消解跳过原因 | "
+        "消解后 | 检索 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        clar = "✅" if r["clarify_ok"] else "❌"
+        res_ok = {None: "·", True: "✅", False: "❌"}[r["resolved_ok"]]
+        hit = {None: "·", True: "✅", False: "❌"}[r["hit"]]
+        probe = "**探针** " if r["probe"] else ""
+        lines.append(
+            f"| {r['case']} | {r['turn']} | {probe}`{r['question']}` | {r['route']} | "
+            f"{r['expected_route']} | {r['route_source']} | {clar} | "
+            f"{r['skip_reason']} | {res_ok} `{r['resolved'][:40]}` | {hit} |")
+
+    lines += ["", "## 已知问题（题库自带的口径说明）", ""]
+    lines += [f"- {c}" for c in payload.get("caveat", [])]
+    lines += [
+        "",
+        "## 阈值",
+        "",
+        "**本轮不设阈值** —— 计划原文即「多轮指代题通过」；阈值与基线对比留给 M5 标定。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def repo_root() -> Path:
     from app.core.config import repo_path
     return repo_path()
@@ -403,12 +740,22 @@ def main() -> int:
     p_eval.add_argument("--out", default="docs/检索基线.md",
                         help="markdown 输出路径（相对仓库根）；传空字符串则不写")
 
+    p_mt = sub.add_parser("eval-multiturn",
+                          help="多轮指代与查询理解：路由/澄清/消解（M2 验收）")
+    p_mt.add_argument("--fixture", default="tests/fixtures/eval_multiturn.json",
+                      help="题库路径（相对 backend/）")
+    p_mt.add_argument("--top-k", type=int, default=5)
+    p_mt.add_argument("--role", default="student", choices=["student", "staff", "admin"])
+    p_mt.add_argument("--out", default="docs/多轮指代评测.md",
+                      help="markdown 输出路径（相对仓库根）；传空字符串则不写")
+
     args = parser.parse_args()
     handlers = {
         "init-db": cmd_init_db,
         "create-admin": cmd_create_admin,
         "check-llm": cmd_check_llm,
         "eval-retrieval": cmd_eval_retrieval,
+        "eval-multiturn": cmd_eval_multiturn,
     }
     return asyncio.run(handlers[args.command](args))
 
