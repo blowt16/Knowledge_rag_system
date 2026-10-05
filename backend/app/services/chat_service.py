@@ -192,7 +192,9 @@ async def stream_chat(
         # ⚠️ 保底：chat / clarify 走非流式兜底路径时不会产生 token 事件，
         #    用户会看到**完全空白**的回复（不报错、也没有内容）——
         #    这比报错更难发现。任何路径只要有答案却一个 token 都没发过，就在这里补发。
-        if not emitted_token and (final.get("answer") or "").strip():
+        # ⚠️ 拒答路径**不要**在这里补发：`answer` 就是服务端拒答文案，
+        #    补发会让它在气泡里渲染一遍、`refused` 框里再渲染一遍（M3 评审抓出）。
+        if not emitted_token and not final.get("refused") and (final.get("answer") or "").strip():
             yield sse("token", {"text": final["answer"]})
             emitted_token = True
 

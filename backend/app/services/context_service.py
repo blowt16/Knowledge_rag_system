@@ -207,6 +207,14 @@ async def _compact(summary: str, messages: list[Message],
         return summary, 0
 
     new_summary = await _summarize(summary, messages[:merged])
+    if not new_summary.strip():
+        # ⚠️ **空摘要绝不能回写**（2026-10-05 评审抓出）：写进去 = 这 N 条消息
+        #    永久消失 —— conversations 只有一列摘要，旧摘要会被就地销毁，
+        #    而没有任何东西代表那批消息。用户侧表现是「助手突然忘了前面聊过什么」，
+        #    且不可恢复。`llm.complete` 对空 content **不抛异常**，
+        #    所以不显式检查就会走「成功」分支（连降级事件都不记）。
+        #    按压缩失败处理：不回写、不推进 compressed_count、由调用方记降级。
+        raise llm.LLMError("摘要模型返回空内容")
     return new_summary, merged
 
 

@@ -92,7 +92,11 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
 
   const openInNewTab = async () => {
     // pptx 等不做在线预览的格式：给「下载原文 + 提示」（§4.2.2.6）
-    const blob = await requestBlob(`/documents/${documentId}/file`)
+    // ⚠️ 提权标记要跟抽屉里那条路径**一致** —— 漏了的话，
+    //    admin 在抽屉里看得到、点下载却 404
+    const blob = await requestBlob(
+      `/documents/${documentId}/file${includeRestricted ? '?include_restricted=true' : ''}`,
+    )
     const url = URL.createObjectURL(blob)
     window.open(url, '_blank')
     setTimeout(() => URL.revokeObjectURL(url), 60_000)

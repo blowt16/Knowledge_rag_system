@@ -169,6 +169,37 @@ async def test_summary_failure_falls_back_and_records_degradation(session, monke
     assert [r["kind"] for r in kinds] == ["timeout"]
 
 
+async def test_empty_summary_is_treated_as_failure_not_written_back(session, monkeypatch):
+    """★ 评审抓出：摘要模型返回**空串**时不能当成压缩成功。
+
+    `llm.complete` 对空 content 不抛异常 —— 不显式检查就会走「成功」分支：
+    `compressed_summary` 被写成空串、`compressed_count` 照推，
+    那 N 条消息**永久消失**（库里只有一列摘要，旧摘要也被就地销毁），
+    用户侧表现是「助手突然忘了前面聊过什么」，且不可恢复。
+    """
+    sid, _ = session
+
+    async def empty(messages, **kwargs):
+        return ""
+
+    monkeypatch.setattr(llm, "complete", empty)
+
+    slice_ = await CS.load_context(sid)
+
+    assert slice_.degraded == "unavailable", "空摘要必须记降级"
+    assert slice_.compacted == 0
+    assert len(slice_.messages) == 28, "一条都不能丢"
+    row = await _conversation_row(sid)
+    assert (row["compressed_summary"], row["compressed_count"]) == (None, 0), (
+        "空摘要被回写了 —— 那批消息就再也回不来了"
+    )
+    async with db.tx() as conn:
+        n = await conn.fetchval(
+            "SELECT count(*) FROM degradation_events WHERE session_id = $1 AND node = 'compaction'",
+            sid)
+    assert n == 1, "这条路径必须留痕，否则评测护栏看不见"
+
+
 async def test_chat_still_answers_when_compaction_fails(session, monkeypatch):
     """★ 硬约束：摘要模型的故障**绝不能变成用户侧的 500**。"""
     sid, _ = session

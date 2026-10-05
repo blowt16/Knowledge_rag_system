@@ -44,8 +44,9 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 # 签名 URL 有效期（§3.7.2：默认 5 分钟）
 SIGNED_URL_TTL_SECONDS = 300
 
-# 图片名只允许这些字符 —— 挡掉 `../` 这类路径穿越
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+# 图片名只允许这些字符 —— 挡掉 `../` 这类路径穿越。
+# ⚠️ 用 `\Z` 不用 `$`：Python 的 `$` 允许结尾多一个换行（`'x\n'` 也会匹配上）
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+\Z")
 
 _MEDIA_TYPES = {
     "pdf": "application/pdf",

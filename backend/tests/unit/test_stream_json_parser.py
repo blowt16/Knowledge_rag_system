@@ -128,6 +128,27 @@ async def test_stream_error_keeps_partial_tokens_and_emits_error(monkeypatch):
     assert error and not decision
 
 
+async def test_refusal_never_streams_the_model_text(monkeypatch):
+    """★ 评审抓出：REFUSED 路径**不发模型文案**（§3.5.3 节点 9）。
+
+    否则用户先看到模型的自由发挥（气泡里），下面再叠一个服务端拒答框 ——
+    正是规格要避免的「夹带解释或猜测」；而且刷新后文本又变了个样
+    （落库的是服务端固定话术）。
+    """
+    async def fake_stream(messages, **kw):
+        yield '{"decision":"REFUSED_NO_EVIDENCE","answer":"我认为这个问题不便回答。"}'
+
+    monkeypatch.setattr(llm, "stream_raw", fake_stream)
+    events: list[dict] = []
+
+    decision, answer, error = await GEN._stream_generate("提示词", events.append, 5)
+
+    assert not [e for e in events if e["type"] == "token"], "拒答时一个 token 都不该下发"
+    assert decision == "REFUSED_NO_EVIDENCE"
+    assert answer == GEN.REFUSAL_TEXT
+    assert error is None
+
+
 async def test_first_char_check_failure_degrades_immediately(monkeypatch):
     """首字符校验：去掉 BOM/空白/围栏后不以 `{` 开头 → 立即中止（一个 token 都不发）。"""
     async def fake_stream(messages, **kw):
@@ -146,6 +167,11 @@ async def test_first_char_check_failure_degrades_immediately(monkeypatch):
     ("   ", True),                               # 还没收到有效字符，不算失败
     ("抱歉，我无法回答", False),
     ("{", True),
+    # 评审抓出：围栏被切成两片时（首片只到 "```" 或 "```json"），还判断不了，
+    # 不能判失败 —— 那会把一条正常的流当场中止
+    ("```", True),
+    ("```json", True),
+    ("```json\n", True),
 ])
 def test_precheck_prefix(text, expected):
     assert GEN.StreamJsonParser.precheck_prefix(text) is expected

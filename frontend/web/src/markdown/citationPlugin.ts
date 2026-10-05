@@ -61,7 +61,10 @@ function walk(node: MdastNode) {
     if (child.value === undefined) walk(child)
     next.push(child)
   }
-  if (next.length !== children.length) node.children = next
+  // ⚠️ **必须无条件赋值**：整段只有 `[1]` 时，一个 text 拆成一个 link，
+  //    节点数不变 —— 只在长度变化时赋值的话这次替换会被丢掉，
+  //    角标就渲染不出来（评审抓出；与置灰标注里的同一类错）。
+  node.children = next
 }
 
 /** remark 插件：把正文里的 `[n]` 换成角标节点。 */

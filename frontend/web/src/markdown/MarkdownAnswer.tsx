@@ -13,12 +13,12 @@
  * 「误标一句的伤害大于漏标一句」。
  */
 
-import { memo, useMemo } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Citation, VerifyReport } from '../api/types'
 import { parseCiteHref, remarkCitations } from './citationPlugin'
-import { UNCITED_TITLE, checkClaims, remarkUncited } from './uncitedAnnotation'
+import { UNCITED_TITLE, checkClaims, remarkUncited, type AnnotationResult } from './uncitedAnnotation'
 
 interface Props {
   /** 渲染前的**原始答案文本** —— 偏移的参照系就是它，不能传渲染后的 */
@@ -40,6 +40,17 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
   // 校验 A（真正的漂移检测）：偏移切不出原句 → 整条消息不标灰
   const drifted = useMemo(() => checkClaims(text, claims).length > 0, [text, claims])
 
+  // 校验 B（标注器自检）在渲染过程中才跑得出来 —— 用 ref 收集，
+  // 触发后摘掉插件重渲染一次。它**不该**响；响了说明标注器有 bug，
+  // 那就按「宁可不标」退回消息级徽标（评审指出这里原本没人消费）。
+  const report = useRef<AnnotationResult>({ passedA: 0, annotated: 0, issues: [], degraded: false })
+  const [selfCheckFailed, setSelfCheckFailed] = useState(false)
+  useEffect(() => {
+    // 渲染时插件已把报告写进 ref，这里读得到
+    if (report.current.degraded && !selfCheckFailed) setSelfCheckFailed(true)
+  }, [text, claims, selfCheckFailed])
+  const degraded = drifted || selfCheckFailed
+
   const byMarker = useMemo(() => {
     const map = new Map<number, Citation>()
     for (const citation of citations) map.set(citation.marker, citation)
@@ -57,10 +68,12 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
   //    摘要显示「含 1 处未证实内容」，正文里一个灰标都没有）。
   const plugins = useMemo<RemarkPlugins>(() => {
     const list: unknown[] = [remarkGfm]
-    if (claims.length > 0 && !drifted) list.push([remarkUncited, { rawText: text, claims }])
+    if (claims.length > 0 && !degraded) {
+      list.push([remarkUncited, { rawText: text, claims, report: report.current }])
+    }
     list.push(remarkCitations)
     return list as RemarkPlugins
-  }, [claims, drifted, text])
+  }, [claims, degraded, text])
 
   const components = useMemo(() => ({
     a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
@@ -94,8 +107,9 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
 
       {claims.length > 0 && (
         <div className="uncited-summary" title={UNCITED_TITLE}>
-          {drifted ? (
-            // 校验 A 没过：偏移已经不可信 —— 只报数量与原文，不指位置
+          {degraded ? (
+            // 校验没过：偏移已经不可信（A 漂移 / B 自检）——
+            // 只报数量与原文，**不指位置**（标歪比不标更糟）
             <>
               本回答含 {claims.length} 处未证实内容（定位校验未通过，未标注位置）
               <ul className="uncited-list">

@@ -139,7 +139,11 @@ class StreamJsonParser:
         """
         cleaned = text.lstrip("﻿ \t\r\n").strip()
         if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1].strip()
+            # 围栏还没收完（首片可能是 "```" 或 "```json" 这种半截）→ 还判断不了，
+            # 不能判失败：那会把一条正常的流当场中止（实测 precheck_prefix('```') 曾返回 False）
+            if "\n" not in cleaned:
+                return True
+            cleaned = cleaned.split("\n", 1)[1].strip()
         if not cleaned:
             return True       # 还没收到有效字符，不算失败
         return cleaned.startswith("{")
@@ -364,7 +368,11 @@ async def _stream_generate(prompt: str, writer, timeout: float) -> tuple[str, st
                             "message": "模型输出格式异常"})
                     return "", "", "首字符校验失败"
             for text in parser.feed(piece):
-                if text:
+                # ⚠️ REFUSED 路径**不发模型文案**（§3.5.3 节点 9：避免模型在拒答时
+                #    夹带解释或猜测）。decision 在 answer 之前就解析出来了，
+                #    所以这里判得住；否则用户会先看到模型原话、
+                #    下面再叠一个服务端拒答框，刷新后又变了个样。
+                if text and parser.state.decision != "REFUSED_NO_EVIDENCE":
                     writer({"type": "token", "text": text})
             if parser.state.finished:
                 break
@@ -416,8 +424,17 @@ async def generate_node(state) -> dict:
     #    context_length_exceeded（**不是**拒答）。
     if count_tokens(prompt) > hard_prompt_limit():
         session_id = state.get("session_id") or ""
+        slice_ = None
         if session_id:
-            slice_ = await context_service.force_compact(session_id)
+            try:
+                slice_ = await context_service.force_compact(session_id)
+            except Exception as e:  # noqa: BLE001
+                # 强制压缩失败也不能把这一轮变成 500：拿原 prompt 继续，
+                # 后面若仍超硬限会走 context_length_exceeded（一个明确的错误码）
+                logger.warning("强制压缩失败：%s", e,
+                               extra={"event": "compaction.force_failed", "node": "generate"})
+                slice_ = None
+        if slice_ is not None:
             prompt = render("generate",
                 summary=(slice_.summary or "").strip() or "（无）",
                 history=_format_history(slice_.messages),

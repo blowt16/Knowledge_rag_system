@@ -222,6 +222,16 @@ probe('角标 + 置灰共用管道', '含 [n] 的段落里，无依据句照样�
   assert.ok(html.includes('cite-badge') || html.includes('#cite-1'), '角标节点没产出')
 })
 
+// ⑫ 整段只有 `[1]` 时也要出角标（1 进 1 出的替换不能丢）
+probe('单独一行的角标', '段落里只有一个 [1] 时也要换成角标', () => {
+  for (const md of ['参考来源：\n\n[1]', '[1]', '结论甲[1]。']) {
+    const processor = unified().use(remarkParse).use(remarkCitations)
+      .use(remarkRehype).use(rehypeStringify)
+    const html = String(processor.stringify(processor.runSync(processor.parse(md) as never)))
+    assert.ok(html.includes('href="#cite-1"'), `没变成角标：${JSON.stringify(md)}`)
+  }
+})
+
 // ---- 跑 -------------------------------------------------------------------
 
 let failed = 0
