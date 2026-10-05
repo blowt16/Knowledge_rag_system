@@ -79,7 +79,11 @@ async def clarify_node(state: RAGState) -> dict:
         else:
             facets = []
 
-        if not question:
+        # ⚠️ 兜底判据是「**问句为空 或 facets 为空**」，不只是问句为空
+        #    （节点 4 的兜底表与 §7.2 M2-3 都这么写）：
+        #    facets 空了就没有可点选项，这时用固定问句让降级态**可预期**，
+        #    而不是把一句模型临时想的话当成"还行"就放过去。
+        if not question or not facets:
             question = FALLBACK_QUESTION
             facets = list(FALLBACK_FACETS)
 
@@ -146,6 +150,9 @@ async def _stream_clarify(state: RAGState, query: str, writer):
     except Exception:  # noqa: BLE001
         facets = []
 
+    # ⚠️ 这条路径**不套用**上面那条「facets 为空 → 固定问句」的兜底：
+    #    问句已经**逐字流给用户了**，此刻再换成固定问句，用户看到的和存进历史的
+    #    就是两句话。facets 为空时只意味着「这轮没有可点选项」，问句保持已流出的那句。
     return {
         "clarify_question": question,
         "clarify_facets": facets,

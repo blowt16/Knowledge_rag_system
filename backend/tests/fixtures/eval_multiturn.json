@@ -6,7 +6,7 @@
     "锚点词的出现次数是**实测核对**过的（data/normalized/<document_id>.txt 逐份 grep 计数），不是凭印象：转专业=43@01、学业预警=16@03、缓考=8@05、学生申诉处理=15@07、退役复学=9@10、入伍奖励金=1@09。",
     "「挂科」「重修」在 10 份语料里**一次都没出现**（口语说法）—— 这两类题只判路由与澄清，不判检索（expected_document 为 null）。",
     "「退学」不具区分度（03=26 / 06=18 / 04=16），所以涉及退学的轮次一律用「学业预警」当锚点。",
-    "带 probe=true 的轮次是**边界探针**：期望值由文档口径推得，但实现未必覆盖，首跑大概率暴露缺口。首跑报告里与常规题分开统计。"
+    "首跑（2026-10-05）时标了 2 个 probe（边界探针）：「那要在多长时间内提出？」「？？？」—— 两处都**真的暴露了缺口**（省略漏检 / 无意义澄清），已分别修掉代码与词表，现均已转为常规题、不再单列。"
   ],
   "cases": [
     {
@@ -43,16 +43,16 @@
       "note": "省略补全的边界探针：t2 用「那」+「多长时间」，两者都不在代词表/疑问词表里",
       "turns": [
         {"question": "学生申诉处理办法里规定了什么？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
-        {"question": "那要在多长时间内提出？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "resolved_must_contain_any": ["申诉"], "probe": true, "note": "探针：省略特征三条都判不出来（「那」不在代词表、「多长时间」不在疑问词表、长度>8），预期会静默跳过消解"}
+        {"question": "那要在多长时间内提出？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "resolved_must_contain_any": ["申诉"], "note": "首跑实测抓到的缺口：省略特征三条都判不出来（「那」不在代词表、「多长时间」不在疑问词表、长度>8）→ 静默跳过消解。已把「多长时间」补进疑问词表，现为常规题"}
       ]
     },
     {
       "id": "mt-05",
       "type": "multi_turn",
-      "note": "代词指代（话题切换到优待政策）",
+      "note": "省略补全 + 消解增益的正例（原句必挂、消解后 rank1）",
       "turns": [
         {"question": "退役复学有什么优待政策？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": null, "note": "自足问题，首轮"},
-        {"question": "那要办哪些手续？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": ["退役", "复学"], "note": "省略：含疑问词「哪些」且无制度名词"}
+        {"question": "那成绩怎么算？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "resolved_must_contain_any": ["退役", "复学"], "note": "省略：「成绩」是通用词、脱离上下文检索不到本文档。实测对照：「那成绩怎么算？」→ 10 号**不在 Top5**；「退役复学后成绩怎么算？」→ 10 号 **rank 1**。原题目是「那要办哪些手续？」，但实测「手续」在 10 号里 0 次出现（只在 01/04/05/06），那份文档根本答不了，属于标注错误，已换掉"}
       ]
     },
     {
@@ -97,7 +97,7 @@
       "note": "§7.2 M2-2 ② 的原题：问候+实义诉求 → knowledge（优先级 knowledge>chat）",
       "turns": [
         {"question": "你好，我想问下缓考", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "命中闸门词表但**不是**「整条消息无诉求」"},
-        {"question": "那要提前几天申请？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": ["缓考"], "note": "省略：含疑问词「几天」（不在疑问词表，靠①以外的路径）—— 与 mt-04 同类探针"}
+        {"question": "那要提前几天申请？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": ["缓考"], "note": "与 mt-04#2 同类的省略缺口：「几天」原不在疑问词表 → 静默跳过消解。已一并补进词表"}
       ]
     },
     {
@@ -120,9 +120,9 @@
     {
       "id": "mt-13",
       "type": "route_negative",
-      "note": "§15 #6 的纯符号输入：期望路由由文档推得（不闲谈、不澄清 → knowledge），属口径解释",
+      "note": "§15 #6 的纯符号输入：**不得触发无意义澄清**",
       "turns": [
-        {"question": "？？？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "probe": true, "note": "探针：当前实现大概率判成 clarify（短且无制度名词）。§15 #6 要求「不误判成闲聊、不触发无意义澄清」"}
+        {"question": "？？？", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "首跑实测：原实现判成 clarify（短且无制度名词，正好踩中澄清触发条件二）—— 用户敲三个问号被反问「你想问的是哪一项？」，正是 §15 #6 禁止的「无意义澄清」。修法：把「没有实义字符」并入闸门判据（与 resolve 共用），于是 route=chat。⚠️ 期望值取 chat 属**口径判读**：§15 #6 那行同时写了「不误判成闲聊」与「不触发无意义澄清」，此处的读法是那一句按输入类别拆开对应（纯符号↔不澄清、超长↔不误判闲聊），因为「整条消息没有实际诉求」的闸门判据本身就适用于纯符号。已记入交接待负责人确认"}
       ]
     }
   ]

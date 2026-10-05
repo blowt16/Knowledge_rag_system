@@ -27,14 +27,14 @@ decision 只能是 ANSWERED 或 REFUSED_NO_EVIDENCE。
 选择 REFUSED_NO_EVIDENCE 时，answer 留空字符串即可。
 
 【对话历史】
-\"\"\"
+"""
 $history
-\"\"\"
+"""
 
 【证据】
 $context
 
 【本轮问题】
-\"\"\"
+"""
 $query
-\"\"\"
+"""

@@ -36,7 +36,24 @@ def load_prompt(name: str) -> Template:
             f"提示词 {name!r} 不存在（找的是 {path}）。"
             f"可用：{[p.stem for p in PROMPTS_DIR.glob('*.txt')]}"
         )
-    return Template(path.read_text(encoding="utf-8"))
+    return Template(_strip_leading_comments(path.read_text(encoding="utf-8")))
+
+
+def _strip_leading_comments(text: str) -> str:
+    """去掉文件**开头**的 `#` 注释块 —— 那是给人看的，不该进提示词。
+
+    ⚠️ 不处理的话有两个实际后果（2026-10-05 M2 实测）：
+       ① 注释里的 `$name` 是**举例说明占位符语法**用的，而 `Template` 把它当成
+          真占位符 → 每次渲染都告警「缺少变量 ['name']」。这条告警本是用来看
+          「真忘了传 $query」的，天天响就等于不响。
+       ② 注释原文会连同正文一起发给模型，白占 token，还把「模板语法说明」
+          塞进了提示词正文。
+    """
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines) and lines[i].lstrip().startswith("#"):
+        i += 1
+    return "\n".join(lines[i:]).lstrip("\n")
 
 
 def render(name: str, **kwargs: object) -> str:

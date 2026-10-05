@@ -54,6 +54,14 @@ def _question_words() -> list[str]:
     return cfg("rules.question_words", []) or []
 
 
+def _has_actual_content(text: str) -> bool:
+    """有没有**实义字符**（汉字 / 字母 / 数字）。纯符号、空白、emoji 都没有。
+
+    ⚠️ `str.isalnum()` 对汉字返回 True，所以这一个判断就够，不用另外判 CJK 区间。
+    """
+    return any(ch.isalnum() for ch in text)
+
+
 def is_meaningless(query: str) -> bool:
     """闸门判据：**整条消息没有实际诉求**。
 
@@ -63,6 +71,14 @@ def is_meaningless(query: str) -> bool:
     """
     text = (query or "").strip()
     if not text:
+        return True
+
+    # ⚠️ 纯符号/emoji 输入也是「没有实际诉求」—— 判据的另一半。
+    #    不判的话，「？？？」会因为「短且不含制度名词」正好命中澄清触发条件二，
+    #    用户什么都没问，却被反问「你想问的是哪一项？」—— 这就是 §15 #6 说的
+    #    「无意义澄清」。M2 首跑实测抓到的（题库 mt-13）。
+    #    注意反向锁：**不能把「短」当成「没诉求」**，否则「挂科了怎么办」会被判闲聊。
+    if not _has_actual_content(text):
         return True
 
     lowered = text.lower()
