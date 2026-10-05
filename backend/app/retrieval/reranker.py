@@ -118,43 +118,58 @@ def _predict(query: str, chunks: list[Chunk]) -> list[float]:
     return [float(s) for s in scores]
 
 
-async def rerank(query: str, chunks: list[Chunk], *, top_k: int | None = None) -> RerankResult:
-    """精排。任何异常都降级，**绝不让请求失败**。"""
+def rerank_sync(query: str, chunks: list[Chunk], *, top_k: int | None = None) -> RerankResult:
+    """精排的**同步**实现。任何异常都降级，**绝不让请求失败**。
+
+    ⚠️ 为什么单独留一个同步入口：Windows 上「`asyncio.run` + `to_thread(torch/CUDA)`」
+       在解释器退出时会于 executor shutdown 撞成 `0xC000071C`（实测，退出码 127）。
+       命令行批处理（`app.cli eval-retrieval`）不需要并发，在主线程直接跑
+       既避开这个问题，也省掉一层线程开销；服务端仍走下面的异步 `rerank()`。
+    """
     top_k = top_k or int(cfg("retrieval.top_k", 5))
     if not chunks:
         return RerankResult(chunks=[], confidence=None, degraded=False)
 
-    async with _get_semaphore():
-        try:
-            model = await asyncio.to_thread(_load_model)
-            if model is None:
-                return RerankResult(chunks=chunks[:top_k], confidence=None,
-                                    degraded=True, degraded_kind="model_load_failed")
-
-            scores = await asyncio.to_thread(_predict, query, chunks)
-            if not scores:
-                raise RuntimeError("精排返回空分")
-
-            ranked = sorted(zip(chunks, scores), key=lambda p: p[1], reverse=True)
-            out: list[Chunk] = []
-            for chunk, score in ranked[:top_k]:
-                chunk.score = float(score)
-                out.append(chunk)
-
-            return RerankResult(chunks=out, confidence=float(max(scores)),
-                                degraded=False)
-
-        except asyncio.TimeoutError:
-            return RerankResult(chunks=chunks[:top_k], confidence=None,
-                                degraded=True, degraded_kind="timeout")
-        except RuntimeError as e:
-            kind = "oom" if "out of memory" in str(e).lower() else "model_load_failed"
-            logger.warning("精排失败，降级为 RRF 顺序：%s", e,
-                           extra={"event": "rerank.degraded", "node": "rerank"})
-            return RerankResult(chunks=chunks[:top_k], confidence=None,
-                                degraded=True, degraded_kind=kind)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("精排异常，降级为 RRF 顺序：%s", e,
-                           extra={"event": "rerank.degraded", "node": "rerank"})
+    try:
+        model = _load_model()
+        if model is None:
             return RerankResult(chunks=chunks[:top_k], confidence=None,
                                 degraded=True, degraded_kind="model_load_failed")
+
+        scores = _predict(query, chunks)
+        if not scores:
+            raise RuntimeError("精排返回空分")
+
+        ranked = sorted(zip(chunks, scores), key=lambda p: p[1], reverse=True)
+        out: list[Chunk] = []
+        for chunk, score in ranked[:top_k]:
+            chunk.score = float(score)
+            out.append(chunk)
+
+        return RerankResult(chunks=out, confidence=float(max(scores)),
+                            degraded=False)
+
+    except asyncio.TimeoutError:
+        return RerankResult(chunks=chunks[:top_k], confidence=None,
+                            degraded=True, degraded_kind="timeout")
+    except RuntimeError as e:
+        kind = "oom" if "out of memory" in str(e).lower() else "model_load_failed"
+        logger.warning("精排失败，降级为 RRF 顺序：%s", e,
+                       extra={"event": "rerank.degraded", "node": "rerank"})
+        return RerankResult(chunks=chunks[:top_k], confidence=None,
+                            degraded=True, degraded_kind=kind)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("精排异常，降级为 RRF 顺序：%s", e,
+                       extra={"event": "rerank.degraded", "node": "rerank"})
+        return RerankResult(chunks=chunks[:top_k], confidence=None,
+                            degraded=True, degraded_kind="model_load_failed")
+
+
+async def rerank(query: str, chunks: list[Chunk], *, top_k: int | None = None) -> RerankResult:
+    """精排的**异步**入口：把同步实现丢到线程里跑，别阻塞事件循环。
+
+    GPU 信号量在这里 —— 它约束的是**跨请求**的并发（§3.2.4），
+    单线程的批处理入口不需要它。
+    """
+    async with _get_semaphore():
+        return await asyncio.to_thread(rerank_sync, query, chunks, top_k=top_k)

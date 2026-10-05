@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "note": "M1 检索基线 20 题（文号 5 + 专有名词 15）。ground truth 用**文档标题**而不是 document_id —— id 每次重新入库都会变，标题不会。每条 expected_document 都已实测核对过：该 query 词确实出现在这份文档的正文里。",
+  "caveat": [
+    "只有 5 条文号题：01/02/03/04/05 五份**横向**公文的本文文号在文字层里存在。",
+    "06/07/10 三份**竖排封面**公文，其本文文号在 PDF 文字层里根本不存在（实测：全文搜不到自己那个文号，只有引用别人的桂电教〔2016〕19号 / 桂电学〔2017〕9号 等），08/09 本身无文号。",
+    "所以文号检索目前只对 5 份公文有效 —— 这是语料/加载层的限制，不是检索质量问题，故不编成题、不计入指标，只在此声明。"
+  ],
+  "cases": [
+    {"id": "dn-01", "type": "doc_number", "question": "桂电教〔2021〕6号", "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "note": "本文文号，横向公文"},
+    {"id": "dn-02", "type": "doc_number", "question": "桂电学位〔2025〕19号", "expected_document": "02_学位授予文件", "note": "难点：04 正文里引用了它两次，比本文出现的次数还多"},
+    {"id": "dn-03", "type": "doc_number", "question": "桂电教〔2025〕28号", "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "note": "难点：与 27 号只差一位数字，且互相引用"},
+    {"id": "dn-04", "type": "doc_number", "question": "桂电教〔2025〕27号", "expected_document": "04_普通高等教育本科学生学籍管理规定_2025修订_桂电教2025-27号", "note": "难点：同上，27/28 互相引用"},
+    {"id": "dn-05", "type": "doc_number", "question": "桂电教〔2020〕15号", "expected_document": "05_考试管理规定_桂电教2020-15号", "note": "本文文号，横向公文"},
+
+    {"id": "pn-01", "type": "proper_noun", "question": "产教融合实习", "expected_document": "08_本科生产教融合实习学生管理规定", "note": "全文唯一出现，最简单的一题"},
+    {"id": "pn-02", "type": "proper_noun", "question": "学业预警", "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "note": "03 出现 16 次 / 04 出现 1 次"},
+    {"id": "pn-03", "type": "proper_noun", "question": "学业退学", "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号", "note": "03 出现 14 次 / 04 出现 1 次"},
+    {"id": "pn-04", "type": "proper_noun", "question": "学生申诉处理", "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号", "note": "07 出现 15 次，但 06/04 也提到（7 次 / 2 次）"},
+    {"id": "pn-05", "type": "proper_noun", "question": "专业分流", "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "note": "01 出现 19 次"},
+    {"id": "pn-06", "type": "proper_noun", "question": "转专业", "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号", "note": "01 出现 43 次；04/06/10 也提到，考的是「主文档压得住噪声」"},
+    {"id": "pn-07", "type": "proper_noun", "question": "学士学位授予", "expected_document": "02_学位授予文件", "note": "02 出现 10 次 / 04 出现 3 次"},
+    {"id": "pn-08", "type": "proper_noun", "question": "退役复学", "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "note": "全文唯一出现"},
+    {"id": "pn-09", "type": "proper_noun", "question": "应届毕业班学生参军入伍", "expected_document": "09_应届毕业班学生参军入伍优待政策_试行", "note": "与 10 号同主题，考的是两份参军政策能否分开"},
+    {"id": "pn-10", "type": "proper_noun", "question": "考试违规", "expected_document": "05_考试管理规定_桂电教2020-15号", "note": "05 出现 5 次 / 04 出现 1 次"},
+    {"id": "pn-11", "type": "proper_noun", "question": "本科生管理规定", "expected_document": "06_本科生管理规定_桂电学2019-24号", "note": "全文唯一出现。06 是竖排封面文档，本条测的是竖排恢复后的正文可检索性"},
+    {"id": "pn-12", "type": "proper_noun", "question": "免修成绩", "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号", "note": "全文唯一出现"},
+    {"id": "pn-13", "type": "proper_noun", "question": "入伍奖励金", "expected_document": "09_应届毕业班学生参军入伍优待政策_试行", "note": "全文唯一出现"},
+    {"id": "pn-14", "type": "proper_noun", "question": "缓考", "expected_document": "05_考试管理规定_桂电教2020-15号", "note": "05 出现 8 次 / 04 出现 5 次。中文分词生效与否在这一题上最明显（旧项目 str.split 时代此题必挂）"},
+    {"id": "pn-15", "type": "proper_noun", "question": "学籍管理规定", "expected_document": "04_普通高等教育本科学生学籍管理规定_2025修订_桂电教2025-27号", "note": "难点题：04 出现 2 次，02/03 各 1 次 —— 靠文档本身的中心度而非词频"}
+  ]
+}
