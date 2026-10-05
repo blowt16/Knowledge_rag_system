@@ -10,8 +10,10 @@
     "gen:api": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
+    "pdfjs-dist": "^4.4.168",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-pdf-highlighter": "^8.0.0-rc.0",
     "react-router-dom": "^7.9.4",
     "zustand": "^5.0.8"
   },
