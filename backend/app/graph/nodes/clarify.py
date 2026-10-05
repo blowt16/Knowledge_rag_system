@@ -49,13 +49,15 @@ async def clarify_node(state: RAGState) -> dict:
     started = time.perf_counter()
     query = state.get("resolved_query") or state.get("query", "")
 
-    def _with_trace(out: dict) -> dict:
+    def _with_trace(out: dict, degraded: str | None = None) -> dict:
         # ⚠️ 每个节点都必须写 trace —— 漏了不只是少一条耗时记录，
         #    还会让 SSE 那边 `_node_ran(final, "clarify")` 恒为 False，
         #    导致 clarify 的 route 事件（含 facets）永远不发。
+        # ⚠️ `degraded` 也不是装饰（评审 I2）：评测器的护栏靠它判断
+        #    「这一轮的指标还反不反映设计行为」，有降级就拒绝写评测文件。
         out["trace"] = [NodeTrace(
             node="clarify", ms=int((time.perf_counter() - started) * 1000),
-            recalled=len(out.get("clarify_facets") or []), degraded=None)]
+            recalled=len(out.get("clarify_facets") or []), degraded=degraded)]
         return out
 
     writer = _stream_writer()
@@ -83,9 +85,11 @@ async def clarify_node(state: RAGState) -> dict:
         #    （节点 4 的兜底表与 §7.2 M2-3 都这么写）：
         #    facets 空了就没有可点选项，这时用固定问句让降级态**可预期**，
         #    而不是把一句模型临时想的话当成"还行"就放过去。
+        degraded: str | None = None
         if not question or not facets:
             question = FALLBACK_QUESTION
             facets = list(FALLBACK_FACETS)
+            degraded = "unavailable"
 
         return _with_trace({
             "clarify_question": question,
@@ -93,9 +97,9 @@ async def clarify_node(state: RAGState) -> dict:
             "clarify_facets": facets,
             "answer": question,
             "decision": "ANSWERED",
-        })
+        }, degraded)
 
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         logger.warning("澄清生成失败，退化为固定问句（仍走 clarify 分支）",
                        extra={"event": "clarify.fallback", "node": "clarify"})
         return _with_trace({
@@ -103,7 +107,7 @@ async def clarify_node(state: RAGState) -> dict:
             "clarify_facets": list(FALLBACK_FACETS),
             "answer": FALLBACK_QUESTION,
             "decision": "ANSWERED",
-        })
+        }, "timeout" if isinstance(e, llm.LLMTimeout) else "unavailable")
 
 
 def _stream_writer():

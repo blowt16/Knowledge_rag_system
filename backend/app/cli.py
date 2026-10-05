@@ -421,25 +421,30 @@ def _rank_top(final: dict, top_k: int) -> tuple[list[str], bool]:
     return [c.document_name for c in outcome.chunks], outcome.degraded
 
 
-async def _raw_control(query: str, user_lite, top_k: int) -> list[str]:
-    """对照：**不做消解**，拿原句直接进同一条检索链路。
+async def _raw_control(query: str, user_lite, top_k: int) -> tuple[list[str], bool]:
+    """对照腿：**不做消解**，其余与主腿完全相同（同样过一次 rewrite）。
 
-    这是「消解到底有没有用」的硬证据 —— 与 M1 的「单路对照」同一个道理：
-    只看「消解后命中率 = 1.0」不能说明什么，得看到「不消解时会掉到多少」。
+    ⚠️ 对照腿必须与主腿**只差一个变量**（评审 I1）。
+       最初这里直接拿原句单路 verbatim 检索，而主腿是「消解后 + 三类扩展」——
+       一次变了两个变量，0.714 与 1.000 的差就归因不到消解头上，
+       而 M5 的消解消融很可能直接复用这套口径，口径错会把调参带偏。
+       现在两腿都过 `rewrite_node`，**差别只剩「消解」**。
     """
     from app.graph.nodes.retrieve import retrieve_node
+    from app.graph.nodes.rewrite import rewrite_node
     from app.graph.state import new_state
 
-    state = new_state(
-        query=query,
-        session_id="eval-multiturn",
-        user=user_lite,
-        retrieval_queries=[{"text": query, "target": "both",
-                            "weight": 1.0, "source": "verbatim"}],
-    )
+    # 注意：不设 resolved_query —— rewrite 与 rerank 都会回落到 query（原句）
+    state = new_state(query=query, session_id="eval-multiturn", user=user_lite)
+    state.update(await rewrite_node(state))
     state.update(await retrieve_node(state))
-    names, _ = _rank_top(state, top_k)
-    return names
+    names, rerank_degraded = _rank_top(state, top_k)
+
+    kinds = [f"control-{e['node']}:{e['degraded']}"
+             for e in (state.get("trace") or []) if e.get("degraded")]
+    if rerank_degraded:
+        kinds.append("control-rerank:degraded")
+    return names, kinds
 
 
 async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
@@ -498,10 +503,11 @@ async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
                 resolved = final.get("resolved_query") or ""
                 anchors = turn["resolved_must_contain_any"] or []
 
-                # 只有「需要消解的轮次」才跑对照 —— 它要额外过一次精排
+                # 只有「需要消解的轮次」才跑对照 —— 它要额外过一次 rewrite + 精排
                 raw_names: list[str] | None = None
                 if anchors and expected:
-                    raw_names = await _raw_control(q, user_lite, top_k)
+                    raw_names, raw_kinds = await _raw_control(q, user_lite, top_k)
+                    degradations.extend(raw_kinds)
 
                 for entry in (final.get("trace") or []):
                     if entry.get("degraded"):
@@ -585,7 +591,8 @@ async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
     print(f"  澄清命中率   = {clarify_hit:.3f}   （{sum(converge)}/{len(converge)} 个触发后收敛）")
     print(f"  澄清漏报     = {len(missed_clarify)} 轮")
     print(f"  消解命中率   = {resolved_ok:.3f}   （锚点轮 {len(anchor_rows)} 个）")
-    print(f"  ── 消解对照：消解后检索命中 = {resolved_hit:.3f}   不消解（原句）= {raw_hit:.3f}"
+    print(f"  ── 消解对照：消解后检索命中 = {resolved_hit:.3f}   "
+          f"不消解（原句，下游同链路）= {raw_hit:.3f}"
           f"   （{len(with_target)} 轮有检索目标）")
     print(f"  规则层命中   = {rule_hits}/{n}（其余走 LLM）")
     print(f"  消解跳过原因 = {skip_counts}")
@@ -664,7 +671,8 @@ def _multiturn_markdown(payload, rows, rows_by_case, top_k, role,
         "## 消解对照（这一节才是「消解有用」的证据）",
         "",
         "只报「消解后命中 = 1.0」说明不了什么 —— 得看**不消解**时会掉到多少。"
-        "同 M1 的单路对照：",
+        "两腿**只差「消解」这一个变量**：主腿是「消解后 → rewrite → 检索 → 精排」，"
+        "对照腿是「原句 → rewrite → 检索 → 精排」，下游完全相同：",
         "",
         "| 轮次 | 原句（不消解） | 消解后 | 期望文档 | 消解结果 |",
         "|---|---|---|---|---|",
@@ -676,7 +684,8 @@ def _multiturn_markdown(payload, rows, rows_by_case, top_k, role,
     lines += [
         "",
         f"> 汇总：消解后 Recall@{top_k} = **{resolved_hit:.3f}**，"
-        f"不消解 Recall@{top_k} = **{raw_hit:.3f}**（{len(anchors)} 轮有检索目标）。",
+        f"不消解（原句，下游同链路）Recall@{top_k} = **{raw_hit:.3f}**"
+        f"（{len(anchors)} 轮有检索目标）。",
         "",
         "## 逐轮明细",
         "",
@@ -694,6 +703,8 @@ def _multiturn_markdown(payload, rows, rows_by_case, top_k, role,
             f"{r['expected_route']} | {r['route_source']} | {clar} | "
             f"{r['skip_reason']} | {res_ok} `{r['resolved'][:40]}` | {hit} |")
 
+    lines += ["", "## 本卷口径修订记录", ""]
+    lines += [f"- {c}" for c in payload.get("revision_note", [])]
     lines += ["", "## 已知问题（题库自带的口径说明）", ""]
     lines += [f"- {c}" for c in payload.get("caveat", [])]
     lines += [

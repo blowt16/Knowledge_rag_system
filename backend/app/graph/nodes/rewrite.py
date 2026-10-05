@@ -56,6 +56,7 @@ async def rewrite_node(state: RAGState) -> dict:
     query = state.get("resolved_query") or state.get("query", "")
 
     queries: list[RetrievalQuery] = []
+    degraded: str | None = None
     try:
         data = await llm.complete_json(
             [{"role": "user", "content": render("rewrite", query=query)}],
@@ -75,12 +76,19 @@ async def rewrite_node(state: RAGState) -> dict:
                 if source in TARGET_BY_SOURCE and text and source not in seen:
                     queries.append(_derive(source, text))
                     seen.add(source)
+    except llm.LLMTimeout:
+        logger.warning("查询扩展超时，退化为标准 hybrid",
+                       extra={"event": "rewrite.timeout", "node": "rewrite"})
+        degraded = "timeout"
     except Exception:  # noqa: BLE001
         logger.warning("查询扩展失败，退化为标准 hybrid",
                        extra={"event": "rewrite.fallback", "node": "rewrite"})
+        degraded = "unavailable"
 
     if not queries:
         queries = fallback_queries(query)
+        # 解析成功但一条可用查询都没解出来，同样是退化 —— 也要留痕
+        degraded = degraded or "unavailable"
 
     # verbatim 必须存在且**逐字等于** resolved_query（保文号精度）
     if not any(q["source"] == "verbatim" for q in queries):
@@ -93,7 +101,9 @@ async def rewrite_node(state: RAGState) -> dict:
     from app.graph.state import NodeTrace
     return {
         "retrieval_queries": queries,
+        # ⚠️ 兜底必须留痕（评审 I2）：`app.cli eval-multiturn` 的护栏靠 degraded
+        #    判断「这一轮指标还反不反映设计行为」，有降级就拒绝写评测文件。
         "trace": [NodeTrace(node="rewrite",
                             ms=int((time.perf_counter() - started) * 1000),
-                            recalled=0, degraded=None)],
+                            recalled=len(queries), degraded=degraded)],
     }

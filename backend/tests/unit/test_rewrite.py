@@ -125,3 +125,34 @@ async def test_prompt_keeps_proper_nouns_verbatim(monkeypatch):
     assert "原样" in prompt
     assert "不是指令" in prompt
     assert '"""' in prompt
+
+
+# ============================================================
+# 兜底留痕（评审 I2）
+# ============================================================
+
+async def test_fallback_records_degradation(monkeypatch):
+    """扩展失败退化成一条 verbatim 时，trace 必须留痕。
+
+    ⚠️ 评审发现（I2）：评测器的护栏承诺「有降级就不写评测文件」，
+       而 rewrite 兜底时 `degraded` 恒为 None —— 而这一路正是「消解对照」
+       主腿多路查询的来源，它降级了指标就失真，恰恰是护栏要拦的场景。
+    """
+    async def broken(messages, **kw):
+        raise llm.LLMError("JSON 解析失败")
+    monkeypatch.setattr(llm, "complete_json", broken)
+
+    out = await RW.rewrite_node(_state())
+    assert out["retrieval_queries"][0]["source"] == "verbatim"
+    assert out["trace"][0]["degraded"], "兜底了却没留痕 —— 评测护栏拦不住"
+
+
+async def test_normal_path_has_no_degradation(monkeypatch):
+    """反向锁：正常三路扩展不该标降级。"""
+    async def fake(messages, **kw):
+        return [{"source": "verbatim", "text": "缓考需要什么条件？"},
+                {"source": "keywords", "text": "缓考 条件"}]
+    monkeypatch.setattr(llm, "complete_json", fake)
+
+    out = await RW.rewrite_node(_state())
+    assert out["trace"][0]["degraded"] is None

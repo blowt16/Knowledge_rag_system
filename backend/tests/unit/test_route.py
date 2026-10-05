@@ -172,8 +172,11 @@ async def test_sticky_last_route_is_only_knowledge(monkeypatch):
     for prompt, (last, expect_sticky) in zip(seen, [("knowledge", "knowledge"),
                                                    ("chat", "（无）"),
                                                    ("clarify", "（无）"), ("", "（无）")]):
-        assert expect_sticky in prompt.split("【上一轮分类】")[1].split("【用户问题】")[0] \
-            or expect_sticky in prompt, f"last_route={last!r} 的粘性写错了"
+        # ⚠️ 只查「【上一轮分类】」与「【用户问题】」之间那一段。
+        #    原先还挂了一句 `or expect_sticky in prompt` —— 那让 knowledge 那条**恒真**
+        #    （提示词正文里本来就枚举了 knowledge 这个词），等于没测。评审 M3。
+        section = prompt.split("【上一轮分类】")[1].split("【用户问题】")[0]
+        assert expect_sticky in section, f"last_route={last!r} 的粘性写错了：{section!r}"
 
 
 # ============================================================
@@ -192,3 +195,34 @@ async def test_symbol_only_input_is_not_clarified(no_llm):
         out = await RT.route_node(new_state(query=q, resolved_query=q))
         assert out["route"] != "clarify", f"{q} 触发了无意义澄清"
         assert out["route"] == "chat"
+
+
+async def test_llm_fallback_records_degradation(monkeypatch):
+    """兜底必须在 trace 里留痕 —— 评测器的护栏靠它拦「指标失真的那一轮」。
+
+    ⚠️ 评审发现（I2）：护栏承诺「有降级就不写评测文件」，但 route/clarify/rewrite
+       三个节点兜底时 `degraded` 恒为 None —— 于是 LLM 静默兜底的那一轮，
+       指标照样被写进验收文档，而护栏打印的那句话成了空话。
+    """
+    async def boom(messages, **kw):
+        raise llm.LLMTimeout("boom")
+    monkeypatch.setattr(llm, "complete_json", boom)
+
+    out = await RT.route_node(new_state(query=VAGUE, resolved_query=VAGUE, history=HISTORY))
+    assert out["route"] == "knowledge"
+    assert out["trace"][0]["degraded"], "兜底了却没留痕 —— 评测护栏拦不住"
+
+
+async def test_llm_garbage_also_records_degradation(monkeypatch):
+    async def weird(messages, **kw):
+        return {"route": "banana"}
+    monkeypatch.setattr(llm, "complete_json", weird)
+
+    out = await RT.route_node(new_state(query=VAGUE, resolved_query=VAGUE, history=HISTORY))
+    assert out["trace"][0]["degraded"]
+
+
+async def test_rule_hit_has_no_degradation(no_llm):
+    """反向锁：规则层命中是**正常路径**，不能标成降级（否则护栏永远在拦）。"""
+    out = await RT.route_node(new_state(query="缓考", resolved_query="缓考"))
+    assert out["trace"][0]["degraded"] is None

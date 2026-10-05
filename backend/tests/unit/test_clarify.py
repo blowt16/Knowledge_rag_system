@@ -116,3 +116,90 @@ async def test_malformed_payload_never_crashes(monkeypatch, bad):
     out = await C.clarify_node(_state())
     assert out["clarify_question"]
     assert isinstance(out["clarify_facets"], list)
+
+
+# ============================================================
+# 兜底留痕（评审 I2）
+# ============================================================
+
+async def test_fallback_records_degradation(monkeypatch):
+    """兜底必须留痕 —— 评测器的护栏靠它拦「指标失真的那一轮」。"""
+    async def broken(messages, **kw):
+        raise llm.LLMError("JSON 解析失败")
+    monkeypatch.setattr(llm, "complete_json", broken)
+
+    out = await C.clarify_node(_state())
+    assert out["trace"][0]["degraded"], "兜底了却没留痕 —— 评测护栏拦不住"
+
+
+# ============================================================
+# 流式分支（评审 I4：**这才是生产走的那条**，此前零覆盖）
+# ============================================================
+
+@pytest.fixture
+def streaming(monkeypatch):
+    """让 `_stream_writer()` 可用（等价于图在 stream_mode 带 custom 下运行），
+    并准备好假的流式输出。"""
+    written: list[dict] = []
+    monkeypatch.setattr(C, "_stream_writer", lambda: written.append)
+    return written
+
+
+async def test_streaming_path_is_taken_and_streams_the_question(monkeypatch, streaming):
+    """生产路径：`stream_mode=["custom","values"]` 下 `get_stream_writer()` 是活的，
+    所以 `clarify` 走的是流式分支 —— 只测非流式那条等于没测生产。"""
+    async def boom(*a, **kw):
+        raise AssertionError("流式可用时不该走非流式")
+    monkeypatch.setattr(llm, "complete_json", boom)
+
+    async def fake_stream(messages, **kw):
+        yield '{"facets": ["学业预警", "缓考办理"], "question": "你想问哪一项？"}'
+    monkeypatch.setattr(llm, "stream_raw", fake_stream)
+
+    out = await C.clarify_node(_state())
+
+    assert out["clarify_question"] == "你想问哪一项？"
+    assert out["clarify_facets"] == ["学业预警", "缓考办理"]
+    assert out["trace"][0]["degraded"] is None
+    assert "".join(w["text"] for w in streaming) == "你想问哪一项？"
+    assert all(w["type"] == "token" for w in streaming)
+
+
+async def test_streaming_caps_facets_at_four(monkeypatch, streaming):
+    async def fake_stream(messages, **kw):
+        yield '{"facets": ["a","b","c","d","e"], "question": "选一个"}'
+    monkeypatch.setattr(llm, "stream_raw", fake_stream)
+
+    out = await C.clarify_node(_state())
+    assert len(out["clarify_facets"]) == 4
+
+
+async def test_stream_failure_falls_back_to_non_streaming(monkeypatch, streaming):
+    """流式炸了 → 回到非流式，而不是把整轮变成错误。"""
+    async def broken_stream(messages, **kw):
+        raise llm.LLMError("上游断开")
+        yield  # 让它是个生成器
+    monkeypatch.setattr(llm, "stream_raw", broken_stream)
+
+    async def fake(messages, **kw):
+        return {"facets": ["学业预警"], "question": "你想问哪一项？"}
+    monkeypatch.setattr(llm, "complete_json", fake)
+
+    out = await C.clarify_node(_state())
+    assert out["clarify_question"] == "你想问哪一项？"
+    assert out["clarify_facets"] == ["学业预警"]
+
+
+async def test_streaming_empty_facets_keeps_the_streamed_question(monkeypatch, streaming):
+    """⚠️ 流式路**刻意不套**「facets 为空 → 固定问句」的兜底。
+
+    问句已经逐字流给用户了（`streaming` 里就是那些 token），此刻再换成固定问句，
+    用户看到的和存进历史的就是两句话。facets 空只意味着「这轮没有可点选项」。
+    """
+    async def fake_stream(messages, **kw):
+        yield '{"facets": [], "question": "你想问的是哪一方面？"}'
+    monkeypatch.setattr(llm, "stream_raw", fake_stream)
+
+    out = await C.clarify_node(_state())
+    assert out["clarify_question"] == "你想问的是哪一方面？"
+    assert out["clarify_facets"] == []

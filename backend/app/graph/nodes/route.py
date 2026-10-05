@@ -120,15 +120,17 @@ async def route_node(state: RAGState) -> dict:
 
     route = rule_classify(query)
     source = "rule"
+    degraded: str | None = None
 
     if route is None:
         source = "llm"
-        route = await _llm_classify(query, state.get("last_route", ""))
+        route, degraded = await _llm_classify(query, state.get("last_route", ""))
 
-    return _result(route, source, started)
+    return _result(route, source, started, degraded)
 
 
-async def _llm_classify(query: str, last_route: str) -> str:
+async def _llm_classify(query: str, last_route: str) -> tuple[str, str | None]:
+    """返回 (路由, 降级类型)。**兜底必须留痕** —— 见 `_result` 的说明。"""
     # ⚠️ 只有 knowledge 参与「保持上一轮」；chat / clarify 视为「无上轮分类」
     sticky = last_route if last_route == "knowledge" else "（无）"
     prompt = render("route", last_route=sticky, query=query)
@@ -140,19 +142,30 @@ async def _llm_classify(query: str, last_route: str) -> str:
         )
         value = str(data.get("route") or "").strip().lower()
         if value in ("chat", "clarify", "knowledge"):
-            return value
+            return value, None
+        logger.warning("路由 LLM 返回非法取值 %r，兜底为 knowledge", value,
+                       extra={"event": "route.illegal_value", "node": "route"})
+    except llm.LLMTimeout:
+        logger.warning("路由 LLM 超时，兜底为 knowledge",
+                       extra={"event": "route.timeout", "node": "route"})
+        return "knowledge", "timeout"
     except Exception:  # noqa: BLE001
         logger.warning("路由 LLM 失败，兜底为 knowledge",
                        extra={"event": "route.fallback", "node": "route"})
-    # 解析失败 / 超时 / 异常 → knowledge（宁可多检索，不可漏答）
-    return "knowledge"
+        return "knowledge", "unavailable"
+    # 解析失败 / 非法取值 → knowledge（宁可多检索，不可漏答）
+    return "knowledge", "unavailable"
 
 
-def _result(route: str, source: str, started: float) -> dict:
+def _result(route: str, source: str, started: float,
+            degraded: str | None = None) -> dict:
+    """⚠️ `degraded` 不是装饰：`app.cli eval-multiturn` 的护栏靠它判断
+       「这一轮的指标还反不反映设计行为」，有降级就拒绝写评测文件。
+       兜底了却不留痕 = 护栏拦不住，指标照样进了验收文档（评审 I2）。"""
     from app.graph.state import NodeTrace
     return {
         "route": route,
         "route_source": source,   # rule | llm —— 规则命中率的数据源
         "trace": [NodeTrace(node="route", ms=int((time.perf_counter() - started) * 1000),
-                            recalled=0, degraded=None)],
+                            recalled=0, degraded=degraded)],
     }
