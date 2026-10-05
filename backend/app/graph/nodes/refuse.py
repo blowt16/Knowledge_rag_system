@@ -38,10 +38,19 @@ REFUSAL_HINT = "该类问题建议咨询教务处或相关职能部门。"
 
 
 async def refuse_node(state: RAGState) -> dict:
+    import time
+
+    from app.graph.state import NodeTrace
+
+    started = time.perf_counter()
     return {
         "refused": True,
         "refusal_reason": "no_candidate",
         "answer": REFUSAL_TEXT,
         "citations": [],
         "decision": "",          # ⚠️ 本条路径**不发** decision 事件
+        # ⚠️ 每个节点都必须写 trace —— 漏写不只是少一条耗时记录，
+        #    还会让 SSE 那边 `_node_ran()` 判 False，导致该节点之后的事件不发
+        "trace": [NodeTrace(node="refuse", ms=int((time.perf_counter() - started) * 1000),
+                            recalled=0, degraded=None)],
     }
