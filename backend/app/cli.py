@@ -525,6 +525,13 @@ async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
                     "clarify_ok": pred_clarify == want_clarify,
                     "resolved": resolved,
                     "skip_reason": final.get("resolve_skipped_reason", ""),
+                    # 消解**失败**的真实原因（timeout / model_load_failed），
+                    # 取自 trace 而不是 skip_reason —— 后者在非超时的解析失败时
+                    # 也写 "timeout"（取值域只有那五档，见 K-2），拿它报数会把
+                    # 「解析失败」说成「超时」
+                    "resolve_degraded": next(
+                        (e.get("degraded") for e in (final.get("trace") or [])
+                         if e.get("node") == "resolve" and e.get("degraded")), None),
                     "anchors": anchors,
                     "resolved_ok": (any(a in resolved for a in anchors)
                                     if anchors else None),
@@ -581,7 +588,7 @@ async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
     for r in rows_out:
         skip_counts[r["skip_reason"]] = skip_counts.get(r["skip_reason"], 0) + 1
 
-    timeouts = [r for r in rows_out if r["skip_reason"] == "timeout"]
+    resolve_failures = [r for r in rows_out if r["resolve_degraded"]]
 
     # ---- 控制台 --------------------------------------------------------
     print(f"\n题库 {fixture.name}   {len(cases)} 段对话 / {n} 轮   top_k={top_k}   "
@@ -608,9 +615,12 @@ async def cmd_eval_multiturn(args: argparse.Namespace) -> int:
               f"{clar:<6}{res_ok:<6}{hit:<6}{mark:<5}"
               f"{'[探针]' if r['probe'] else ''}{r['question'][:22]}")
 
-    if degradations or timeouts:
-        print(f"\n⚠️ 本轮有降级/超时：降级 {sorted(set(degradations))}，"
-              f"消解超时 {len(timeouts)} 次。")
+    if degradations or resolve_failures:
+        # ⚠️ 按 trace 里的真实原因报数，不按 `skip_reason` —— 后者在解析失败时
+        #    也写 "timeout"（K-2），照着报会把「解析失败」说成「超时」
+        kinds = sorted({r["resolve_degraded"] for r in resolve_failures})
+        print(f"\n⚠️ 本轮有降级/失败：降级 {sorted(set(degradations))}，"
+              f"消解失败 {len(resolve_failures)} 次（原因 {kinds}）。")
         print("   这时的指标**不反映链路的设计行为**，因此不写入评测文件。请先修好再重跑。")
         await asyncio.get_running_loop().shutdown_default_executor()
         return 1

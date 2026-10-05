@@ -2,6 +2,7 @@
   "version": 1,
   "note": "M2 多轮指代题库（方案 §5.1 第一阶段的「多轮指代型」+ 路由/澄清负例）。每题是一段对话，逐轮标注四样：expected_route（路由准确率）、should_clarify（澄清误报率/命中率的分母与分子）、expected_document（该轮检索应命中哪份文档，null=只判路由不判检索）、resolved_must_contain_any（消解后的问题里必须出现的主题锚点，null=自足问题、不要求消解）。",
   "revision_note": [
+    "mt-14 / mt-15 是**补测**（2026-10-05，完工评审的建议）：首轮 25 轮**全部被规则层拦住**，于是「LLM 路由」那条路在端到端上一点证据都没有。这两题都刻意避开制度名词与文号（「作弊」「违规」不在表里），规则层判 None，必须落到 LLM 才可能对。",
     "mt-05#2 换过三版：「那要办哪些手续？」（10 号文档里「手续」0 次出现，该文档根本答不了）→「那成绩怎么算？」（「成绩」在制度名词表里，设计上判为自足、**压根不触发消解**，测不到消解增益）→「那需要什么条件？」（探针核实：触发消解 ✓、原句检索 10 号在 Top5 之外、消解后 rank 3 ✓）。前两版都是标注没核到判据上。",
     "mt-13「？？？」的期望路由定在 chat：§15 #6 那行同时写了「不误判成闲聊」与「不触发无意义澄清」，本卷按输入类别拆开读（纯符号↔不澄清、超长↔不误判闲聊）。属**口径判读**，待负责人确认。",
     "首跑时标了 2 个 probe（「那要在多长时间内提出？」「？？？」），两处都真的暴露了缺口，已分别修掉代码与词表，现转为常规题。",
@@ -128,7 +129,23 @@
       "type": "route_negative",
       "note": "§15 #6 的纯符号输入：**不得触发无意义澄清**",
       "turns": [
-        {"question": "？？？", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "首跑实测：原实现判成 clarify（短且无制度名词，正好踩中澄清触发条件二）—— 用户敲三个问号被反问「你想问的是哪一项？」，正是 §15 #6 禁止的「无意义澄清」。修法：把「没有实义字符」并入闸门判据（与 resolve 共用），于是 route=chat。⚠️ 期望值取 chat 属**口径判读**：§15 #6 那行同时写了「不误判成闲聊」与「不触发无意义澄清」，此处的读法是那一句按输入类别拆开对应（纯符号↔不澄清、超长↔不误判闲聊），因为「整条消息没有实际诉求」的闸门判据本身就适用于纯符号。已记入交接待负责人确认"}
+        {"question": "？？？", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "首跑实测：原实现判成 clarify（短且无制度名词，正好踩中澄清触发条件二）—— 用户敲三个问号被反问「你想问的是哪一项？」，正是 §15 #6 禁止的「无意义澄清」。修法：把「没有实义字符」并入闸门判据（与 resolve 共用），于是 route=chat。口径判读已由负责人签字确认（2026-10-05）：纯符号↔不澄清、超长↔不误判闲聊"}
+      ]
+    },
+    {
+      "id": "mt-14",
+      "type": "llm_route",
+      "note": "**规则层打不中**的题：必须落到 LLM 路由那条路（补 §15 #4 的端到端证据）",
+      "turns": [
+        {"question": "作弊被发现了会有什么后果？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "「作弊」不在制度名词表里、也没有文号 → 规则层判 None。实测探针：闸门 False、澄清 False、检索命中 05（「作弊」在该文档出现 12 次）。本轮的看点是 `route_source=llm`"}
+      ]
+    },
+    {
+      "id": "mt-15",
+      "type": "llm_route",
+      "note": "第二条 LLM 路由题（换一种问法，避免只测到一句话的偶然）",
+      "turns": [
+        {"question": "违规使用手机有什么后果？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "「违规」「手机」都不在制度名词表 → 规则层判 None。实测探针：检索 top1/top2 都是 05（「违规」在该文档出现 14 次）"}
       ]
     }
   ]

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,8 @@ from app.core.config import repo_path
 from app.core.deps import UserContext
 from app.ingestion.pipeline import IngestRequest, ingest
 from app.retrieval import bm25, vector
+
+logger = logging.getLogger(__name__)
 
 
 def make_user(role: str) -> UserContext:
@@ -104,5 +107,10 @@ async def purge_documents(titles: list[str]) -> None:
                          for r in vector.get_chunks(doc_id, limit=100000)]
             vector.delete_document(doc_id)
             bm25.remove_document(chunk_ids)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            # ⚠️ 这里原本是 `pass` —— 而清理失败**不会让用例失败**，只会把死条目
+            #    留进真实索引（M1 现场：映射表 186 条 / 31 个 document_id，
+            #    库里却只有 1 个文档）。最典型的成因是 Chroma 被占用（本机真遇到过）。
+            #    宁可吵一点，也不要静默留孤儿。回归锁见 test_purge_logging.py
+            logger.warning("测试清理失败，索引里可能留下孤儿条目：document_id=%s（%s）",
+                           doc_id, e, extra={"event": "test.purge_failed"})
