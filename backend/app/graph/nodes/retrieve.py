@@ -32,15 +32,29 @@ logger = logging.getLogger(__name__)
 
 
 async def _record_degradation(node: str, kind: str, detail: str,
-                              session_id: str | None) -> None:
+                              session_id: str | None,
+                              conn: "asyncpg.Connection | None" = None) -> None:
+    """记降级事件。
+
+    ⚠️ 传 `conn` 时**复用调用方的事务**，不要另开一个 ——
+       在 `async with db.tx()` 内部再调 `db.tx()` 会从池里**另取一条连接**，
+       并发下容易耗尽连接池；而且外层事务若回滚，这条降级记录却已独立提交。
+       2026-10-05 实测见过一次 'Resetting connection with an active transaction'，
+       虽只出现在图崩溃那次、此后未复现，但这个嵌套是真隐患。
+    """
+    async def _write(c) -> None:
+        await c.execute(
+            """INSERT INTO degradation_events (id, session_id, node, kind, detail)
+               VALUES (md5(random()::text || clock_timestamp()::text),
+                       $1, $2, $3, $4)""",
+            session_id, node, kind, detail[:500],
+        )
     try:
-        async with db.tx() as conn:
-            await conn.execute(
-                """INSERT INTO degradation_events (id, session_id, node, kind, detail)
-                   VALUES (md5(random()::text || clock_timestamp()::text),
-                           $1, $2, $3, $4)""",
-                session_id, node, kind, detail[:500],
-            )
+        if conn is not None:
+            await _write(conn)
+            return
+        async with db.tx() as own_conn:
+            await _write(own_conn)
     except Exception:  # noqa: BLE001 —— 记降级失败不该影响主链路
         logger.warning("写降级事件失败", extra={"event": "degradation.write_failed"})
 
@@ -62,12 +76,13 @@ async def retrieve_node(state: RAGState) -> dict:
     # 可用性预检：向量库空 / BM25 索引缺失或版本失效 → 该路不可用
     vector_ok = True
     bm25_ok = bm25.is_available()
-    if not bm25_ok:
-        degraded_kinds.append("index_invalid")
-        await _record_degradation("bm25", "index_invalid", "索引或映射表缺失/版本不匹配",
-                                  session_id)
 
     async with db.tx() as conn:
+        if not bm25_ok:
+            degraded_kinds.append("index_invalid")
+            await _record_degradation(
+                "bm25", "index_invalid", "索引或映射表缺失/版本不匹配",
+                session_id, conn)
         ranked: list[tuple[RetrievalQuery, list[Chunk]]] = []
         for query in queries:
             target = query.get("target", "both")
@@ -81,7 +96,7 @@ async def retrieve_node(state: RAGState) -> dict:
                 except Exception as e:  # noqa: BLE001
                     vector_ok = False
                     degraded_kinds.append("unavailable")
-                    await _record_degradation("vector", "unavailable", str(e), session_id)
+                    await _record_degradation("vector", "unavailable", str(e), session_id, conn)
 
             if target in ("bm25", "both") and bm25_ok:
                 try:
@@ -92,7 +107,7 @@ async def retrieve_node(state: RAGState) -> dict:
                 except Exception as e:  # noqa: BLE001
                     bm25_ok = False
                     degraded_kinds.append("unavailable")
-                    await _record_degradation("bm25", "unavailable", str(e), session_id)
+                    await _record_degradation("bm25", "unavailable", str(e), session_id, conn)
 
     # 两路都失败 → candidates 为空 → 走 refuse 分支
     if not vector_ok and not bm25_ok:

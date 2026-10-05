@@ -112,13 +112,20 @@ class StreamJsonParser:
 
     _UNESCAPE = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
 
-    def __init__(self, field: str = "answer") -> None:
+    def __init__(self, field: str = "answer", *, require_decision: bool = True) -> None:
         """`field` 是要流式下发的字段名。
 
         ⚠️ 节点 4（clarify）**复用本解析器**，只把字段名换成 `question`
            （`facets` 是数组、不流式，随 `route` 事件整体下发）。
+
+        ⚠️ `require_decision` 必须可关：节点 9 的契约里有 `decision` 字段，
+           而 **clarify 的 JSON 只有 facets + question、没有 decision** ——
+           若沿用「未见到 decision 就一个字符都不下发」的规则，
+           clarify 会**永远解析不出任何内容**。
+           2026-10-05 实测踩过：表现为澄清只发出 1 个 token（走兜底补发）而非真流式。
         """
         self.field = field
+        self.require_decision = require_decision
         self.state = StreamParseState()
         self._raw = ""             # 完整原始输出（结束时严格解析用）
         self._escape = False
@@ -146,7 +153,7 @@ class StreamJsonParser:
         if self.state.error:
             return []
 
-        if not self.state.answer_started:
+        if not self.state.answer_started and self.require_decision:
             if not self.state.decision:
                 match = self._DECISION_RE.search(self._raw)
                 if match:

@@ -124,7 +124,8 @@ def build_chunk_metadata(
         "doc_group_id": doc.doc_group_id,
         "version": int(doc.version),
         "status": doc.status,
-        "effective_date": doc.effective_date.isoformat(),
+        # ⚠️ Chroma 的 $lte 只吃数字 —— 必须存整数 YYYYMMDD（见 filters.date_key）
+        "effective_date": int(doc.effective_date.strftime("%Y%m%d")),
         "visibility": doc.visibility,
         "chunk_id": make_chunk_id(doc.id, chunk.chunk_index),
         "chunk_index": int(chunk.chunk_index),

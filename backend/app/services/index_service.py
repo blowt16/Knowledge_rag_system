@@ -94,7 +94,8 @@ def rewrite_metadata(document_id: str, *, status: str, visibility: str,
         meta = dict(row["metadata"])
         meta["status"] = status
         meta["visibility"] = visibility
-        meta["effective_date"] = effective_date
+        from app.retrieval.filters import date_key
+        meta["effective_date"] = date_key(effective_date)
         for role in ALL_ROLES:
             meta[f"vis_{role}"] = role in roles
         # 去掉读取时解析出来的派生字段，避免写回时结构不对

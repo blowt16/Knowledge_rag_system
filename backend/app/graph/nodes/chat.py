@@ -39,7 +39,19 @@ FALLBACK = "你好，我是校园规章制度问答助手，可以帮你查询�
 
 
 async def chat_node(state: RAGState) -> dict:
+    import time
+
+    from app.graph.state import NodeTrace
+
+    started = time.perf_counter()
     query = state.get("resolved_query") or state.get("query", "")
+
+    def _with_trace(out: dict) -> dict:
+        out["trace"] = [NodeTrace(node="chat",
+                                  ms=int((time.perf_counter() - started) * 1000),
+                                  recalled=0, degraded=None)]
+        return out
+
     timeout = float(cfg("timeouts.generate_ttft", 60))
     messages = [{"role": "user", "content": _PROMPT.format(query=query)}]
 
@@ -54,11 +66,11 @@ async def chat_node(state: RAGState) -> dict:
                 writer({"type": "token", "text": piece})
             answer = "".join(pieces).strip()
             if answer:
-                return {"answer": answer, "decision": "ANSWERED"}
+                return _with_trace({"answer": answer, "decision": "ANSWERED"})
         except Exception:  # noqa: BLE001 —— 闲聊不该因为 LLM 抖动而失败
             pass
         writer({"type": "token", "text": FALLBACK})
-        return {"answer": FALLBACK, "decision": "ANSWERED"}
+        return _with_trace({"answer": FALLBACK, "decision": "ANSWERED"})
 
     try:
         answer = await llm.complete(messages, timeout=timeout, max_tokens=256)
@@ -66,7 +78,7 @@ async def chat_node(state: RAGState) -> dict:
     except Exception:  # noqa: BLE001
         answer = FALLBACK
 
-    return {"answer": answer, "decision": "ANSWERED"}
+    return _with_trace({"answer": answer, "decision": "ANSWERED"})
 
 
 def _stream_writer():

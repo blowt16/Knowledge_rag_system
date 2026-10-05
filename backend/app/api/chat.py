@@ -146,7 +146,13 @@ async def _run(body: ChatRequest, user: CurrentUser, session_id: str, is_new: bo
                 #    就会带着这个默认值把 route 事件发出去 ——
                 #    实际路由到 clarify 的查询会被前端显示成 knowledge。
                 #    2026-10-05 实测踩过。
-                if not emitted_route and _node_ran(final, "route"):
+                # ⚠️ clarify 的 route 事件要等 clarify 节点跑完再发：
+                #    `clarify_facets` 是 clarify 节点产出的，route 节点刚跑完时
+                #    它还是空数组 —— 那一刻发出去，前端永远拿不到可点选项。
+                #    文档的发出点也是「clarify 节点 → route(带 facets) → token」。
+                _clarify_ready = (final.get("route") != "clarify"
+                                  or _node_ran(final, "clarify"))
+                if not emitted_route and _node_ran(final, "route") and _clarify_ready:
                     emitted_route = True
                     event: dict = {"route": final["route"]}
                     if final.get("route") == "clarify":

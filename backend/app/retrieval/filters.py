@@ -62,6 +62,25 @@ def resolve_escalation(user: UserContext | str, include_restricted: bool | None)
     return bool(include_restricted) and role == ROLE_ADMIN
 
 
+def date_key(value: date) -> int:
+    """日期 → 整数 YYYYMMDD，供 Chroma 比较。
+
+    ⚠️⚠️ **Chroma 的 `$lte` / `$gte` 只接受 int / float，不接受字符串** ——
+       传 ISO 日期串会直接抛
+       `Expected operand value to be an int or a float for operator $lte, got 2026-10-05`，
+       且**只在运行时暴露**。
+       2026-10-05 实测踩过：向量路 12 次请求**全部降级**，
+       全程静默退回 BM25 单路（降级链兜住了，表面看只是"召回少一点"，
+       极易被当成正常波动）——**混合检索等于从来没生效过**。
+
+       因此 Chroma metadata 里的 `effective_date` 存 **int（YYYYMMDD）**；
+       PostgreSQL `documents.effective_date` 仍是 DATE，是唯一权威来源。
+    """
+    if isinstance(value, str):
+        value = date.fromisoformat(value[:10])
+    return int(value.strftime("%Y%m%d"))
+
+
 def build_where(
     user: UserContext | str,
     *,
@@ -75,10 +94,11 @@ def build_where(
     ⚠️ `include_restricted` 只对 admin 生效；非 admin 传 True 会被当成 False。
     """
     role = user.role if isinstance(user, UserContext) else user
-    day = (today or date.today()).isoformat()
+    day = date_key(today or date.today())
 
     conditions: list[dict[str, Any]] = [
         {"status": {"$eq": "active"}},
+        # 整数比较 —— 见 date_key 的说明，字符串会被 Chroma 拒绝
         {"effective_date": {"$lte": day}},
     ]
 

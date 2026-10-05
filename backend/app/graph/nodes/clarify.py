@@ -62,13 +62,27 @@ _PROMPT = """用户的问题意图不明确。请先产出结构化的候选意�
 
 
 async def clarify_node(state: RAGState) -> dict:
+    import time
+
+    from app.graph.state import NodeTrace
+
+    started = time.perf_counter()
     query = state.get("resolved_query") or state.get("query", "")
+
+    def _with_trace(out: dict) -> dict:
+        # ⚠️ 每个节点都必须写 trace —— 漏了不只是少一条耗时记录，
+        #    还会让 SSE 那边 `_node_ran(final, "clarify")` 恒为 False，
+        #    导致 clarify 的 route 事件（含 facets）永远不发。
+        out["trace"] = [NodeTrace(
+            node="clarify", ms=int((time.perf_counter() - started) * 1000),
+            recalled=len(out.get("clarify_facets") or []), degraded=None)]
+        return out
 
     writer = _stream_writer()
     if writer is not None:
         streamed = await _stream_clarify(state, query, writer)
         if streamed is not None:
-            return streamed
+            return _with_trace(streamed)
 
     try:
         data = await llm.complete_json(
@@ -90,23 +104,23 @@ async def clarify_node(state: RAGState) -> dict:
             question = FALLBACK_QUESTION
             facets = list(FALLBACK_FACETS)
 
-        return {
+        return _with_trace({
             "clarify_question": question,
             # ⚠️ 写入 state 用 clarify_facets（SSE 与前端读的是这个名字）
             "clarify_facets": facets,
             "answer": question,
             "decision": "ANSWERED",
-        }
+        })
 
     except Exception:  # noqa: BLE001
         logger.warning("澄清生成失败，退化为固定问句（仍走 clarify 分支）",
                        extra={"event": "clarify.fallback", "node": "clarify"})
-        return {
+        return _with_trace({
             "clarify_question": FALLBACK_QUESTION,
             "clarify_facets": list(FALLBACK_FACETS),
             "answer": FALLBACK_QUESTION,
             "decision": "ANSWERED",
-        }
+        })
 
 
 def _stream_writer():
@@ -124,7 +138,7 @@ async def _stream_clarify(state: RAGState, query: str, writer):
     """
     from app.graph.nodes.generate import StreamJsonParser
 
-    parser = StreamJsonParser(field="question")
+    parser = StreamJsonParser(field="question", require_decision=False)
     prompt = _PROMPT.format(history=_format_history(state.get("history") or []),
                             query=query)
     try:
