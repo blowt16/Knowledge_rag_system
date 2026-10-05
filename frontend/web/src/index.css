@@ -35,7 +35,59 @@ input { font: inherit; }
 .bubble { padding: 11px 15px; border-radius: 12px; margin-bottom: 8px; }
 .bubble.user { background: #e8efff; margin-left: auto; max-width: 76%; width: fit-content; }
 .bubble.assistant { background: var(--card); border: 1px solid var(--line); }
-.answer { white-space: pre-wrap; word-break: break-word; }
+/* 答案走 Markdown 渲染 —— 不能再 pre-wrap（换行由块级元素表达，pre-wrap 会翻倍） */
+.answer { word-break: break-word; }
+.answer > :first-child { margin-top: 0; }
+.answer > :last-child { margin-bottom: 0; }
+.answer p { margin: .5em 0; }
+.answer ul, .answer ol { padding-left: 1.4em; }
+
+/* 行内引用角标（§4.2.3 第一层入口） */
+.cite-badge {
+  border: 0; background: #eef2ff; color: var(--brand);
+  border-radius: 5px; padding: 0 5px; margin: 0 1px;
+  font-size: 12px; line-height: 1.5; vertical-align: 1px;
+}
+.cite-badge:hover { background: #dbe4ff; }
+.cite-badge.invalid { background: #fee4e2; color: var(--danger); text-decoration: line-through; }
+
+/* 置灰标注（§4.2.1）—— 提示，不是断言 */
+.uncited {
+  background: #f3f4f6; color: #6b7280;
+  border-bottom: 1px dashed #d1d5db;
+}
+.uncited-summary {
+  margin-top: 8px; font-size: 13px; color: #92400e;
+  background: #fffbeb; padding: 7px 11px; border-radius: 6px;
+}
+.uncited-list { margin: 6px 0 0; padding-left: 1.2em; }
+
+/* 引用缩略图（§4.2.3.3）：按 name 现取签名 URL */
+.thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.thumbs img { width: 92px; border: 1px solid var(--line); border-radius: 6px; }
+
+/* 原文抽屉（§4.2.2.1）—— 抽屉展开后对话区仍可见可滚动 */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 62vw);
+  background: var(--card); border-left: 1px solid var(--line);
+  display: flex; flex-direction: column; z-index: 20;
+  box-shadow: -6px 0 24px rgba(0, 0, 0, .08);
+}
+.drawer-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line);
+}
+.drawer-actions { display: flex; gap: 10px; flex: none; }
+.drawer-actions .link, .citation-group .link {
+  background: none; border: 0; color: var(--brand); padding: 0;
+}
+.drawer-body { flex: 1; min-height: 0; position: relative; }
+.drawer-error { padding: 10px 16px; color: var(--danger); font-size: 13px; }
+.locate-note {
+  padding: 6px 16px; font-size: 12px; color: var(--muted);
+  background: #f9fafb; border-bottom: 1px solid var(--line);
+}
+.locate-note.level-L4 { color: #92400e; background: #fffbeb; }
 .resolved { font-size: 13px; color: var(--muted); margin: 4px 0 8px; }
 .refused { background: #fff7ed; border-left: 3px solid #f59e0b; padding: 9px 12px; border-radius: 6px; }
 .facets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

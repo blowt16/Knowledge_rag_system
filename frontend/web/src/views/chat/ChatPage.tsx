@@ -1,8 +1,10 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { streamSse } from '../../api/sse'
 import { getAccessToken } from '../../api/client'
 import { useAuth } from '../../stores/auth'
 import type { AssistantDraft, Citation } from '../../api/types'
+import { MarkdownAnswer } from '../../markdown/MarkdownAnswer'
+import { CitationImages, DocumentDrawer } from '../../components/DocumentDrawer'
 
 interface Turn {
   id: string
@@ -38,8 +40,11 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // 右侧抽屉：同一抽屉内切换引用，不重复开关（§4.2.2.1）
+  const [opened, setOpened] = useState<Citation | null>(null)
   const abortRef = useRef<(() => void) | null>(null)
   const { user, logout } = useAuth()
+  const openCitation = useCallback((citation: Citation) => setOpened(citation), [])
 
   function patchTurn(id: string, patch: Partial<AssistantDraft>) {
     setTurns((prev) =>
@@ -168,7 +173,15 @@ export default function ChatPage() {
             )}
 
             <div className="bubble assistant">
-              {turn.draft.text && <div className="answer">{turn.draft.text}</div>}
+              {turn.draft.text && (
+                // 偏移的参照系是**原始文本** —— 传进去的必须是未渲染的 draft.text
+                <MarkdownAnswer
+                  text={turn.draft.text}
+                  citations={turn.draft.citations}
+                  verify={turn.draft.verify}
+                  onCitationClick={openCitation}
+                />
+              )}
 
               {!turn.draft.text && !turn.draft.done && <span className="muted">正在检索…</span>}
 
@@ -196,13 +209,7 @@ export default function ChatPage() {
                 </div>
               )}
 
-              <Citations citations={turn.draft.citations} />
-
-              {turn.draft.verify && turn.draft.verify.uncited_claims.length > 0 && (
-                <div className="verify">
-                  本回答含 {turn.draft.verify.uncited_claims.length} 处未证实内容
-                </div>
-              )}
+              <Citations citations={turn.draft.citations} onOpen={openCitation} />
 
               {turn.draft.done && turn.draft.latencyMs != null && (
                 <div className="muted small">{turn.draft.latencyMs} ms</div>
@@ -230,11 +237,18 @@ export default function ChatPage() {
           发送
         </button>
       </footer>
+
+      {opened && (
+        <DocumentDrawer citation={opened} onClose={() => setOpened(null)} />
+      )}
     </div>
   )
 }
 
-function Citations({ citations }: { citations: Citation[] }) {
+function Citations({ citations, onOpen }: {
+  citations: Citation[]
+  onOpen: (citation: Citation) => void
+}) {
   if (citations.length === 0) return null
   // 按文档聚合去重（§4.2.3.2）—— 归组键用 document_id，不用 document_name
   const grouped = new Map<string, Citation[]>()
@@ -257,8 +271,16 @@ function Citations({ citations }: { citations: Citation[] }) {
             )}
           </div>
           <div className="muted small">
-            {items.map((c) => `[${c.marker}] 第 ${c.page} 页${c.chapter ? ` · ${c.chapter}` : ''}`).join('　')}
+            {items.map((c) => (
+              <button key={c.chunk_id} className="link small"
+                      onClick={() => onOpen(c)}>
+                [{c.marker}] 第 {c.page} 页{c.chapter ? ` · ${c.chapter}` : ''}
+              </button>
+            ))}
           </div>
+          {items[0].images.length > 0 && (
+            <CitationImages documentId={docId} names={items[0].images} />
+          )}
         </div>
       ))}
     </div>

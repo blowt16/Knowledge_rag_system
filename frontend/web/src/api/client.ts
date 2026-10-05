@@ -101,6 +101,24 @@ export async function request<T>(
   return (await resp.json()) as T
 }
 
+/**
+ * 取二进制（`/api/documents/{id}/file`）。
+ *
+ * ⚠️ 必须自己带 Authorization —— PDF.js 与 `<img>` 都**带不上请求头**，
+ *    所以拿到 blob 之后要么交给 PDF.js 的对象 URL，要么走签名 URL。
+ */
+export async function requestBlob(path: string, retryOn401 = true): Promise<Blob> {
+  const resp = await fetch(`${BASE}${path}`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  })
+  if (resp.status === 401 && retryOn401) {
+    if (await refreshAccessToken()) return requestBlob(path, false)
+    onUnauthorized?.()
+  }
+  if (!resp.ok) throw await parseError(resp)
+  return resp.blob()
+}
+
 // ---- 认证接口 ----------------------------------------------------------
 
 export interface TokenPair {
