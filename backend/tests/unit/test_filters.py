@@ -28,10 +28,31 @@ TODAY = date(2026, 10, 5)
 # ---- 基本结构 ----------------------------------------------------------
 
 def test_where_has_status_and_effective_date():
+    """⚠️ effective_date 必须是**整数** YYYYMMDD。
+
+    Chroma 的 `$lte` 只接受 int/float —— 传 ISO 字符串会抛
+    `Expected operand value to be an int or a float ... got 2026-10-05`，
+    且只在运行时暴露。2026-10-05 实测：向量路因此**全部降级**、
+    静默退回 BM25 单路，混合检索从没生效过。本断言锁死这个回归。
+    """
     where = build_where("student", today=TODAY)
     conditions = where["$and"]
     assert {"status": {"$eq": "active"}} in conditions
-    assert {"effective_date": {"$lte": "2026-10-05"}} in conditions
+    assert {"effective_date": {"$lte": 20261005}} in conditions
+    # 显式排除字符串形式
+    for cond in conditions:
+        if "effective_date" in cond:
+            assert not isinstance(cond["effective_date"]["$lte"], str)
+
+
+def test_date_key_shape():
+    from datetime import date as _d
+
+    from app.retrieval.filters import date_key
+
+    assert date_key(_d(2026, 10, 5)) == 20261005
+    assert date_key(_d(2026, 1, 1)) == 20260101
+    assert date_key("2026-10-05") == 20261005
 
 
 @pytest.mark.parametrize("role,field", [
