@@ -1,0 +1,2 @@
+{"ts": "2026-10-05T12:57:54+0800", "level": "INFO", "logger": "app.main", "msg": "服务启动", "trace_id": "00000000000000000000000000000000", "span_id": "0000000000000000", "event": "app.startup"}
+{"ts": "2026-10-05T12:58:11+0800", "level": "INFO", "logger": "app.main", "msg": "服务启动", "trace_id": "00000000000000000000000000000000", "span_id": "0000000000000000", "event": "app.startup"}
