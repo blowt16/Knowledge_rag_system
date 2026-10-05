@@ -519,10 +519,21 @@ ON CONFLICT (session_id) DO UPDATE
 RETURNING session_id;
 ```
 
-> **`RETURNING` 有没有行，就是「拿没拿到锁」**：返回 **0 行** = 锁被他人持有且未过期 → 按下方策略处理。
+> **`RETURNING` 有没有行，就是「拿没拿到锁」**：返回 **0 行** = 锁被他人持有且未过期 → **拒绝本次请求**（策略见下）。
 >
 > ⚠️ **`WHERE expires_at < now()` 必须有**：没有它，`ON CONFLICT DO UPDATE` 会**无条件抢占**，
 > 变成「后到者赢」——同一会话的两个并发请求会**同时开始生成**，锁等于没加。
+
+**抢不到锁时的策略：拒绝，不排队（口径钉死）**
+
+| 项 | 约定 |
+|---|---|
+| **行为** | **直接拒绝**——不排队、不等待、不自动重试 |
+| **HTTP 状态码** | **409 Conflict**（该会话正在处理另一个请求） |
+| **SSE 事件** | `error`，`code = "session_busy"`——**本版新增的 code**，已并入 3.7.2 的封闭词表 |
+| **前端** | 提示「本会话正在生成中，请等待完成或新开会话」。**发送按钮保持禁用**——真正的解锁信号是本会话上一轮流的 `done` / `error` |
+| **为什么是拒绝而不是排队** | ① 这是 **SSE 长连接**，排队要占住连接、还要前端渲染"排队中"，复杂度不划算；② 同会话并发提交的真实成因是**双击 / 多标签页**，用户并不期望"两个答案"，排队反而制造困惑 |
+| **与幂等去重的边界** | 同一个 `request_id` 的重复提交走**幂等去重**（见上表），**不报 `session_busy`**——那是同一次请求被提交了两遍，不是两次请求 |
 
 **长锁的释放**
 
@@ -848,14 +859,23 @@ DELETE FROM session_locks WHERE session_id = $1 AND holder = $2;
 | **case_type** | TEXT | `factual` / `cross_paragraph` / `doc_number` / `refusal` / **`restricted`** / `multi_turn`（对应 5.1 的分层） |
 | **turns** | JSONB | **多轮用例的轮次脚本**——`[{question, ground_truth, expected_doc_ids}]` 的数组；单轮用例为 `null` |
 | **visible_roles** | JSONB | **受限题专用**：该题要求的可见范围（如 `["admin"]`）。5.3 的 ACL 对照实验要用它挑题 |
+| **suite** | TEXT | **题集归属**（**本版新增**）：`full`（全量题库，默认）/ `refusal_calib`（**10–15 题拒答校准小集**）。CI 与 M5 只跑小集时按它筛 |
+| **expected_route** | TEXT | **A 组指标专用**：期望的路由类别（`chat` / `clarify` / `knowledge`）——**建题库时一并标好**（见 5.2） |
+| **should_clarify** | INTEGER | **A 组指标专用**：0/1，该题是否**应当**触发澄清（见 5.2） |
 | created_at | TIMESTAMPTZ | |
 
-> **为什么补 `turns` 与 `visible_roles`**：
+> **为什么补 `turns` / `visible_roles` / `suite`**：
 >
 > - `case_type` 原本已含 `multi_turn`（5.1 占 10%、15–20 题），但表里只有**单个** `question` / `ground_truth`——**多轮用例的轮次脚本、每轮期望、按轮判分无处存放**。
 > - 5.3 的 ACL 对照实验要求「admin 跑全部题 / student 跑受限题」，但 5.1 的题型表里**没有受限类**、字段里也没有 `visible_roles` 标注——跑到 5.3 时找不到那批题，只能临时挑，对照实验无法复现。
+> - **`suite` 是本版补的**：M5 与第六章 CI 都要求跑「**10–15 题拒答校准小集**」（口径是「改一次提示词就能跑一轮」），
+>   但原表只有 `case_type`，**没有任何字段能把这一小批题从题库里选出来**，`eval/run` 也没有选题目参数——
+>   结果只能跑全量（60–200 题），完全违背「小集」的用意。加 `suite` 后按它筛即可。
+> - **`expected_route` / `should_clarify` 同样补上**：5.2 的 A 组指标（路由准确率、澄清命中率）**要求这两个标注**，
+>   原文只在 5.2 里写「`eval_cases` 增加两个字段」，**却从没把它们加进本表**——5.2 自己又强调「建题库时一并标好，
+>   不能等做指标时再补」。现补入，两处对齐。
 >
-> 两者都需要在**建题库时**就标好，不能等到做实验时再补。
+> 这几项都需要在**建题库时**就标好，不能等到做实验时再补。
 
 **`eval_runs`** — 每次评测运行
 
@@ -872,15 +892,29 @@ DELETE FROM session_locks WHERE session_id = $1 AND holder = $2;
 
 **`config` 的字段清单**（原方案只说「如 `{"bm25": false, "rerank": true}`」，没有封闭词表——不定义就没法打消融表）：
 
-| 键 | 取值 | 对应消融项 |
+| 键 | 取值 | 对应 5.3 叠加表的行 |
 |---|---|---|
-| `bm25` | true / false | 混合检索的稀疏路开关 |
-| `rerank` | true / false | 精排开关 |
-| `query_expansion` | true / false | 三类查询扩展开关 |
-| `rrf_weighted` | true / false | 加权 RRF 开关 |
-| `resolve` | true / false | 消解节点开关 |
+| `bm25` | true / false | + BM25 中文分词修复 |
+| `rrf` | true / false | + RRF 融合（**本版新增**——原表只有 `rrf_weighted`，表达不了「有没有融合」） |
+| `rerank` | true / false | + Cross-Encoder 精排 |
+| `expand_verbatim` | true / false | + verbatim 查询（**本版新增**） |
+| `expand_keywords` | true / false | + keywords 查询（**本版新增**） |
+| `expand_hyde` | true / false | + hyde 查询（**本版新增**） |
 
-> **只列这 5 个是有意的**：它们正好对应 5.3 叠加表的各行。**`role` / `include_restricted` 不放这里**——它们是**对照实验的分组维度**，不是消融开关，混在一起会让消融表的行含义不纯。
+**不属于叠加表、但同样要能配的两个开关**（同放 config，只是不对应任何一行）：
+
+| 键 | 取值 | 用途 |
+|---|---|---|
+| `rrf_weighted` | true / false | 加权 RRF vs 等权——是**完整链路内部**的变体，不是「有没有融合」 |
+| `resolve` | true / false | 消解节点开关——**叠加表里没有对应行**，基准与完整链路都建议开启 |
+
+> **⚠️ 本版修正了一处错话**：原文写「只列这 5 个是有意的，它们**正好对应** 5.3 叠加表的各行」——**这句是错的**。
+> 叠加表有 **8 行**，而原来的 5 个键里：`query_expansion` 是**一个布尔**却要拆出 verbatim / keywords / hyde **三行**
+> （5.3 自己还强调「三类查询必须拆成三行」）；`rrf_weighted` 是「加权 / 不加权」，**不是「有没有 RRF」**；
+> `resolve` 在表里**根本没有对应行**。按上表拆分后，**8 行每一行都能被一组 config 唯一表达**。
+>
+> **`role` / `include_restricted` 仍然不放这里**——它们是**对照实验的分组维度**，不是消融开关，
+> 混进来会让消融表的行含义不纯。
 
 **`eval_case_results`** — 单题结果（下钻用）
 
@@ -903,15 +937,19 @@ Chroma 的 chunk metadata **必须冗余存一份过滤字段**：
 
 ```
 document_id, doc_group_id, status, effective_date, version,
-visibility, vis_admin, vis_staff,
+visibility, vis_admin, vis_staff, vis_student,
 current_chapter, chapter_level,
 chunk_id, chunk_index, char_start, char_end,   ← 原文回跳必需
 page, bbox, image_paths
 ```
 
-> **`vis_admin` / `vis_staff` 是布尔字段，不是 `visible_roles` 数组。**
+> **`vis_admin` / `vis_staff` / `vis_student` 是布尔字段，不是 `visible_roles` 数组。**
 >
-> PostgreSQL 侧 `documents.visible_roles` 现在是 `JSONB`（管理端写入的源），但**进 Chroma 时必须展开成"每个角色一个布尔字段"**——因为 Chroma 的 `where` 只能在标量上做 `$eq`/`$in`，**对 JSON 字符串做不了成员判断**。布尔字段配 `$or` 兼容性最好，不依赖较新版本才有的数组 + `$contains` 能力。
+> ⚠️ **三个角色必须各有一个字段**（**`vis_student` 是本版补上的**）：管理端允许「**仅勾选学生**」，
+> 而 3.3.3 的过滤公式是通用的 `OR vis_<角色> = true`——**缺了 `vis_student`，这类文档谁也筛不出来**，
+> 等于建了一份"谁都看不到"的文档，且**不会报错**。**角色取值有几个，布尔字段就得有几个。**
+>
+> PostgreSQL 侧 `documents.visible_roles` 现在是 `JSONB`（管理端写入的源），但**进 Chroma 时必须展开成「每个角色一个布尔字段」**——因为 Chroma 的 `where` 只能在标量上做 `$eq`/`$in`，**对 JSON 字符串做不了成员判断**。布尔字段配 `$or` 兼容性最好，不依赖较新版本才有的数组 + `$contains` 能力。
 >
 > 新增角色（如 `teacher`）时需同步加字段，这是该编码的代价。
 
@@ -1148,6 +1186,14 @@ version =   同组旧版     新建 group
     ↓
 录入 effective_date（上传时指定，默认今天）
 ```
+
+> ⚠️ **「旧版+1」的基准必须钉死**（原表述含糊，会有两种实现）：
+> 取该 `doc_group_id` 下**所有行的 `max(version)`**——**包含 `failed` 与 `indexing` 的行**，
+> **不是**只取 `status = "active"` 的。
+>
+> **为什么**：3.3.1 规定失败行**永不删除**，它**占着版本号**。若只按 `active` 行取最大值，
+> 下次上传会分到一个**已被占用**的 version，直接撞 `UNIQUE(doc_group_id, version)`——
+> 而且是那种「平时不出现、**出过一次失败上传之后才开始出现**」的错，最难排查。
 
 **增量更新**：MD5 相同 → 直接跳过；MD5 不同但同组 → 按新版本处理。**不做 chunk 级 diff**（决策 #5 已明确）。
 
@@ -1717,7 +1763,7 @@ verbatim  keywords       hyde
 BM25+Vector  BM25       Vector
  └────────┴──────────────┘
    两路都带 ACL / 版本过滤；
-   但**动态过采样只对向量路**（BM25 是全量打分后过滤，不存在
+   但**固定过采样只对向量路**（BM25 是全量打分后过滤，不存在
    「先取 Top-N 再过滤」的问题，见 3.3.4）
           ↓
       加权 RRF 融合
@@ -1725,7 +1771,7 @@ BM25+Vector  BM25       Vector
        candidates
 ```
 
-> **「各路均带……动态过采样」这句原表述与 3.3.4 冲突**：3.3.4 明确写「**仅对向量检索适用**」。措辞已按上图更正——**两路都过滤，但只有向量路需要过采样**。
+> **「各路均带……过采样」这句原表述与 3.3.4 冲突**：3.3.4 明确写「**仅对向量检索适用**」。措辞已按上图更正——**两路都过滤，但只有向量路需要过采样**。
 
 **BM25 改造**
 
@@ -1758,13 +1804,17 @@ BM25+Vector  BM25       Vector
 
 BM25 侧**全量打分 → 按文档粒度过滤 → 取 K**，不做过采样。
 
-**但 BM25S 没有 metadata**——它返回的是自身语料库里的**下标**，不是 `document_id`。因此索引旁边必须持久化一份**下标 → `document_id` 的映射表**（与索引同生共死），过滤时靠它查出每个命中属于哪个文档，再回 `documents` 表判 `status` / `effective_date` / 可见性。
+**但 BM25S 没有 metadata**——它返回的是自身语料库里的**下标**，不是 `document_id`。因此索引旁边必须持久化一份**下标 → `chunk_id` 的映射表**（与索引同生共死），过滤时靠它查出每个命中属于哪个 **chunk**（再由 chunk 追到文档，回 `documents` 表判 `status` / `effective_date` / 可见性）。
+
+> ⚠️ **粒度必须是 `chunk_id`，不是 `document_id`**——理由见 3.3.2：只到文档粒度的话，
+> ① 同一 chunk 被两路命中时无法去重（RRF 的**去重键就是 `chunk_id`**）；② BM25 侧命中拿不到
+> `char_start` / `char_end` / `page`，引用与原文回跳缺定位信息。**原文此处写的是 `document_id`，与 3.3.2 冲突，本版统一为 `chunk_id`。**
 
 > 这份映射表是 BM25 侧实现过滤的前提，**漏了它整个过滤无从落地**。
 
 **存储形式**：索引与映射表**一起落盘在同一目录**（BM25S 索引文件 + 同名 `.json` 映射），**同生共死**——重建索引必须同时重建映射，删除文档必须同步更新两者。目录路径与失效策略由 `services/index_service.py` 统一管理。
 
-**动态过采样**（见 3.3.4）。
+**固定过采样 + 一次重试**（见 3.3.4，**不是自适应的"动态"倍率**）。
 
 **加权 RRF 融合**
 
@@ -2020,11 +2070,26 @@ answer（含 [n] 标记）+ reranked + chunk 溯源
 ```
 { marker, document_name, chapter, page,
   snippet, chunk_id,
-  images,              ← 该引用关联的图片 URL 列表（见 4.2.3.3）
+  escalated,           ← 该引用是否属于「越权取得」（本版新增，见下）
+  images,              ← 该引用关联的图片**文件名**列表（不是 URL，见下）
   jump_target }        ← 原文回跳定位（结构见 4.2.2.5）
 ```
 
 > **`images` 不可省略**：多模态图片溯源没有别的数据来源，缺了它前端只能丢弃图片（现有前端就是如此，见 4.2.3.3）。
+
+> ⚠️ **`images` 存的是文件名，不是签名 URL**（本版钉死）：`/api/documents/{id}/images/{name}` 返回的是
+> **5 分钟过期的短期签名 URL**（见 3.7.2）。而 `citations` 会**落库**进 `messages.citations`、用于**刷新后重新渲染引用**——
+> 存 URL 的话，用户刷新历史会话时**图片全部裂图**。
+>
+> **正确做法**：`images` 里存 `name`；前端每次渲染时**按 name 现取签名 URL**（同一接口，代价一次请求）。
+> 原文写「`Citation.images`（**URL 列表**）」，与此冲突，本版统一为 name。
+
+> **`escalated` 是本版补上的载体**（原方案三处提到 `escalated: true`，却**没有任何字段承载它**）：
+> `admin` 以 `include_restricted=true` 检索时（见 3.3.3），**越权取得的那些引用**置 `escalated: true`，
+> 前端据此显式标注「此内容你本无权限」。**5.3 的 ACL 对照实验直接读它**——没有这个字段，那条实验无法自证。
+>
+> 它挂在 **`Citation` 上**（而不是 `Chunk` 或另设并行数组）：越权是**引用粒度**的事实，
+> 前端要标的是「这一条引用」，且 `Citation` 是唯一会落库、刷新后仍要保留标记的载体。
 
 - **以解析出的标记为准**，唯一来源（解决现有项目"代码算一份、LLM 写一份"打架的问题）
 - 只输出**答案中实际引用**的 chunk，而非全部检索结果
@@ -2196,7 +2261,7 @@ refused = true, refusal_reason = "no_candidate"
 | 组件 | 文件 | 职责 |
 |---|---|---|
 | BM25 | `retrieval/bm25.py` | jieba 分词 + BM25S 索引管理（构建/增量/持久化/失效） |
-| Vector | `retrieval/vector.py` | Chroma 封装，含动态过采样逻辑 |
+| Vector | `retrieval/vector.py` | Chroma 封装，含固定过采样逻辑（3.3.4） |
 | Fusion | `retrieval/fusion.py` | **加权 RRF**：融合 N 路（三类查询 × 两种检索器）结果，权重取自 `RetrievalQuery.weight`；融合后按上限截断 |
 | Reranker | `retrieval/reranker.py` | Cross-Encoder，含降级链 |
 | Filters | `retrieval/filters.py` | 把 UserContext + 日期（+ 可选的 `include_restricted`）拼装成过滤条件（**唯一入口**）。ACL 部分产出 `vis_<角色> = true` 的 `$or` 条件，见 3.3.2 / 3.3.3 |
@@ -2262,6 +2327,18 @@ GET  /api/documents/{id}/file           原始文件（PDF 用 pdf.js 文本层�
 GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 URL（见下）
 ```
 
+**User 端会话接口的响应结构**（**本版补写**——原方案只定义了排序与分页上限）
+
+| 接口 | 响应 |
+|---|---|
+| `GET /api/conversations?offset=&limit=` | `{ items: [{ id, title, is_top, last_chat_time }], total, has_more }` |
+| `GET /api/conversations/{id}/messages` | `{ messages: [{ id, role, content, citations, created_at }] }`——`citations` 即落库的那一列（**含 `[n]` 标记的原文 + 结构化引用**，见 3.3.1） |
+
+> **`has_more` 与 `total` 都给**是有意的：`total` 用于「共 N 条」这类展示，`has_more` 用于滚动到底加载下一页的判断（见 4.2.4）。
+> 只给 `total` 的话前端得自己算 `offset + len(items) < total`，多一处易错逻辑。
+>
+> **软删除的会话不出现在列表里**（`delete_flag = 1` 直接过滤），**也不参与 `total` 计数**。
+
 **关于 `/api/documents/{id}/text`：本轮没有前端消费方，保留给调试与将来的「规范化文本视图」**
 
 | 项 | 说明 |
@@ -2285,6 +2362,37 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 
 > ⚠️ **`status` 也必须重索引**——这条容易漏：`status` 与 `visibility` / `effective_date` 一样冗余在 Chroma metadata 里（见 3.3.2），而原方案的「改后须重新索引」只覆盖了后两个。**停用文档却不重写 metadata，检索期的 `status = "active"` 过滤就形同虚设。**
 
+**上传进度 SSE 协议**（**本版补写**——原方案只有两个端点，没有事件名也没有载荷，前端进度条无从写起）
+
+> ⚠️ **这是与 chat 流互相独立的一套协议，不要复用 chat 的事件语义**。差别很关键：chat 的 `error` 是**终止事件**，
+> 而这里单个文件失败**不影响整包继续**。
+
+| 事件 | 载荷 | 说明 |
+|---|---|---|
+| `progress` | `{ done, total, current_file, counts }` | **周期性下发**。`done` / `total` 是**包内文件数**的进度（**不是页数、不是 chunk 数**）；`current_file` 是当前正在处理的文件名；`counts` 见下 |
+| `done` | `{ batch_id, counts }` | **整包完成**（不是单个文件完成）。`counts` 为终态汇总，随后关闭流 |
+| `error` | `{ code, message }` | **流本身**出错（如 `batch_id` 不存在）。`code` 与 chat 流**共用同一张封闭词表**，另**只多一个** `batch_not_found` |
+
+**`counts` 的键恰好是 `ingestion_tasks.status` 的 7 个取值，一个不多一个不少**：
+
+```json
+{ "pending": 0, "parsing": 1, "chunking": 0, "embedding": 2,
+  "done": 7, "duplicate": 1, "failed": 1 }
+```
+
+> **三条口径，都直接影响前端实现**：
+>
+> ① **`done` 事件表示「整包结束」**，不是「某个文件结束」——单个文件完成只体现在 `counts.done` 的自增上；
+>
+> ② **`total` 是包内文件数**（`SELECT count(*) FROM ingestion_tasks WHERE batch_id = ?`）。
+> 单文件上传时 `total = 1`，**进度百分比会长时间停在 0% 或 100%**——所以前端**必须**同时显示 `current_file` 作为兜底，
+> 不能只画进度条；
+>
+> ③ **流的结束条件**：整包不再有进行中的状态（即 `pending` / `parsing` / `chunking` / `embedding` **四个都为 0**）→ 发 `done` 并关闭。
+> **`duplicate` 与 `failed` 都算终态**，不会被这两个拖住（否则一次失败会让流永远挂着）。
+
+> **单个文件失败只体现为 `counts.failed` 自增**，前端在任务列表里展开看是哪个文件——**不要复用 chat 的 `error`**。
+
 **原文访问鉴权（口径必须钉死）**
 
 这两个接口归 **User 端守卫**（不是管理端），且**复用 `filters.py` 的同一套行级可见性判定**——**与检索走同一个函数，不另写一套**。
@@ -2292,8 +2400,15 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | 情形 | 返回 |
 |---|---|
 | 文档对当前用户可见 | 200，正常返回 |
-| 文档存在但当前用户不可见 | **404**（不是 403） |
-| 文档不存在 | 404（与上一条**不可区分**） |
+| 文档存在但当前用户不可见，**且未带 `include_restricted`** | **404**（不是 403） |
+| 文档存在但当前用户不可见，**且带了 `include_restricted=true`（仅 `admin`）** | **200**，正常返回，但响应里标 `escalated: true`，并**记审计日志**（见 3.3.3） |
+| 文档不存在 | 404（与前两条**不可区分**） |
+
+> ⚠️ **`include_restricted` 是原文回跳接口的参数，本版补上**：3.3.3 说它作用于「检索期**与原文回跳接口**」，
+> 但这三个接口的签名里**根本没有这个参数**——等于管理员在原文回跳里**无从提权**，那段设计落不了地。
+>
+> **非 `admin` 传了按未传处理**（走 404，**不报错**）——与 chat 接口同一口径，
+> 理由同上：**不要用错误响应泄露角色差异**。
 
 > **为什么必须复用同一套判定**：`/api/documents/{id}/file` 是一条**绕过检索期 ACL 的捷径**——学生搜不到受限文档，但只要拿到 `document_id`（例如从别处泄露、或穷举）就能**整份下载原文**。若这里另写一套判定，两套迟早不一致，**亮点① 的「检索期数据隔离」就被这条捷径架空**。
 >
@@ -2332,6 +2447,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | `query` | ✓ | 用户问题 |
 | `session_id` | | **不传即新建会话**；传则续接已有会话 |
 | `request_id` | ✓ | 客户端生成，用于 3.2.4 的同会话幂等去重 |
+| `include_restricted` | | **本版新增**，**仅 `admin` 可传**；`true` 时越权文档也返回并在响应里标 `escalated`（见 3.3.3）。**非 admin 传了按 `false` 处理**——不报错、不记提权（避免用错误响应探测角色） |
 
 > **会话创建只有一条路径**：前端点「新建对话」只是清空本地 `session_id`，**不调 `POST /api/conversations`**——否则会话列表里会堆积没有消息的空会话。`POST /api/conversations` 保留给「先建空会话再改名」这类场景，正常问答流程不走它。
 >
@@ -2355,7 +2471,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | `verify` | `VerifyReport` | 后校验结果；前端据此标注无依据句 |
 | `refused` | `reason, text, hint?` | 触发拒答。`reason` 取值见 5.2；**`text` 是服务端产出的固定话术**；`hint` 为可选补充提示（如「建议咨询教务处」） |
 | `done` | `latency_ms` | 结束。**`done` 是流的终止事件**（`error` 之后不再发 `done`） |
-| `error` | `code, message` | 异常。`code` 取值封闭：`timeout` / `upstream_error` / `context_length_exceeded` / `internal` |
+| `error` | `code, message` | 异常。`code` **取值封闭，只有这 5 个**：`timeout` / `upstream_error` / `context_length_exceeded` / `internal` / **`session_busy`**（本版新增——同一会话已有请求在生成中，见 3.2.4） |
 
 > **拒答文案由服务端产出、随 `refused` 事件下发（`text` 字段）**，前端只负责按 `reason` 决定样式。
 >
@@ -2416,7 +2532,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
   POST /api/admin/refusals/{log_id}/annotate   写标注，请求体见 4.3.1.3
 
 评测：
-  POST /api/admin/eval/run              { name, config, role, include_restricted }
+  POST /api/admin/eval/run              { name, config, role, include_restricted, suite? }
                                         → { run_id }，**异步**：立即返回，进度走
                                           GET /api/admin/eval/runs/{id} 轮询
                                           （60–80 题 × ragas 是分钟级任务，
@@ -2430,7 +2546,9 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 >
 > **复用上传任务的「任务表 + 状态查询」模式，但不复用 `ingestion_tasks` 表**：`eval_runs` 本身就有 `status` 字段，**它就是评测的任务表**——不必再建一张，也不必给上传表加评测专用的列。
 >
-> **与上传的差异**：评测**不做 SSE 进度流**（`eval_runs.status` 只有 5 个取值，轮询足够），也**不需要 trace_id 贯穿**（它不是用户请求触发的，是管理员手动触发的批量任务）——这两点与 `ingestion_tasks` 不同，写在这里以免施工者照搬。
+> **与上传的差异**：评测**不做 SSE 进度流**（`eval_runs.status` 只有 **4** 个取值：`pending` / `running` / `done` / `failed`，轮询足够），也**不需要 trace_id 贯穿**（它不是用户请求触发的，是管理员手动触发的批量任务）——这两点与 `ingestion_tasks` 不同，写在这里以免施工者照搬。
+>
+> **`suite` 参数的语义**（本版新增）：省略或传 `full` → 跑**全量题库**；传 `refusal_calib` → **只跑 10–15 题拒答校准小集**（即 `eval_cases.suite = 'refusal_calib'`）。第六章 CI 的 `eval-regression` 与 M5 的提示词调优**都走后者**（见 5.2）。
 >
 > **GPU 争用**：评测会大量调用 rerank（与线上问答抢同一块 GPU）。**约定：评测任务与线上问答共用同一个 GPU 信号量**（见 3.2.4），即评测会让在线请求变慢，但不会 OOM。**不做优先级抢占**。
 
@@ -2439,6 +2557,20 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 > 两类的区别见 3.2.3 开头：业务指标答「系统答得好不好」，运行指标答「这次请求为什么慢」。
 >
 > **Prometheus 不可用时**该接口降级为返回 `null` 并附状态，**不能 500**——仪表盘的其他面板（读 PostgreSQL）必须照常可用。
+
+**`stats/*` 的响应结构**（**本版补写**——原方案只有路径与用途，M4 照着建仪表盘时无从下手）
+
+| 接口 | 响应 |
+|---|---|
+| `stats/overview` | `{ document_count, chunk_count, qa_count, refusal_rate, degradation_counts }`——**`degradation_counts` 就是「降级次数」面板的数据源**，形如 `{kind: count}`，来自 `degradation_events`（读 PostgreSQL） |
+| `stats/trend?days=N` | `{ days: [{ date, qa_count, refusal_count }] }`——**按天补零**（没有问答的那天也必须出现，否则折线图会断开） |
+| `stats/refusals` | `{ by_reason: [{ reason, count }], top_questions: [{ question, count }] }`——`reason` 取值用 5.2 的词表，**不要自造** |
+| `stats/hot-questions` | `{ items: [{ question, count }] }`，**默认 Top 10**（原方案没给 N，这里钉死） |
+| `stats/retrieval` | 可用：`{ available: true, latency_p50, latency_p95, error_rate, token_usage }`；**不可用**：`{ available: false, status: "prometheus_unavailable" }`——**HTTP 状态码仍为 200**（见上） |
+
+> ⚠️ **口径两条**：
+> ① **`refusal_rate` 用的是本项目自定义的拒答率**（定义与分母见 5.2），**不是 `is_refused` 的简单平均**；
+> ② **`qa_count` 不含评测跑出来的轮次**——评测是离线批量任务，混进业务指标会让「问答量」在跑评测时莫名跳变。
 
 ---
 
@@ -3420,7 +3552,8 @@ POST /api/admin/refusals/{log_id}/annotate  写标注
 | 问答量趋势 | `stats/trend` | 折线图（近 30 天） |
 | 拒答分布 | `stats/refusals`（**仅聚合**） | 饼图 + Top N 计数；明细列表由 `GET /api/admin/refusals` 提供（见 4.3.1.3） |
 | 高频问题 | `stats/hot-questions` | 横向柱状图 |
-| 降级次数 | `stats/retrieval` 的降级字段 | 按 `kind` 分组的柱状图（来自 `degradation_events`） |
+| 降级次数 | **`stats/overview` 的 `degradation_counts`** | 按 `kind` 分组的柱状图（数据源自 `degradation_events`，**读 PostgreSQL**） |
+| | | ⚠️ **本行原写「`stats/retrieval` 的降级字段」是错的**：`stats/retrieval` 是**唯一读 Prometheus** 的接口，而 `degradation_events` 在 PostgreSQL 里（见 3.2.3.3 与 3.7.3）——两处说法原本打架，现按「PG 业务指标」统一 |
 
 **运行指标**（数据源：Prometheus —— `stats/retrieval` 用 PromQL 查询）
 
@@ -3617,7 +3750,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | # | 里程碑 | 交付内容 | 验收标准 |
 |---|---|---|---|
 | **M0** | 骨架闭环 | 新工程结构、FastAPI 骨架、LangGraph 图骨架（节点先填简实现）、PostgreSQL + Chroma 接通、**认证骨架（登录页 + JWT 签发/校验 + 路由守卫，见 3.2.2 / 3.7.1）**、**SSE 协议按 3.7.2 钉死（含 `Citation` / `VerifyReport` 的载荷 schema，见下）**、**加载层按附录 B + E.4/E.8 迁移并修复**、**两条「开工前必验」出实测记录（见下）**、最简 React 聊天页 | ① **端到端跑通**：登录 → 传文档 → 提问 → 流式作答 + 引用 ② **两条必验有实测记录**（数值或结论写进附录对应位置） |
-| **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 动态过采样、**刷新令牌与登出语义（见 3.7.1）** | ① 检索指标有基线数据（**指标定义见下**）② **ACL 隔离测试通过**：student 账号检索不到 `vis_admin` 的文档 |
+| **M1** | 检索做对 | jieba 修复 + BM25S 迁移 + 索引持久化、RRF、精排降级、ACL + 版本过滤 + 固定过采样、**刷新令牌与登出语义（见 3.7.1）** | ① 检索指标有基线数据（**指标定义见下**）② **ACL 隔离测试通过**：student 账号检索不到 `vis_admin` 的文档 |
 | **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | **多轮指代题通过**（题库来源见下） |
 | **M3** | 生成与引用 | 上下文组装（含 3.8 的预算 / 滚动压缩 / 四道防线）、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 点击引用可跳转原文；校验能标出无依据句 |
 | **M4** | React 两端 | **User 端补全（登录、会话列表、流式渲染与长列表 —— 即 4.2.4）+ 管理端 + 仪表盘** | 全功能可用 |
@@ -3673,7 +3806,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 
 > **3.2.4（并发、超时、幂等）与 3.8（上下文工程）的落点**：原方案这两块在 M0–M5 全表**无落点与验收**，且 3.8.3 的压缩正确性依赖 3.2.4 的会话锁。
 >
-> - **3.2.4 并入 M0**（它是最基础的正确性保障）：验收加「同一 session 连续两次请求，第二次被正确拒绝或排队」「客户端断连后锁被释放」
+> - **3.2.4 并入 M0**（它是最基础的正确性保障）：验收加「同一 session 连续两次请求，第二次被**拒绝**（409 / `session_busy`，见 3.2.4）」「客户端断连后锁被释放」
 > - **3.8 并入 M3**（M3 已含「上下文组装」，但原表述只指节点 8 的检索上下文拼装）：M3 交付内容改为「上下文组装（**含 3.8 的预算 / 滚动压缩 / 四道防线**）」
 
 > **附录 B + E.4/E.8 的施工项必须在 M0/M1 显式列入验收**：附录 B 自己写明加载层「会大量复用……必须在搬运时同步修复」，E.8.8 还给了三批顺序。若只写「传文档 → 提问」作为验收，这 13 条 B 修复与 7 条 E.8 施工项（竖排反转、质量闸门、按页限定 MinerU、缺失页清单等）会原样漏掉，而 M0 的验收根本测不出。
@@ -3998,7 +4131,7 @@ for md5_hex, _, _ in batch_md5s:
 |---|---|---|
 | 库 | `rank_bm25`（内存、每次冷启动全量重建） | **BM25S**（稀疏矩阵、磁盘持久化、快 100+ 倍） |
 | 分词 | `str.split()`（**中文完全失效**） | `jieba.lcut` |
-| 过滤 | 无 | 持久化「下标 → `document_id`」映射表 |
+| 过滤 | 无 | 持久化「下标 → `chunk_id`」映射表（粒度见 3.3.2，**不是 `document_id`**） |
 
 **为什么不选 Elasticsearch**（RAGFlow、Dify 等生产项目的主力选择）
 
@@ -4105,7 +4238,7 @@ v1.2 的原决策是 **SQLite**，理由很明确：「本项目需要的是事�
 
 **但要如实说 Chroma 的局限**（已经踩到一个）
 
-`where` 过滤**只能在标量上做 `$eq`/`$in`**，对 JSON 字符串做不了成员判断。所以 3.3.2 才要把 `visible_roles` 展开成 `vis_admin` / `vis_staff` 布尔字段。
+`where` 过滤**只能在标量上做 `$eq`/`$in`**，对 JSON 字符串做不了成员判断。所以 3.3.2 才要把 `visible_roles` 展开成 `vis_admin` / `vis_staff` / `vis_student` 布尔字段。
 
 **另一处局限**：无法表达跨条目聚合（"同组取最大版本"做不到），所以 3.3.1 才要回查 PostgreSQL 做两段式折叠。
 
@@ -4459,9 +4592,9 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | | 字段 |
 |---|---|
 | **旧**（实测自 `chroma.sqlite3`，17 个键） | `kb_id` / `chunk_id` / `chunk_index` / `user_id` / `md5` / `original_filename` / `file_type` / `current_chapter` / `chapter_level` / `chapter_count` / `toc` / `has_images` / `page` / `source` / `created_at` / `ocr_engine` / `scan_branch` |
-| **新**（见 3.3.2） | `document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `current_chapter` / `chapter_level` / **`chunk_id`** / `chunk_index` / `char_start` / `char_end` / `page` / **`bbox`** / `image_paths` |
+| **新**（见 3.3.2） | `document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `vis_student` / `current_chapter` / `chapter_level` / **`chunk_id`** / `chunk_index` / `char_start` / `char_end` / `page` / **`bbox`** / `image_paths` |
 
-> **新增的字段**（旧索引没有、ACL 与版本过滤依赖它们）：`document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `char_start` / `char_end` / `image_paths`。注意 **`page` 不是新增的**，旧索引里已有。
+> **新增的字段**（旧索引没有、ACL 与版本过滤依赖它们）：`document_id` / `doc_group_id` / `version` / `effective_date` / `status` / `visibility` / `vis_admin` / `vis_staff` / `vis_student` / `char_start` / `char_end` / `image_paths`。注意 **`page` 不是新增的**，旧索引里已有。
 
 **旧向量没有新增的那些字段** → 检索期的 **ACL 过滤和版本过滤会全部失效**（亮点①直接归零）。
 
@@ -4571,7 +4704,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 
 **第②步的注意**：上传时就要设好 **`effective_date`**（默认今天）和 **`visibility`**——它们决定后续检索的过滤结果，**事后补改需要重新索引**。
 
-> ⚠️ **勘误：新 Chroma metadata 里没有 `visible_roles`**——只有 `visibility` + `vis_admin` / `vis_staff` 布尔字段（见 3.3.2）。`visible_roles` 是 **PostgreSQL `documents` 表的源字段**，进 Chroma 时被展开成 `vis_*`。原文写「新 metadata 的 `visibility` / `visible_roles`」会把实现者引向**把数组写进 Chroma**——而 3.3.2 明确否定了数组字段（Chroma 的 `where` 对 JSON 字符串做不了成员判断）。
+> ⚠️ **勘误：新 Chroma metadata 里没有 `visible_roles`**——只有 `visibility` + `vis_admin` / `vis_staff` / `vis_student` 布尔字段（见 3.3.2）。`visible_roles` 是 **PostgreSQL `documents` 表的源字段**，进 Chroma 时被展开成 `vis_*`。原文写「新 metadata 的 `visibility` / `visible_roles`」会把实现者引向**把数组写进 Chroma**——而 3.3.2 明确否定了数组字段（Chroma 的 `where` 对 JSON 字符串做不了成员判断）。
 
 ---
 
