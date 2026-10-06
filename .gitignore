@@ -232,6 +232,9 @@ data/bm25s/
 data/uploads/
 data/normalized/
 data_backup_*/
+# 测试的数据目录（conftest 把 RAG_DATA_DIR 指到这里）—— 每次会话开始会被清空重建，
+# 里面全是跑测试的中间产物，绝不该进版本库
+test_data/
 db/*.db
 db/*.db-wal
 db/*.db-shm
