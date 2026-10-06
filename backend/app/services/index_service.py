@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.deps import ALL_ROLES
-from app.ingestion.chunker import make_chunk_id
 from app.retrieval import bm25, vector
 from app.retrieval.embedding import embed_texts
 
@@ -57,11 +56,17 @@ def remove_from_index(document_id: str, chunk_ids: list[str] | None = None) -> d
     """补偿删除：**先 Chroma、后 BM25S**（§3.3.1，与写入顺序完全相反）。
 
     注意这里**不动 PostgreSQL** —— PG 侧只置状态，行要保留。
-    """
-    removed_chroma = vector.delete_document(document_id)
 
+    ⚠️ **chunk_id 向 BM25 索引自己问**（M1 的 K-3）：原实现按
+       `range(removed_chroma)` 反推 id —— Chroma 已经空掉时推出的是**空列表**，
+       BM25 那批条目就留成了**还搜得到的孤儿**，不报错、只让召回悄悄变差。
+       改从 Chroma 读也不行：同一个现场里 Chroma 本来就是空的。
+       索引自己记着它有哪些 chunk（`bm25.document_chunk_ids`），与 Chroma 状态无关。
+    """
     if chunk_ids is None:
-        chunk_ids = [make_chunk_id(document_id, i) for i in range(removed_chroma)]
+        chunk_ids = bm25.document_chunk_ids(document_id)
+
+    removed_chroma = vector.delete_document(document_id)
     removed_bm25 = bm25.remove_document(chunk_ids)
 
     logger.info("补偿删除完成", extra={

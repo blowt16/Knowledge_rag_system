@@ -235,6 +235,23 @@ def add(entries: list[tuple[str, str]]) -> int:
     return len(incoming)
 
 
+def document_chunk_ids(document_id: str) -> list[str]:
+    """BM25 索引里属于该文档的全部 chunk_id（按 chunk_id 前缀取）。
+
+    ⚠️ **存在的理由**（M1 的 K-3）：删文档时**不能靠 Chroma 反推 chunk_id** ——
+       Chroma 先被清空的话推出来的是空列表，BM25 那批条目就成了
+       「还搜得到」的孤儿（不报错，只让召回悄悄变差）。
+       索引自己记着它有哪些 chunk，问它最可靠，而且与 Chroma 的当前状态无关。
+       chunk_id 的形状是 `{document_id}:{chunk_index}`（`chunker.make_chunk_id`），
+       所以前缀匹配是精确的、不会误伤别的文档。
+    """
+    state = _load_state()
+    if not state:
+        return []
+    prefix = f"{document_id}:"
+    return [cid for cid in state["chunk_ids"] if cid.startswith(prefix)]
+
+
 def remove_document(chunk_ids: list[str]) -> int:
     """按 chunk_id 列表移除（删文档时同步更新索引与映射表）。"""
     if not chunk_ids or not is_available():

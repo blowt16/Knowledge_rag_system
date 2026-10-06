@@ -24,6 +24,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app import db
+from app.api import admin as admin_api
 from app.api import auth as auth_api
 from app.api import chat as chat_api
 from app.api import conversations as conversations_api
@@ -131,3 +132,6 @@ app.include_router(conversations_api.router)
 app.include_router(documents_api.router)
 # User 端原文访问（/file、/text、/images/{name}）—— 走 filters.py 同一套 ACL
 app.include_router(document_access_api.router)
+# 管理端（文档 CRUD / 版本 / 分块预览）—— 注册在 documents 之后，
+# 同前缀下段数不同、不冲突，但顺序上更稳
+app.include_router(admin_api.router)

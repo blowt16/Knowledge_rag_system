@@ -22,8 +22,11 @@ from typing import AsyncIterator
 
 from app import db
 from app.core.config import repo_path
+from app.core.exceptions import AppError, NotFound
 from app.core.telemetry import reattach
 from app.ingestion.pipeline import IngestRequest, ingest
+from app.retrieval import vector
+from app.services import index_service
 
 logger = logging.getLogger(__name__)
 
@@ -192,3 +195,262 @@ async def stream_progress(task_id: str, *, interval: float = 0.5) -> AsyncIterat
 
 def status_is_done(status: str) -> bool:
     return status == "done"
+
+
+# ============================================================
+# 管理端：列表 / 版本 / 分块预览 / 改字段 / 删除（§4.3.1 / §4.3.2）
+# ============================================================
+
+# 「当前生效版本」的判定 —— 与**检索期的版本折叠同一口径**（§3.3.1）：
+# 组内 `status='active'` 且 `effective_date <= 今天` 中 version 最大的那一版。
+# ⚠️ 两处口径必须一致：管理端高亮的「当前生效」和检索实际返回的必须是同一版，
+#    否则管理员看着 v2 高亮、学生检索到的却是 v4。
+_CURRENT_VERSION_SQL = """
+    d.status = 'active'
+    AND d.effective_date <= CURRENT_DATE
+    AND d.version = (
+        SELECT max(d2.version) FROM documents d2
+         WHERE d2.doc_group_id = d.doc_group_id
+           AND d2.status = 'active' AND d2.effective_date <= CURRENT_DATE
+    )
+"""
+
+# 改了这些字段就要**重写 Chroma 的 chunk metadata**（§4.3.1.2）——
+# 它们冗余在向量库里，改 PG 不会自动同步，而检索期的过滤读的正是 Chroma。
+# ⚠️ `title` 不在此列：它只是显示名，重索引的代价不该为一个改名而付。
+REINDEX_FIELDS = ("visibility", "visible_roles", "effective_date", "status")
+
+
+def _doc_item(row) -> dict:
+    roles = row["visible_roles"] or []
+    if isinstance(roles, str):        # 防御：jsonb 编解码器缺失时会是字符串
+        try:
+            roles = json.loads(roles)
+        except (ValueError, TypeError):
+            roles = []
+    return {
+        "id": row["id"],
+        "doc_group_id": row["doc_group_id"],
+        "title": row["title"],
+        "filename": row["filename"],
+        "file_type": row["file_type"],
+        "version": row["version"],
+        "status": row["status"],
+        "visibility": row["visibility"],
+        "visible_roles": list(roles),
+        "effective_date": (row["effective_date"].isoformat()
+                           if row["effective_date"] else None),
+        "chunk_count": row["chunk_count"],
+        "created_at": (row["created_at"].isoformat() if row["created_at"] else None),
+        "is_current": bool(row.get("is_current")),
+    }
+
+
+async def list_documents(*, status: str = "all", visibility: str = "all",
+                         q: str = "", page: int = 1,
+                         page_size: int = 20) -> dict:
+    """管理端文档列表（筛选参数见 §4.3.1.1）。
+
+    `status` / `visibility` 都支持 `all`（默认）；`q` 模糊匹配**标题与原始文件名**。
+    """
+    where, args = ["TRUE"], []
+
+    def _add(clause: str, value) -> None:
+        args.append(value)
+        where.append(clause.format(n=len(args)))
+
+    if status != "all":
+        _add("d.status = ${n}", status)
+    if visibility != "all":
+        _add("d.visibility = ${n}", visibility)
+    if q:
+        args.append(f"%{q}%")
+        # 同一个参数用两次，所以只 append 一次、占位符写两遍
+        where.append(f"(d.title ILIKE ${len(args)} OR d.filename ILIKE ${len(args)})")
+
+    clause = " AND ".join(where)
+    async with db.tx() as conn:
+        total = await conn.fetchval(
+            f"SELECT count(*) FROM documents d WHERE {clause}", *args)
+        rows = await conn.fetch(
+            f"""SELECT d.*, ({_CURRENT_VERSION_SQL}) AS is_current
+                  FROM documents d
+                 WHERE {clause}
+                 ORDER BY d.created_at DESC, d.version DESC
+                 OFFSET ${len(args) + 1} LIMIT ${len(args) + 2}""",
+            *args, (page - 1) * page_size, page_size)
+
+    return {
+        "items": [_doc_item(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": page * page_size < total,
+    }
+
+
+async def get_versions(group_id: str) -> dict:
+    """同组的全部版本，**倒序**（当前生效在最上面，供「版本管理」折叠展示）。"""
+    async with db.tx() as conn:
+        rows = await conn.fetch(
+            f"""SELECT d.*, ({_CURRENT_VERSION_SQL}) AS is_current
+                  FROM documents d
+                 WHERE d.doc_group_id = $1
+                 ORDER BY d.version DESC""",
+            group_id)
+    if not rows:
+        raise NotFound("文档组不存在")
+    return {"doc_group_id": group_id, "versions": [_doc_item(r) for r in rows]}
+
+
+async def get_chunks_preview(document_id: str, *, page: int = 1,
+                             page_size: int = 20) -> dict:
+    """分块预览（§4.3.2）—— **只读预览，不做编辑**。
+
+    编辑 chunk 正文意味着重新嵌入该 chunk 并同步两处存储，属独立特性，本轮不做。
+    这是目前**唯一**能看见 `char_start/char_end`、`current_chapter`、`vis_*`
+    这些 metadata 的地方 —— 排查「检索为什么没召回」的第一手段。
+    """
+    async with db.tx() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM documents WHERE id = $1", document_id)
+    if not exists:
+        raise NotFound("文档不存在")
+
+    rows = vector.get_chunks(document_id, limit=100000)
+    start = (page - 1) * page_size
+    chunks = []
+    for row in rows[start:start + page_size]:
+        meta = row["metadata"]
+        paths = meta.get("image_paths") or []
+        if isinstance(paths, str):
+            try:
+                paths = json.loads(paths)
+            except (ValueError, TypeError):
+                paths = []
+        chunks.append({
+            "chunk_index": int(meta.get("chunk_index", 0)),
+            "page": int(meta.get("page", 1) or 1),
+            "current_chapter": meta.get("current_chapter") or "",
+            "chapter_level": int(meta.get("chapter_level", 0) or 0),
+            "char_start": int(meta.get("char_start", 0) or 0),
+            "char_end": int(meta.get("char_end", 0) or 0),
+            "text": row["text"],
+            "image_paths": list(paths),
+        })
+    return {
+        "chunks": chunks,
+        "total": len(rows),
+        "page": page,
+        "page_size": page_size,
+        "has_more": page * page_size < len(rows),
+    }
+
+
+async def update_document(document_id: str, *, title: str | None = None,
+                          visibility: str | None = None,
+                          visible_roles: list[str] | None = None,
+                          effective_date: str | None = None,
+                          status: str | None = None) -> dict:
+    """改可改字段（§3.7.2 侧的管理端写接口规格）。
+
+    ⚠️ **顺序是先 Chroma、后 PG**：两处存储做不到原子，那么失败时应该
+       停在**更保守**的那一侧。先写 Chroma 意味着最坏情况是
+       「向量库已经按新权限过滤了、PG 还没更新」—— 偏严；反过来则是
+       「PG 说受限、向量库还公开着」—— **那是泄露**。
+    """
+    async with db.tx() as conn:
+        row = await conn.fetchrow("SELECT * FROM documents WHERE id = $1", document_id)
+    if row is None:
+        raise NotFound("文档不存在")
+
+    new_visibility = visibility if visibility is not None else row["visibility"]
+    new_roles = (list(visible_roles) if visible_roles is not None
+                 else list(row["visible_roles"] or []))
+    # 与上传路径同一口径：「受限」至少要有一个角色，否则谁也看不到且不报错
+    new_roles = normalize_roles(",".join(new_roles), new_visibility)
+
+    if effective_date is not None:
+        parsed = parse_effective_date(effective_date)
+        if parsed is None:
+            raise AppError("effective_date 格式应为 YYYY-MM-DD")
+        new_effective = parsed
+    else:
+        new_effective = row["effective_date"]
+
+    new_status = status if status is not None else row["status"]
+
+    changed = {
+        "title": title is not None and title != row["title"],
+        "visibility": new_visibility != row["visibility"],
+        "visible_roles": sorted(new_roles) != sorted(row["visible_roles"] or []),
+        "effective_date": new_effective != row["effective_date"],
+        "status": new_status != row["status"],
+    }
+
+    if any(changed[f] for f in REINDEX_FIELDS):
+        # 先重写向量库：这三个字段冗余在 Chroma 里，检索期的过滤读的是它
+        index_service.rewrite_metadata(
+            document_id,
+            status=new_status,
+            visibility=new_visibility,
+            visible_roles=new_roles,
+            effective_date=new_effective.isoformat(),
+        )
+
+    async with db.tx() as conn:
+        # ⚠️ `visible_roles` 传 **list** 而不是 json.dumps 后的字符串：
+        #    连接池给 jsonb 注册了编解码器（db.py），再传字符串会被**二次编码**
+        #    成一个 JSON 字符串标量 —— 读回来就不是 list 了。
+        await conn.execute(
+            """UPDATE documents
+                  SET title = $2, visibility = $3, visible_roles = $4::jsonb,
+                      effective_date = $5, status = $6, updated_at = now()
+                WHERE id = $1""",
+            document_id, title if title is not None else row["title"],
+            new_visibility, new_roles, new_effective, new_status,
+        )
+        updated = await conn.fetchrow(
+            f"""SELECT d.*, ({_CURRENT_VERSION_SQL}) AS is_current
+                  FROM documents d WHERE d.id = $1""",
+            document_id)
+    return _doc_item(updated)
+
+
+async def set_document_status(document_id: str, status: str) -> dict:
+    """启用 / 停用（§3.7.3）。
+
+    ⚠️ 停用**当前生效版本**会让上一版「复活」（§3.3.1 的折叠规则）——
+       管理端必须在按钮旁显式提示这一点，由前端负责（3b）。
+    """
+    return await update_document(document_id, status=status)
+
+
+async def delete_document(document_id: str) -> None:
+    """**真删**（M4-D3）：Chroma chunk + BM25 条目 + PG 行，**源文件与规范化文本保留**。
+
+    依据是 §3.3.1 既有的版本语义「删掉新版即可，旧版自动恢复生效，不用手工 enable」——
+    删除就该让同组上一版接管。源文件不删：删了既不能回滚、也再拿不到原文
+    （与「破坏性操作先归档」的既有规矩一致）。
+
+    ⚠️ 两张表有指向 `documents(id)` 的外键：`ingestion_tasks.document_id` 与
+       `refusal_annotations.suggested_document_id`（§3.3.1）。任务行随文档一起删；
+       标注行**保留**（那条标注本身是运维事实），只把指向本档的建议置空。
+    """
+    async with db.tx() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM documents WHERE id = $1", document_id)
+    if not exists:
+        raise NotFound("文档不存在")
+
+    # 先删索引（内部已按「先取 chunk_id、再删 Chroma、后删 BM25」的正确顺序）
+    index_service.remove_from_index(document_id)
+
+    async with db.tx() as conn:
+        await conn.execute("DELETE FROM ingestion_tasks WHERE document_id = $1",
+                           document_id)
+        await conn.execute(
+            "UPDATE refusal_annotations SET suggested_document_id = NULL "
+            "WHERE suggested_document_id = $1", document_id)
+        await conn.execute("DELETE FROM documents WHERE id = $1", document_id)
+
+    logger.info("文档已删除", extra={"event": "document.deleted",
+                                    "document_id": document_id})
