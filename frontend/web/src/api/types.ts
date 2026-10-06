@@ -11,6 +11,9 @@
 export type RouteName = 'chat' | 'clarify' | 'knowledge'
 export type RefusalReason = 'no_candidate' | 'insufficient_evidence'
 export type Decision = 'ANSWERED' | 'REFUSED_NO_EVIDENCE'
+/** SSE `stage` 的取值（§3.7.2，封闭词表） */
+export type StageName =
+  | 'routing' | 'resolving' | 'retrieving' | 'reranking' | 'generating' | 'verifying'
 export type SseErrorCode =
   | 'timeout' | 'upstream_error' | 'context_length_exceeded' | 'internal' | 'session_busy'
 
@@ -78,6 +81,10 @@ export interface VerifyReport {
 
 /** 一条助手消息在流式过程中的累积状态。 */
 export interface AssistantDraft {
+  /** 当前阶段（§3.7.2）；用于填充首个 token 到达前的静默期 */
+  stage: StageName | null
+  /** 要显示的阶段文案。**以 stage 为准** —— label 只兜底（§4.2.4.2） */
+  stageHint: string
   route: RouteName | null
   /** ⚠️ 字段名是 clarify_facets，不是 facets —— 写成 evt.facets 会恒为 undefined */
   clarifyFacets: string[]
