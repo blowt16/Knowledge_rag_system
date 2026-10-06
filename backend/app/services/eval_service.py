@@ -130,10 +130,16 @@ async def run_eval(run_id: str) -> None:
         suite = (config.get("suite") or "full") if isinstance(config, dict) else "full"
         case_ids = (config.get("case_ids") if isinstance(config, dict) else None) or []
 
+        case_type = config.get("case_type") if isinstance(config, dict) else None
+
         async with db.tx() as conn:
             if case_ids:
                 rows = await conn.fetch(
                     "SELECT * FROM eval_cases WHERE id = ANY($1::text[]) ORDER BY id", case_ids)
+            elif case_type:
+                # ACL 对照实验用：只跑某一类题（如 case_type='restricted'）
+                rows = await conn.fetch(
+                    "SELECT * FROM eval_cases WHERE case_type=$1 ORDER BY id", case_type)
             elif suite == "refusal_calib":
                 rows = await conn.fetch(
                     "SELECT * FROM eval_cases WHERE suite='refusal_calib' ORDER BY id")

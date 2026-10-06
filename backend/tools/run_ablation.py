@@ -54,6 +54,46 @@ POLL_S = 10
 TIMEOUT_S = 3600
 
 
+class Client:
+    """带**自动重新登录**的 httpx 包装。
+
+    ⚠️ 必须要有：access token 只有 15 分钟（`auth.access_token_minutes`），
+       而消融一行要跑十几分钟 —— 首版脚本开头登录一次就一路用，跑到第 1 行
+       末尾就 401 了，然后 `d["status"]` 抛 KeyError 把整轮脚本带崩
+       （评测本身在服务端照常跑完，是**脚本**死的）。
+    """
+
+    def __init__(self) -> None:
+        self.c = httpx.Client(timeout=120)
+        self.token = ""
+
+    def _login(self) -> None:
+        self.token = self.c.post(f"{BASE}/api/auth/login",
+                                 json={"username": USER, "password": PW}
+                                 ).json()["access_token"]
+
+    def _h(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"}
+
+    def get(self, url: str) -> httpx.Response:
+        if not self.token:
+            self._login()
+        r = self.c.get(url, headers=self._h())
+        if r.status_code == 401:
+            self._login()
+            r = self.c.get(url, headers=self._h())
+        return r
+
+    def post(self, url: str, json_body: dict) -> httpx.Response:
+        if not self.token:
+            self._login()
+        r = self.c.post(url, headers=self._h(), json=json_body)
+        if r.status_code == 401:
+            self._login()
+            r = self.c.post(url, headers=self._h(), json=json_body)
+        return r
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="逗号分隔的行号（1-based），默认全跑")
@@ -62,49 +102,46 @@ def main() -> int:
 
     only = {int(x) for x in args.only.split(",") if x.strip()} or set(range(1, len(ROWS) + 1))
 
-    with httpx.Client(timeout=120) as c:
-        tok = c.post(f"{BASE}/api/auth/login",
-                     json={"username": USER, "password": PW}).json()["access_token"]
-        h = {"Authorization": f"Bearer {tok}"}
+    c = Client()
 
-        run_ids: list[str] = []
-        for i, (name, cfg) in enumerate(ROWS, start=1):
-            if i not in only:
-                run_ids.append("")
-                continue
-            # 等上一轮结束（API 也会用 409 挡住并发的，这里等更省事）
-            while True:
-                r = c.post(f"{BASE}/api/admin/eval/run", headers=h, json={
-                    "name": f"消融-{name}", "suite": "full", "role": args.role,
-                    "config": cfg})
-                if r.status_code == 202:
-                    break
-                if r.status_code == 409:
-                    time.sleep(POLL_S)
-                    continue
-                print(f"!! 第 {i} 行起不来：{r.status_code} {r.text[:200]}", file=sys.stderr)
-                return 1
-            run_id = r.json()["run_id"]
-            run_ids.append(run_id)
-            print(f"[{i}/8] {name} -> {run_id}（label={r.json()['config_label']}）", flush=True)
-
-            waited = 0
-            while waited < TIMEOUT_S:
+    run_ids: list[str] = []
+    for i, (name, cfg) in enumerate(ROWS, start=1):
+        if i not in only:
+            run_ids.append("")
+            continue
+        # 等上一轮结束（API 也会用 409 挡住并发的，这里等更省事）
+        while True:
+            r = c.post(f"{BASE}/api/admin/eval/run", {
+                "name": f"消融-{name}", "suite": "full", "role": args.role,
+                "config": cfg})
+            if r.status_code == 202:
+                break
+            if r.status_code == 409:
                 time.sleep(POLL_S)
-                waited += POLL_S
-                d = c.get(f"{BASE}/api/admin/eval/runs/{run_id}", headers=h).json()
-                if d["status"] in ("done", "failed"):
-                    m = d.get("metrics") or {}
-                    print(f"      {d['status']} cases={m.get('cases')} "
-                          f"failed={m.get('failed')} recall={m.get('recall_at_k')} "
-                          f"mrr={m.get('mrr')} ragas={m.get('ragas')}", flush=True)
-                    break
-            else:
-                print(f"!! 第 {i} 行超时未完成", file=sys.stderr)
+                continue
+            print(f"!! 第 {i} 行起不来：{r.status_code} {r.text[:200]}", file=sys.stderr)
+            return 1
+        run_id = r.json()["run_id"]
+        run_ids.append(run_id)
+        print(f"[{i}/8] {name} -> {run_id}（label={r.json()['config_label']}）", flush=True)
 
-        json.dump({"run_ids": [r for r in run_ids if r]},
-                  open("../data/tmp/ablation_runs.json", "w", encoding="utf-8"))
-        print("RUN_IDS " + ",".join(r for r in run_ids if r))
+        waited = 0
+        while waited < TIMEOUT_S:
+            time.sleep(POLL_S)
+            waited += POLL_S
+            d = c.get(f"{BASE}/api/admin/eval/runs/{run_id}").json()
+            if d["status"] in ("done", "failed"):
+                m = d.get("metrics") or {}
+                print(f"      {d['status']} cases={m.get('cases')} "
+                      f"failed={m.get('failed')} recall={m.get('recall_at_k')} "
+                      f"mrr={m.get('mrr')} ragas={m.get('ragas')}", flush=True)
+                break
+        else:
+            print(f"!! 第 {i} 行超时未完成", file=sys.stderr)
+
+    json.dump({"run_ids": [r for r in run_ids if r]},
+              open("../data/tmp/ablation_runs.json", "w", encoding="utf-8"))
+    print("RUN_IDS " + ",".join(r for r in run_ids if r))
     return 0
 
 

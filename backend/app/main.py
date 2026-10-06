@@ -65,6 +65,30 @@ def _warm_reranker() -> None:
     )
 
 
+async def _fail_stale_evals() -> None:
+    """启动时把**上一进程遗留的**评测轮次标成 failed。
+
+    ⚠️ 实测踩过：评测是进程内 asyncio 任务，服务重启 / 进程被杀时它跟着死，
+       而 `eval_runs.status` 永远停在 `running`。而 `POST /eval/run` 有
+       「同时只允许一轮」的保护 —— 于是**这一行僵死记录会把之后所有评测全部挡死**
+       （409），且看起来像是"评测一直有人在跑"。
+    """
+    try:
+        async with db.tx() as conn:
+            n = await conn.fetchval(
+                "SELECT count(*) FROM eval_runs WHERE status IN ('pending','running')")
+            if n:
+                await conn.execute(
+                    "UPDATE eval_runs SET status='failed', finished_at=now(), "
+                    "metrics = COALESCE(metrics,'{}'::jsonb) || "
+                    "'{\"error\":\"stale: 上次进程退出时未结束\"}'::jsonb "
+                    "WHERE status IN ('pending','running')")
+                logger.warning("清理了 %d 个上次未结束的评测轮次", n,
+                               extra={"event": "eval.stale_cleaned", "count": n})
+    except Exception:  # noqa: BLE001 —— 清理失败不该拦住启动
+        logger.warning("清理遗留评测轮次失败", extra={"event": "eval.stale_clean_failed"})
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     install_logging()
@@ -76,6 +100,7 @@ async def lifespan(_app: FastAPI):
     # 指标（§3.2.3.3）—— 与 tracing 同一开关：没配 OTEL_EXPORTER_OTLP_ENDPOINT 就不导出
     metrics.setup_metrics(service_name="campus-rag")
     await db.init_pool()
+    await _fail_stale_evals()
     # 握住引用，避免任务被 GC 掉
     warmup = asyncio.create_task(asyncio.to_thread(_warm_reranker))
     logger.info("服务启动", extra={"event": "app.startup"})
