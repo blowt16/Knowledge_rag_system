@@ -734,6 +734,86 @@ def repo_root() -> Path:
 
 # ============================================================
 
+async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
+    """把题库 JSON 导进 `eval_cases`（**幂等**：按 id upsert）。
+
+    ⚠️ 题库存成 JSON 而不是只放库里：可评审、可 diff、能进版本库。
+       DB 是运行时的落点，JSON 是**事实来源**。
+    """
+    import json
+
+    from app import db
+
+    fixture = Path(args.fixture)
+    if not fixture.is_absolute():
+        fixture = BACKEND_DIR / fixture
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    cases = payload["cases"]
+
+    # `expected_document`（标题）→ document_id：库里按标题对不上就报错，
+    # 不要静默写 NULL（那样评测会「每道题都召回不到」，而看起来像检索坏了）
+    async def _doc_ids(conn) -> dict[str, str]:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (title) title, id FROM documents "
+            "WHERE status='active' ORDER BY title, version DESC")
+        return {r["title"]: r["id"] for r in rows}
+
+    inserted = updated = 0
+    await db.init_pool()
+    try:
+        async with db.tx() as conn:
+            id_by_title = await _doc_ids(conn)
+            missing: set[str] = set()
+            for c in cases:
+                title = c.get("expected_document")
+                doc_id = None
+                if title:
+                    doc_id = id_by_title.get(title)
+                    if doc_id is None:
+                        missing.add(title)
+                expected_ids = [doc_id] if doc_id else None
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM eval_cases WHERE id = $1", c["id"])
+                await conn.execute(
+                    """INSERT INTO eval_cases
+                         (id, question, ground_truth, expected_doc_ids, case_type,
+                          turns, visible_roles, suite, expected_route, should_clarify)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                       ON CONFLICT (id) DO UPDATE SET
+                         question = EXCLUDED.question,
+                         ground_truth = EXCLUDED.ground_truth,
+                         expected_doc_ids = EXCLUDED.expected_doc_ids,
+                         case_type = EXCLUDED.case_type,
+                         turns = EXCLUDED.turns,
+                         visible_roles = EXCLUDED.visible_roles,
+                         suite = EXCLUDED.suite,
+                         expected_route = EXCLUDED.expected_route,
+                         should_clarify = EXCLUDED.should_clarify""",
+                    c["id"], c["question"], c.get("ground_truth"),
+                    json.dumps(expected_ids, ensure_ascii=False) if expected_ids else None,
+                    c["case_type"],
+                    json.dumps(c.get("turns"), ensure_ascii=False) if c.get("turns") else None,
+                    json.dumps(c.get("visible_roles"), ensure_ascii=False)
+                    if c.get("visible_roles") else None,
+                    c.get("suite", "full"),
+                    c.get("expected_route"), c.get("should_clarify"),
+                )
+                if exists:
+                    updated += 1
+                else:
+                    inserted += 1
+
+        if missing:
+            print("⚠️ 以下期望文档在库里找不到（对应题目的 expected_doc_ids 写成 NULL）：")
+            for t in sorted(missing):
+                print(f"   - {t}")
+    finally:
+        await db.close_pool()
+
+    print(f"导入完成：新增 {inserted} 题 / 更新 {updated} 题（共 {len(cases)}）")
+    return 0
+
+
 def main() -> int:
     # Windows 控制台默认 GBK，打不出 emoji/中文全角会抛 UnicodeEncodeError
     for stream in (sys.stdout, sys.stderr):
@@ -770,6 +850,11 @@ def main() -> int:
     p_mt.add_argument("--out", default="docs/多轮指代评测.md",
                       help="markdown 输出路径（相对仓库根）；传空字符串则不写")
 
+    p_seed = sub.add_parser("seed-eval-cases",
+                            help="把题库导入 eval_cases（幂等，按 id upsert）")
+    p_seed.add_argument("--fixture", default="tests/fixtures/eval_cases_v1.json",
+                        help="题库路径（相对 backend/）")
+
     args = parser.parse_args()
     handlers = {
         "init-db": cmd_init_db,
@@ -777,6 +862,7 @@ def main() -> int:
         "check-llm": cmd_check_llm,
         "eval-retrieval": cmd_eval_retrieval,
         "eval-multiturn": cmd_eval_multiturn,
+        "seed-eval-cases": cmd_seed_eval_cases,
     }
     return asyncio.run(handlers[args.command](args))
 
