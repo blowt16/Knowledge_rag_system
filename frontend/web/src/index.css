@@ -138,13 +138,7 @@ input { font: inherit; }
 .escalate-toggle {
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   color: var(--muted); margin-left: 8px;
-}
-/* 登录页底部的管理端入口 */
-.login-alt {
-  display: block; margin-top: 2px; text-align: center;
-  font-size: 13px; color: var(--brand); text-decoration: none;
-}
-.login-alt a { color: var(--brand); text-decoration: none; }
+}.login-alt a { color: var(--brand); text-decoration: none; }
 .login-alt a:hover { text-decoration: underline; }
 @theme inline {
   --font-heading: var(--font-sans);

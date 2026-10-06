@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useAuth } from '../../stores/auth'
 
 export default function LoginPage() {
@@ -53,11 +52,6 @@ export default function LoginPage() {
         <button type="submit" disabled={loading || !username || !password}>
           {loading ? '登录中…' : '登录'}
         </button>
-
-        {/* 管理员入口 —— 放在卡片里、登录按钮下面。
-            ⚠️ 点它时若未登录，守卫会把你弹回这里（地址栏带上 `?next=/admin`），
-               登录后直接送到管理端（否则看着像没反应）。 */}
-        <Link className="login-alt" to="/admin">进入管理后台 →</Link>
       </form>
     </div>
   )
