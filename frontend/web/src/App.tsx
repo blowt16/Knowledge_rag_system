@@ -12,6 +12,7 @@ const DocumentsPage = lazy(() => import('./views/admin/DocumentsPage'))
 const VersionsPage = lazy(() => import('./views/admin/VersionsPage'))
 const RefusalsPage = lazy(() => import('./views/admin/RefusalsPage'))
 const UsersPage = lazy(() => import('./views/admin/UsersPage'))
+const EvalPage = lazy(() => import('./views/admin/EvalPage'))
 
 const Loading = () => <div className="p-8 text-sm text-muted-foreground">加载中…</div>
 
@@ -87,6 +88,8 @@ export default function App() {
                element={<Suspense fallback={<Loading />}><RefusalsPage /></Suspense>} />
         <Route path="users"
                element={<Suspense fallback={<Loading />}><UsersPage /></Suspense>} />
+        <Route path="eval"
+               element={<Suspense fallback={<Loading />}><EvalPage /></Suspense>} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/chat' : '/login'} replace />} />
     </Routes>

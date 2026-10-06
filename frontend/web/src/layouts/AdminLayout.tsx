@@ -1,7 +1,7 @@
 /**
  * 管理端布局（§4.3 的侧栏结构）。
  *
- * ⚠️ 侧栏**不含「评测」**：那一页归 M5（M4 时还没有数据源，§7 里程碑表）。
+ * 「评测」页由 M5 补上（M4 时还没有数据源，§7 里程碑表）。
  *
  * ⚠️ 这里用 Tailwind + shadcn —— 与登录/聊天页的手写 CSS 并存（M4-D1）。
  *    Tailwind 的 preflight 是全局重置，接入后已用 bsk 回归过那两页的版式。
@@ -17,6 +17,7 @@ const NAV = [
   { to: '/admin/versions', label: '版本管理', end: false },
   { to: '/admin/refusals', label: '拒答分析', end: false },
   { to: '/admin/users', label: '用户管理', end: false },
+  { to: '/admin/eval', label: '评测', end: false },
 ]
 
 export default function AdminLayout() {

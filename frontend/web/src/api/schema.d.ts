@@ -606,6 +606,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/eval/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Run
+         * @description 起一轮评测。立即返回 run_id（202），跑完看 `GET /runs/{id}`。
+         */
+        post: operations["start_run_api_admin_eval_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/eval/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Runs */
+        get: operations["list_runs_api_admin_eval_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/eval/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Run */
+        get: operations["get_run_api_admin_eval_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/eval/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compare
+         * @description 消融对比表（§4.3.1.4）—— **服务端**产出配置 + 对齐后的指标矩阵。
+         *
+         *     ⚠️ 不由前端拼：指标全集由服务端掌握，不同 run 可能缺指标、指标名会演进，
+         *        前端拼会把这些逻辑复制一份到前端，且 `config_label` 会各拼各的。
+         */
+        get: operations["compare_api_admin_eval_compare_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -824,6 +901,178 @@ export interface components {
             page_size: number;
             /** Has More */
             has_more: boolean;
+        };
+        /** EvalCaseResult */
+        EvalCaseResult: {
+            /** Case Id */
+            case_id: string;
+            /**
+             * Retrieved Ids
+             * @default []
+             */
+            retrieved_ids: string[];
+            /**
+             * Unauthorized Hits
+             * @default 0
+             */
+            unauthorized_hits: number;
+            /**
+             * Metrics
+             * @default {}
+             */
+            metrics: {
+                [key: string]: unknown;
+            };
+        };
+        /** EvalCompareResponse */
+        EvalCompareResponse: {
+            /**
+             * Metrics
+             * @default []
+             */
+            metrics: string[];
+            /**
+             * Runs
+             * @default []
+             */
+            runs: components["schemas"]["EvalCompareRow"][];
+        };
+        /** EvalCompareRow */
+        EvalCompareRow: {
+            /** Run Id */
+            run_id: string;
+            /** Config Label */
+            config_label: string;
+            /**
+             * Config
+             * @default {}
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /**
+             * Values
+             * @default {}
+             */
+            values: {
+                [key: string]: unknown;
+            };
+        };
+        /** EvalRunCreated */
+        EvalRunCreated: {
+            /** Run Id */
+            run_id: string;
+            /** Status */
+            status: string;
+            /** Config Label */
+            config_label: string;
+        };
+        /** EvalRunDetail */
+        EvalRunDetail: {
+            /** Run Id */
+            run_id: string;
+            /** Name */
+            name?: string | null;
+            /**
+             * Config
+             * @default {}
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Config Label */
+            config_label: string;
+            /** Role */
+            role?: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Include Restricted
+             * @default false
+             */
+            include_restricted: boolean;
+            /** Metrics */
+            metrics?: {
+                [key: string]: unknown;
+            } | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /**
+             * Cases
+             * @default []
+             */
+            cases: components["schemas"]["EvalCaseResult"][];
+        };
+        /** EvalRunList */
+        EvalRunList: {
+            /**
+             * Items
+             * @default []
+             */
+            items: components["schemas"]["EvalRunSummary"][];
+        };
+        /** EvalRunRequest */
+        EvalRunRequest: {
+            /** Name */
+            name?: string | null;
+            /**
+             * Suite
+             * @default full
+             */
+            suite: string;
+            /**
+             * Role
+             * @default student
+             */
+            role: string;
+            /**
+             * Include Restricted
+             * @default false
+             */
+            include_restricted: boolean;
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            } | null;
+            /** Case Ids */
+            case_ids?: string[] | null;
+        };
+        /** EvalRunSummary */
+        EvalRunSummary: {
+            /** Run Id */
+            run_id: string;
+            /** Name */
+            name?: string | null;
+            /**
+             * Config
+             * @default {}
+             */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Config Label */
+            config_label: string;
+            /** Role */
+            role?: string | null;
+            /** Status */
+            status: string;
+            /**
+             * Include Restricted
+             * @default false
+             */
+            include_restricted: boolean;
+            /** Metrics */
+            metrics?: {
+                [key: string]: unknown;
+            } | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2182,6 +2431,133 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RetrievalMetricsResponse"];
+                };
+            };
+        };
+    };
+    start_run_api_admin_eval_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunCreated"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_runs_api_admin_eval_runs_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_run_api_admin_eval_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalRunDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    compare_api_admin_eval_compare_get: {
+        parameters: {
+            query: {
+                /** @description 逗号分隔的 run_id */
+                run_ids: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalCompareResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
