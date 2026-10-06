@@ -58,7 +58,7 @@ async def start_run(payload: EvalRunRequest, user=AdminUser) -> EvalRunCreated:
         await conn.execute(
             """INSERT INTO eval_runs (id, name, config, role, include_restricted, status)
                VALUES ($1,$2,$3,$4,$5,'pending')""",
-            run_id, payload.name, json.dumps(cfg, ensure_ascii=False),
+            run_id, payload.name, cfg,
             payload.role, 1 if payload.include_restricted else 0)
 
     task = asyncio.create_task(eval_service.run_eval(run_id))

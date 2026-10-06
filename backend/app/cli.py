@@ -790,11 +790,10 @@ async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
                          expected_route = EXCLUDED.expected_route,
                          should_clarify = EXCLUDED.should_clarify""",
                     c["id"], c["question"], c.get("ground_truth"),
-                    json.dumps(expected_ids, ensure_ascii=False) if expected_ids else None,
+                    expected_ids,
                     c["case_type"],
-                    json.dumps(c.get("turns"), ensure_ascii=False) if c.get("turns") else None,
-                    json.dumps(c.get("visible_roles"), ensure_ascii=False)
-                    if c.get("visible_roles") else None,
+                    c.get("turns"),
+                    c.get("visible_roles"),
                     c.get("suite", "full"),
                     c.get("expected_route"), c.get("should_clarify"),
                 )
@@ -833,8 +832,7 @@ async def cmd_eval_calibration(args: argparse.Namespace) -> int:
             await conn.execute(
                 """INSERT INTO eval_runs (id, name, config, role, include_restricted, status)
                    VALUES ($1,$2,$3,'student',0,'pending')""",
-                run_id, args.name,
-                json.dumps({"suite": "refusal_calib"}, ensure_ascii=False))
+                run_id, args.name, {"suite": "refusal_calib"})
         await eval_service.run_eval(run_id)
         async with db.tx() as conn:
             row = await conn.fetchrow("SELECT status, metrics FROM eval_runs WHERE id=$1", run_id)

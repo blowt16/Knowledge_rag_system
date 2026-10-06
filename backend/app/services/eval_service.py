@@ -152,7 +152,7 @@ async def run_eval(run_id: str) -> None:
                 await conn.execute(
                     "UPDATE eval_runs SET status='failed', finished_at=now(), "
                     "metrics=$2 WHERE id=$1",
-                    run_id, json.dumps({"error": "no_cases"}))
+                    run_id, {"error": "no_cases"})
             logger.warning("评测没有可跑的用例", extra={"event": "eval.no_cases"})
             return
 
@@ -214,16 +214,16 @@ async def run_eval(run_id: str) -> None:
                          (id, run_id, case_id, retrieved_ids, answer, unauthorized_hits, metrics)
                        VALUES ($1,$2,$3,$4,$5,$6,$7)""",
                     uuid.uuid4().hex, run_id, r["case_id"],
-                    json.dumps(r.get("retrieved_ids") or [], ensure_ascii=False),
+                    r.get("retrieved_ids") or [],
                     r.get("answer") or "",
                     int(r.get("unauthorized_hits") or 0),
-                    json.dumps(r.get("metrics") or {}, ensure_ascii=False, default=str),
+                    r.get("metrics") or {},
                 )
 
             summary = _aggregate(results, ragas)
             await conn.execute(
                 "UPDATE eval_runs SET status='done', finished_at=now(), metrics=$2 WHERE id=$1",
-                run_id, json.dumps(summary, ensure_ascii=False, default=str))
+                run_id, summary)
 
         logger.info("评测完成", extra={"event": "eval.done", "run_id": run_id,
                                     "cases": len(results),
@@ -235,7 +235,7 @@ async def run_eval(run_id: str) -> None:
                 await conn.execute(
                     "UPDATE eval_runs SET status='failed', finished_at=now(), metrics=$2 "
                     "WHERE id=$1", run_id,
-                    json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False))
+                    {"error": f"{type(e).__name__}: {e}"})
         except Exception:  # noqa: BLE001
             pass
 
