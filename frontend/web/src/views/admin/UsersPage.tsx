@@ -68,6 +68,10 @@ export default function UsersPage() {
   }
 
   const pages = Math.max(1, Math.ceil(total / pageSize))
+  // ⚠️ 下拉**触发器**默认显示原始枚举值（实测：`all` / `student` / `admin`）——
+  //    只有展开后的选项才带中文。角色中文来自服务端的角色清单，不硬编码。
+  const roleLabel = (v: string) =>
+    v === 'all' ? '全部' : (roles.find((r) => r.value === v)?.label ?? v)
 
   return (
     <div className="space-y-5">
@@ -80,7 +84,9 @@ export default function UsersPage() {
       <div className="flex items-center gap-3">
         <Label>角色</Label>
         <Select value={role} onValueChange={(v) => { setPage(1); setRole(v ?? 'all') }}>
-          <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-36">
+            <SelectValue>{(v) => roleLabel(v as string)}</SelectValue>
+          </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部</SelectItem>
             {roles.map((r) => (
@@ -110,7 +116,9 @@ export default function UsersPage() {
                   <TableCell>
                     <Select value={u.role}
                             onValueChange={(v) => void run(() => patchUser(u.id, { role: v ?? u.role }))}>
-                      <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                      <SelectTrigger className="h-8 w-28">
+                        <SelectValue>{(v) => roleLabel(v as string)}</SelectValue>
+                      </SelectTrigger>
                       <SelectContent>
                         {roles.map((r) => (
                           <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
@@ -235,7 +243,11 @@ function CreateDialog({
           <div className="space-y-1">
             <Label>角色</Label>
             <Select value={role} onValueChange={(v) => setRole(v ?? 'student')}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger>
+                <SelectValue>
+                  {(v) => roles.find((r) => r.value === v)?.label ?? String(v)}
+                </SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 {roles.map((r) => (
                   <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>

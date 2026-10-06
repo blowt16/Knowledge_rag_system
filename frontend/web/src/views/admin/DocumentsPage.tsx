@@ -41,6 +41,12 @@ import type { ChunkItem, DocumentItem, RoleItem } from '@/api/admin'
 const STATUS_LABEL: Record<string, string> = {
   active: '生效中', disabled: '已停用', indexing: '索引中', failed: '失败',
 }
+// ⚠️ 下拉**触发器**默认显示的是原始枚举值（实测：`public`、`all`）——
+//    只有展开后的选项才带中文。所以每个 SelectValue 都要给出显示文案。
+const STATUS_TEXT: Record<string, string> = { all: '全部', ...STATUS_LABEL }
+const VISIBILITY_TEXT: Record<string, string> = {
+  all: '全部', public: '公开', restricted: '受限',
+}
 
 interface UploadProgress {
   done: number
@@ -185,7 +191,9 @@ export default function DocumentsPage() {
         <div className="space-y-1">
           <Label>状态</Label>
           <Select value={status} onValueChange={(v) => { setPage(1); setStatus((v ?? 'all') as typeof status) }}>
-            <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-32">
+              <SelectValue>{(v) => STATUS_TEXT[v as string] ?? String(v)}</SelectValue>
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部</SelectItem>
               <SelectItem value="active">生效中</SelectItem>
@@ -197,7 +205,9 @@ export default function DocumentsPage() {
         <div className="space-y-1">
           <Label>可见范围</Label>
           <Select value={visibility} onValueChange={(v) => { setPage(1); setVisibility((v ?? 'all') as typeof visibility) }}>
-            <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-32">
+              <SelectValue>{(v) => STATUS_TEXT[v as string] ?? String(v)}</SelectValue>
+            </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部</SelectItem>
               <SelectItem value="public">公开</SelectItem>
@@ -423,7 +433,9 @@ function EditDialog({
           <div className="space-y-1">
             <Label>可见范围</Label>
             <Select value={visibility} onValueChange={(v) => setVisibility((v ?? 'public') as typeof visibility)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger>
+                <SelectValue>{(v) => VISIBILITY_TEXT[v as string] ?? String(v)}</SelectValue>
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="public">公开</SelectItem>
                 <SelectItem value="restricted">受限</SelectItem>

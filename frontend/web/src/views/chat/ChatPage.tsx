@@ -51,6 +51,16 @@ const STAGE_TEXT: Record<string, string> = {
   generating: '正在组织答案…',
 }
 
+/**
+ * **有取值、但不单独提示**的阶段（源文：过快或非阻塞展示）。
+ *
+ * ⚠️ 实测（E2E 发现）：只写「表里没有就退回 `label`」是不够的 ——
+ *    服务端给 `routing` 也配了 label（「正在判断问题类型…」），
+ *    于是它照着自己那条 label 显示了 4ms，正好是代码注释里警告的
+ *    「两个文案源并存必然不一致」。这里显式把它们钉成「不提示」。
+ */
+const STAGE_SILENT = new Set(['routing', 'verifying'])
+
 /** token 必须每次请求现生成 —— 双击去重靠它（§3.2.4 的同会话幂等）。 */
 function newRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
@@ -149,7 +159,8 @@ export default function ChatPage() {
               setSessionId(data.session_id)
               break
             case 'stage': {
-              const hint = STAGE_TEXT[data.stage] ?? data.label ?? ''
+              const hint = STAGE_TEXT[data.stage]
+                ?? (STAGE_SILENT.has(data.stage) ? '' : (data.label ?? ''))
               // 映射表里没有的阶段（routing / verifying）：保留上一条提示
               patchTurn(id, hint
                 ? { stage: data.stage, stageHint: hint }
