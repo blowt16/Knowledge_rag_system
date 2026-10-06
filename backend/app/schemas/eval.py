@@ -72,6 +72,11 @@ class EvalCompareRow(BaseModel):
     config: dict[str, Any] = {}
     status: str
     values: dict[str, Any] = {}
+    #: 这轮 ragas 跑没跑成、错在哪 —— 是诊断元数据不是指标，故**不进 `values`**
+    #: （那会让前端按 key 猜），也不当矩阵列（前者恒 true、后者是列表）。
+    #: 前端据此在表下给提示（§4.3.1.4）
+    ragas_available: bool | None = None
+    ragas_errors: list[str] = []
 
 
 class EvalCompareResponse(BaseModel):

@@ -145,11 +145,16 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
                  "unauthorized_hits", "uncited_ratio", "citation_invalid",
                  "cases", "failed", "answered_count", "knowledge_count"]
     ragas_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+    # ⚠️ 这三个不是指标，**不能当矩阵列**：`ragas` 是嵌套子字典（下面拍平进 values），
+    #    `ragas_available` 恒为 true、`ragas_errors` 是列表 —— 当列只是噪声。
+    #    它们走后两个（`ragas_*` 作为行上的诊断字段，见 EvalCompareRow）。
+    non_metric_keys = {"ragas", "ragas_available", "ragas_errors"}
     seen: set[str] = set()
     for r in rows:
         seen |= set((_as_dict(r["metrics"]) or {}).keys())
     metrics = ([k for k in preferred if k in seen]
-               + sorted(k for k in seen if k not in preferred and k != "ragas"))
+               + sorted(k for k in seen
+                        if k not in preferred and k not in non_metric_keys))
 
     runs = []
     for i in ids:                      # 保持传入顺序 —— 叠加表的行序有含义
@@ -162,9 +167,13 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
         ragas = m.get("ragas") or {}
         values.update({k: ragas.get(k) for k in ragas_keys})
         runs.append({"run_id": i, "config_label": eval_config.label(cfg),
-                     "config": cfg, "status": r["status"], "values": values})
+                     "config": cfg, "status": r["status"], "values": values,
+                     "ragas_available": m.get("ragas_available"),
+                     "ragas_errors": m.get("ragas_errors") or []})
 
-    return EvalCompareResponse(metrics=metrics + ragas_keys, runs=runs)
+    # ragas 四项排最前：指标全集十几个，一屏放不下必定横向滚动，
+    # 排末尾等于默认看不见（§4.3.1.4 的消融表就该先看这几列）
+    return EvalCompareResponse(metrics=ragas_keys + metrics, runs=runs)
 
 
 def _as_dict(value):

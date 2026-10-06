@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   type EvalCompareResponse,
+  type EvalCompareRow,
   type EvalRunSummary,
   evalCompare,
   evalRuns,
@@ -35,10 +36,31 @@ const METRIC_LABEL: Record<string, string> = {
   failed: '失败题数',
   answered_count: '作答题数',
   knowledge_count: 'knowledge 轮次',
+  refused_count: '拒答题数',
+  scored_with_ground_truth: '有参考答案题数',
   faithfulness: 'Faithfulness',
   answer_relevancy: 'Answer Relevancy',
   context_precision: 'Context Precision',
   context_recall: 'Context Recall',
+}
+
+/** 四项 ragas 的 key —— 与 `METRIC_LABEL` 里的保持一致（服务端定的名字）。 */
+const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
+
+/** 这一轮 ragas 为什么是空的 —— 诊断是行字段，不占矩阵列（见后端 EvalCompareRow）。 */
+function ragasIssue(row: EvalCompareRow): string | null {
+  const errs = row.ragas_errors?.join('；')
+  if (row.ragas_available === false) {
+    return errs ? `ragas 没跑起来：${errs}` : 'ragas 没跑起来'
+  }
+  if (errs) return `部分指标没算出来：${errs}`
+  // ⚠️ 还有第三种「空」：ragas 环境没问题、也没报错，四项却全是「—」——
+  //    通常是没有可评分样本（缺参考答案/上下文）。不说明的话，
+  //    看表的人只能看到四个「—」，照样得去查库（M5 实测有这种轮次）。
+  if (RAGAS_KEYS.every(k => row.values[k] === null || row.values[k] === undefined)) {
+    return 'ragas 没产出分数（这一轮没有可评分的样本）'
+  }
+  return null
 }
 
 function fmt(v: unknown): string {
@@ -124,6 +146,12 @@ export default function EvalPage() {
   const toggle = (id: string) =>
     setSelected(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]))
 
+  //: 勾选的轮次里 ragas 没算全的 —— 这些行的四项指标是「—」，不说明原因就成了哑谜
+  const ragasIssues = (compare?.runs ?? []).flatMap(row => {
+    const why = ragasIssue(row)
+    return why ? [{ row, why }] : []
+  })
+
   return (
     <div className="space-y-6">
       <Card>
@@ -204,22 +232,26 @@ export default function EvalPage() {
       {compare && (
         <Card>
           <CardHeader><CardTitle className="text-base">消融对比表</CardTitle></CardHeader>
+          {/* ⚠️ 指标全集有十几列，一屏放不下必须横向滚动：表头 `whitespace-nowrap`
+              不然文字被挤成竖排；「配置」列 sticky 固定，滚到右边时不丢行标识。 */}
           <CardContent className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  <th className="py-2">配置</th>
+                  <th className="sticky left-0 z-10 bg-card py-2 pr-3 whitespace-nowrap">配置</th>
                   {compare.metrics.map(m => (
-                    <th key={m} className="py-2">{METRIC_LABEL[m] ?? m}</th>
+                    <th key={m} className="py-2 pr-3 whitespace-nowrap">{METRIC_LABEL[m] ?? m}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {compare.runs.map(row => (
                   <tr key={row.run_id} className="border-t border-border">
-                    <td className="py-2">{row.config_label}</td>
+                    <td className="sticky left-0 z-10 bg-card py-2 pr-3 whitespace-nowrap">
+                      {row.config_label}
+                    </td>
                     {compare.metrics.map(m => (
-                      <td key={m} className="py-2">{fmt(row.values[m])}</td>
+                      <td key={m} className="py-2 pr-3 whitespace-nowrap">{fmt(row.values[m])}</td>
                     ))}
                   </tr>
                 ))}
@@ -228,6 +260,18 @@ export default function EvalPage() {
             <p className="mt-2 text-xs text-muted-foreground">
               值全部来自服务端；缺指标的格子显示「—」。
             </p>
+            {ragasIssues.length > 0 && (
+              <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
+                <p className="font-medium">这些轮次的 ragas 没算全，四项指标是空的：</p>
+                <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                  {ragasIssues.map(({ row, why }) => (
+                    <li key={row.run_id}>
+                      {row.config_label}（{row.run_id.slice(0, 8)}）—— {why}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

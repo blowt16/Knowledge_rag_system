@@ -959,6 +959,13 @@ export interface components {
             values: {
                 [key: string]: unknown;
             };
+            /** Ragas Available */
+            ragas_available?: boolean | null;
+            /**
+             * Ragas Errors
+             * @default []
+             */
+            ragas_errors: string[];
         };
         /** EvalRunCreated */
         EvalRunCreated: {

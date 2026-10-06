@@ -8,6 +8,7 @@ export type EvalRunCreated = S['EvalRunCreated']
 export type EvalRunDetail = S['EvalRunDetail']
 export type EvalRunList = S['EvalRunList']
 export type EvalCompareResponse = S['EvalCompareResponse']
+export type EvalCompareRow = S['EvalCompareRow']
 export type EvalRunSummary = S['EvalRunSummary']
 
 export interface StartRunBody {
