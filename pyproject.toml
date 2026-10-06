@@ -32,7 +32,6 @@ dependencies = [
     "pyyaml>=6.0.0",
     "unstructured>=0.23.0",
     "openpyxl>=3.1.0",
-    "streamlit>=1.50.0",
     "requests>=2.32.0",
     "markdown>=3.10.2",
     "rank-bm25>=0.2.2",
@@ -64,8 +63,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# 新后端在 backend/ 下，而仓库根还有旧的 app/ —— pythonpath 必须显式指向 backend，
-# 否则 `import app` 会解析到旧代码
+# 后端在 backend/app/ 下，仓库根没有 app/ 了 —— pythonpath 必须显式指向 backend，
+# 否则 `import app` 直接找不到（pytest 的 rootdir 是仓库根）
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]
 asyncio_mode = "auto"
