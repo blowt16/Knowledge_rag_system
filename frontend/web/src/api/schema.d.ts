@@ -409,6 +409,9 @@ export interface paths {
         /**
          * List Refusals
          * @description **明细**（含可标注的 `qa_logs.id`）—— 聚合看 `stats/refusals`。
+         *
+         *     `kind` 默认 `refused`（向后兼容）；`clarify` 列被反问的轮次，
+         *     `all` 两者都列、行上带 `kind`。
          */
         get: operations["list_refusals_api_admin_refusals_get"];
         put?: never;
@@ -939,6 +942,16 @@ export interface components {
             question: string;
             /** Refusal Reason */
             refusal_reason?: string | null;
+            /**
+             * Kind
+             * @default refused
+             */
+            kind: string;
+            /**
+             * Clarify Skipped
+             * @default false
+             */
+            clarify_skipped: boolean;
             /** Created At */
             created_at?: string | null;
             annotation?: components["schemas"]["AnnotationItem"] | null;
@@ -1810,6 +1823,7 @@ export interface operations {
     list_refusals_api_admin_refusals_get: {
         parameters: {
             query?: {
+                kind?: string;
                 page?: number;
                 page_size?: number;
             };

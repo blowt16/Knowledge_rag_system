@@ -398,6 +398,8 @@ async def _persist(session_id: str, query: str, final: dict, latency_ms: int,
             verify_report=(final.get("verify_report").model_dump()
                            if hasattr(final.get("verify_report"), "model_dump") else None),
             route_source=final.get("route_source", ""),
+            # 澄清到顶被跳过的那一轮 —— 否则与管理员的普通提问分不出来
+            clarify_skipped=bool(final.get("clarify_skipped")),
             degraded=bool(final.get("rerank_degraded")),
             latency_ms=latency_ms,
             node_timings=final.get("trace") or [],

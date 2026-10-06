@@ -192,3 +192,89 @@ async def test_student_cannot_read_refusals(client, refusal_log):
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM users WHERE id = $1", u["id"])
+
+
+# ============================================================
+# 澄清轮的管理端可见性（E2E-B1 的另一半）
+# ============================================================
+
+@pytest_asyncio.fixture
+async def clarify_log(admin):
+    """一条 `route='clarify'` 的轮次（学生被反问了，不是被拒答）。"""
+    log_id = uuid.uuid4().hex
+    question = f"被反问的问题_{uuid.uuid4().hex[:8]}"
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO qa_logs (id, session_id, user_id, user_role, question,
+                                    route, is_refused, clarify_skipped)
+               VALUES ($1, 's3', $2, 'student', $3, 'clarify', 0, FALSE)""",
+            log_id, admin["id"], question)
+    try:
+        yield {"id": log_id, "question": question}
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM refusal_annotations WHERE qa_log_id = $1", log_id)
+            await conn.execute("DELETE FROM qa_logs WHERE id = $1", log_id)
+
+
+async def test_default_kind_still_refused_only(client, admin, refusal_log, clarify_log):
+    """⚠️ 向后兼容：不带 `kind` 时**仍然只返回拒答**，澄清不混进来。"""
+    body = (await client.get("/api/admin/refusals", headers=_h(admin["token"]))).json()
+    ids = {i["id"] for i in body["items"]}
+
+    assert refusal_log["refused_id"] in ids
+    assert clarify_log["id"] not in ids, "默认口径被改动了 —— 老前端会把澄清当拒答"
+
+
+async def test_kind_clarify_returns_clarify_rounds(client, admin, refusal_log,
+                                                   clarify_log):
+    """★ 澄清轮要能单独看到 —— 否则「学生问了、系统却没答」的那一半是隐形的。"""
+    body = (await client.get("/api/admin/refusals?kind=clarify",
+                             headers=_h(admin["token"]))).json()
+    ids = {i["id"] for i in body["items"]}
+
+    assert clarify_log["id"] in ids
+    assert refusal_log["refused_id"] not in ids
+    mine = next(i for i in body["items"] if i["id"] == clarify_log["id"])
+    assert mine["kind"] == "clarify"
+    assert mine["question"] == clarify_log["question"]
+    assert mine["annotation"] is None
+
+
+async def test_kind_all_returns_both_with_kind_labels(client, admin, refusal_log,
+                                                      clarify_log):
+    body = (await client.get("/api/admin/refusals?kind=all",
+                             headers=_h(admin["token"]))).json()
+    by_id = {i["id"]: i for i in body["items"]}
+
+    assert by_id[refusal_log["refused_id"]]["kind"] == "refused"
+    assert by_id[clarify_log["id"]]["kind"] == "clarify"
+
+
+async def test_annotate_works_on_clarify_round(client, admin, clarify_log):
+    """★ 澄清轮也要能标注 —— 「这个问题其实想问 X，建议补文档」正是要记下来的。"""
+    r = await client.post(f"/api/admin/refusals/{clarify_log['id']}/annotate",
+                          json={"note": "被反问两次后仍未答成，建议补《食堂管理规定》"},
+                          headers=_h(admin["token"]))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["annotation"]["note"].startswith("被反问")
+
+
+async def test_clarify_skipped_is_persisted_and_readable(client, admin):
+    """★ 到顶被跳过的那一轮要落库 —— 否则看不出「哪些问题被反复反问后强行作答」。"""
+    log_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO qa_logs (id, session_id, user_id, user_role, question,
+                                    route, is_refused, clarify_skipped)
+               VALUES ($1, 's4', $2, 'student', '到顶被跳过的问题', 'knowledge', 0, TRUE)""",
+            log_id, admin["id"])
+    try:
+        async with db.tx() as conn:
+            flag = await conn.fetchval(
+                "SELECT clarify_skipped FROM qa_logs WHERE id = $1", log_id)
+        assert flag is True, "clarify_skipped 没落库"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM qa_logs WHERE id = $1", log_id)

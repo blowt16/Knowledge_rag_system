@@ -106,12 +106,17 @@ async def delete_document(document_id: str, user=AdminUser) -> dict:
 @router.get("/refusals", response_model=RefusalListResponse)
 async def list_refusals(
     user=AdminUser,
+    kind: str = Query("refused", pattern="^(refused|clarify|all)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> RefusalListResponse:
-    """**明细**（含可标注的 `qa_logs.id`）—— 聚合看 `stats/refusals`。"""
+    """**明细**（含可标注的 `qa_logs.id`）—— 聚合看 `stats/refusals`。
+
+    `kind` 默认 `refused`（向后兼容）；`clarify` 列被反问的轮次，
+    `all` 两者都列、行上带 `kind`。
+    """
     return RefusalListResponse(**await qa_logs.list_refusals(
-        page=page, page_size=page_size))
+        page=page, page_size=page_size, kind=kind))
 
 
 @router.post("/refusals/{log_id}/annotate", response_model=AnnotateResponse)

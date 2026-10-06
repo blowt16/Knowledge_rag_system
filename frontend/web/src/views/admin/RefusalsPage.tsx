@@ -18,6 +18,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
@@ -34,6 +35,9 @@ export default function RefusalsPage() {
   const [items, setItems] = useState<RefusalItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
+  // 「没答成」的两种形态：拒答（知识库没有）/ 澄清（系统没敢答）——
+  // 后者原先在管理端完全看不见（E2E-B1）
+  const [kind, setKind] = useState<'refused' | 'clarify'>('refused')
   const [trend, setTrend] = useState<TrendResponse | null>(null)
   const [editing, setEditing] = useState<RefusalItem | null>(null)
   const [error, setError] = useState('')
@@ -41,13 +45,13 @@ export default function RefusalsPage() {
 
   const load = useCallback(async () => {
     try {
-      const r = await listRefusals({ page, page_size: pageSize })
+      const r = await listRefusals({ page, page_size: pageSize, kind })
       setItems(r.items ?? [])
       setTotal(r.total)
     } catch (e) {
       setError((e as Error).message)
     }
-  }, [page])
+  }, [page, kind])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
@@ -83,12 +87,25 @@ export default function RefusalsPage() {
       </Card>
 
       <Card>
-        <CardHeader><CardTitle className="text-base">拒答明细（共 {total} 条）</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-base">
+            {kind === 'refused' ? '拒答明细' : '澄清明细'}（共 {total} 条）
+          </CardTitle>
+        </CardHeader>
         <CardContent>
+          <Tabs value={kind}
+                onValueChange={(v) => { setKind((v ?? 'refused') as typeof kind); setPage(1) }}
+                className="mb-3">
+            <TabsList>
+              <TabsTrigger value="refused">拒答</TabsTrigger>
+              <TabsTrigger value="clarify">澄清</TabsTrigger>
+            </TabsList>
+          </Tabs>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>问题</TableHead>
+                <TableHead className="w-24">类型</TableHead>
                 <TableHead className="w-32">原因</TableHead>
                 <TableHead className="w-40">时间</TableHead>
                 <TableHead className="w-64">标注</TableHead>
@@ -99,6 +116,12 @@ export default function RefusalsPage() {
               {items.map((r) => (
                 <TableRow key={r.id}>
                   <TableCell className="max-w-md">{r.question}</TableCell>
+                  <TableCell className="text-sm">
+                    {r.kind === 'clarify' ? '澄清' : '拒答'}
+                    {r.clarify_skipped && (
+                      <span className="ml-1 text-xs text-amber-700">（已跳过澄清）</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-sm">
                     {REASON_LABEL[r.refusal_reason ?? ''] ?? r.refusal_reason ?? '—'}
                   </TableCell>
@@ -120,8 +143,8 @@ export default function RefusalsPage() {
               ))}
               {items.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
-                    没有拒答记录
+                  <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
+                    没有记录
                   </TableCell>
                 </TableRow>
               )}

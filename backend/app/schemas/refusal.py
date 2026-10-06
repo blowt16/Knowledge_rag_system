@@ -25,6 +25,10 @@ class RefusalItem(BaseModel):
     id: str
     question: str
     refusal_reason: str | None = None
+    # 行类型：`refused`（拒答）/ `clarify`（被反问）—— 见 §9.9 E2E-B1
+    kind: str = "refused"
+    # 本轮是否因澄清轮次到顶而跳过反问
+    clarify_skipped: bool = False
     created_at: str | None = None
     annotation: AnnotationItem | None = None
 

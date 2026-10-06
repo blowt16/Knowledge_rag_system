@@ -117,7 +117,8 @@ export const resetPassword = (userId: string, password: string) =>
 
 // ---------------- 拒答分析（§4.3.1.3） ----------------
 
-export const listRefusals = (p: PageParams = {}) =>
+/** `kind` 默认 `refused`（向后兼容）；`clarify` 列**被反问**的轮次 —— */
+export const listRefusals = (p: PageParams & { kind?: 'refused' | 'clarify' | 'all' } = {}) =>
   request<RefusalListResponse>(`/admin/refusals${qs(p)}`)
 
 export const annotateRefusal = (
