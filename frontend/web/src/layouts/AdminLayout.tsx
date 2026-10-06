@@ -59,9 +59,12 @@ export default function AdminLayout() {
                     onClick={() => navigate('/chat')}>
               去问答
             </Button>
+            {/* ⚠️ 回登录页**必须先登出**：登录状态下直接访问 /login 会被登录路由
+                再送回 /admin（它看到你是管理员），点上去像没反应。
+                登出后落在 /login?next=/admin —— 再登录还回得来。 */}
             <Button variant="ghost" size="sm" className="flex-1"
                     onClick={() => void logout()}>
-              退出
+              退出登录
             </Button>
           </div>
         </div>
