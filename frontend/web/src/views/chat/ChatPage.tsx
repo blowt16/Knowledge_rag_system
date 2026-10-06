@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { streamSse } from '../../api/sse'
 import { getAccessToken } from '../../api/client'
@@ -300,6 +301,11 @@ export default function ChatPage() {
                      onChange={(e) => setEscalate(e.target.checked)} />
               提权检索
             </label>
+          )}
+          {user?.role === 'admin' && (
+            // 管理端的「去问答」是单向的 —— 这里补上反向入口，
+            // 否则管理员进管理端之后就只能靠手敲地址回来
+            <Link className="link" to="/admin">管理后台</Link>
           )}
           <button
             className="link"

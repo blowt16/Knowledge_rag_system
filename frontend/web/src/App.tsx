@@ -25,13 +25,25 @@ function RequireAuth({ children, roles }: { children: React.ReactNode; roles?: s
   //    弹走（实测：先跳 /login，登录页又按已登录跳到 /chat）。
   if (!bootstrapped) return <Loading />
 
-  if (!user) return <Navigate to="/login" state={{ from: location }} replace />
+  // ⚠️ 用**查询串**记目的地，不用 router state：state 存在 history 条目上，
+  //    实测经过一次 replace 跳转后就丢了（点「管理端入口」再登录会落回 /chat）。
+  //    查询串是幂等的，刷新、重定向都不丢。
+  if (!user) {
+    return <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />
+  }
   if (roles && !roles.includes(user.role)) return <Navigate to="/chat" replace />
   return <>{children}</>
 }
 
+/** 从哪里来回哪里去：`?next=` 只认站内以 /admin 开头的路径（防开放重定向）。 */
+function nextPath(search: string): string | null {
+  const next = new URLSearchParams(search).get('next')
+  return next && next.startsWith('/admin') ? next : null
+}
+
 export default function App() {
   const { user, bootstrap } = useAuth()
+  const location = useLocation()
 
   useEffect(() => {
     void bootstrap()
@@ -40,7 +52,13 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/chat" replace /> : <LoginPage />} />
+      {/* 登录后去哪：① `?next=` 指定的地方（管理员入口用）② 管理员默认进管理端
+          ③ 其余回问答页。**管理员别再手敲 /admin 了** —— 那正是这个改动的目的。 */}
+      <Route path="/login"
+             element={user
+               ? <Navigate to={nextPath(location.search)
+                              ?? (user.role === 'admin' ? '/admin' : '/chat')} replace />
+               : <LoginPage />} />
       <Route
         path="/chat/*"
         element={

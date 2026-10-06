@@ -1,19 +1,18 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../../stores/auth'
 
 export default function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const { login, loading, error, clearError } = useAuth()
-  const navigate = useNavigate()
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     await login(username, password)
-    // 登录成功由 App 的路由守卫跳转，这里不直接 navigate，
-    // 避免在失败时也跳走
-    if (useAuth.getState().user) navigate('/chat', { replace: true })
+    // ⚠️ 登录成功**不在这里跳转** —— 交给 `App.tsx` 的登录路由：
+    //    它会优先回「你原本想去的地方」（管理端入口靠这个），
+    //    否则回 /chat。这里跳的话会把那个目的地盖掉。
   }
 
   return (
@@ -55,6 +54,13 @@ export default function LoginPage() {
           {loading ? '登录中…' : '登录'}
         </button>
       </form>
+
+      {/* 管理员入口。
+          ⚠️ 点它时若未登录，守卫会把你弹回这里 —— 所以 `App.tsx` 的登录路由
+             会记住「你原本想去哪」，登录后直接送到 /admin（否则看着像没反应）。 */}
+      <p className="login-alt">
+        <Link to="/admin">进入管理后台 →</Link>
+      </p>
     </div>
   )
 }

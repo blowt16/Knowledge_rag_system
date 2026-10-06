@@ -139,6 +139,10 @@ input { font: inherit; }
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   color: var(--muted); margin-left: 8px;
 }
+/* 登录页底部的管理端入口 */
+.login-alt { margin: 4px 0 0; text-align: center; font-size: 13px; }
+.login-alt a { color: var(--brand); text-decoration: none; }
+.login-alt a:hover { text-decoration: underline; }
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: 'Geist Variable', sans-serif;
