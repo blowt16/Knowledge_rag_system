@@ -35,7 +35,7 @@ from pathlib import Path
 
 import jieba
 
-from app.core.config import repo_path
+from app.core.config import data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class Bm25Hit:
 
 
 def _index_dir() -> Path:
-    path = repo_path("data", "bm25s")
+    path = data_dir() / "bm25s"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

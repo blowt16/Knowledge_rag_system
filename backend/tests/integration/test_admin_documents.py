@@ -481,10 +481,10 @@ def test_upload_filename_cannot_escape_tmp_dir():
 
     只有 admin 能调，但「任意文件写」不该因为调用者可信就留着。
     """
-    from app.core.config import repo_path
+    from app.core.config import data_dir
     from app.services import document_service
 
-    tmp_root = Path(repo_path("data", "tmp")).resolve()
+    tmp_root = (data_dir() / "tmp").resolve()
     evil = r"task123_..\..\..\..\evil.txt"
     for name in (evil, "../../evil.txt", r"..\..\evil.txt", "/etc/passwd",
                  r"C:\Windows\evil.txt"):

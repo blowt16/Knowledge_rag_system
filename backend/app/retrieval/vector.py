@@ -21,7 +21,7 @@ from typing import Any
 
 import chromadb
 
-from app.core.config import cfg, repo_path
+from app.core.config import cfg, data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ _client: chromadb.ClientAPI | None = None
 
 
 def _persist_dir() -> Path:
-    path = repo_path("data", "chromadb")
+    path = data_dir() / "chromadb"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

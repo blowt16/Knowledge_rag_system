@@ -49,7 +49,7 @@ from pathlib import Path
 import asyncpg
 
 from app import db
-from app.core.config import cfg, repo_path
+from app.core.config import cfg, data_dir
 from app.ingestion import versioning
 from app.ingestion.chunker import ChunkSpan, chunk_text, make_chunk_id
 from app.ingestion.clean import build_normalized_text
@@ -108,7 +108,7 @@ async def _set_task(conn: asyncpg.Connection, task_id: str, *, status: str | Non
 
 
 def _data_path(*parts: str) -> Path:
-    path = repo_path("data", *parts)
+    path = data_dir().joinpath(*parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

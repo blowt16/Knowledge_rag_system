@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from app import db
-from app.core.config import repo_path
+from app.core.config import data_dir
 from app.core.deps import UserContext
 from app.ingestion.pipeline import IngestRequest, ingest
 from app.retrieval import bm25, vector
@@ -71,7 +71,7 @@ async def ingest_text_doc(
     「过滤/排序失效」才会表现为「本该第一的没出现」，
     而不是「反正也排不进 Top-K」的假通过。入库也快得多。
     """
-    path = Path(repo_path("data", "tmp")) / f"{uuid.uuid4().hex}.txt"
+    path = data_dir() / "tmp" / f"{uuid.uuid4().hex}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 

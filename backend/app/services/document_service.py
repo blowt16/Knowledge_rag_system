@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from app import db
-from app.core.config import repo_path
+from app.core.config import data_dir
 from app.core.exceptions import AppError, NotFound
 from app.core.telemetry import reattach
 from app.ingestion.pipeline import IngestRequest, ingest
@@ -54,7 +54,7 @@ def _tmp_path(task_id: str, filename: str) -> Path:
     只取最后一段、去掉前导点、两个方向的分隔符都当分隔符处理
        （反斜杠在 POSIX 上不是分隔符，但不能因此把它当普通字符放行）。
     """
-    tmp_dir = repo_path("data", "tmp")
+    tmp_dir = data_dir() / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     base = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()

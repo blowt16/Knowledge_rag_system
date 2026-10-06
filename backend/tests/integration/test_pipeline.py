@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from app import db
-from app.core.config import repo_path
+from app.core.config import data_dir, repo_path
 from app.ingestion.pipeline import IngestRequest, ingest
 from app.retrieval import bm25, vector
 from tests.support import purge_documents
@@ -63,7 +63,7 @@ def _unique_copy(tag: str) -> Path:
        若各用例共用同一份样本，第一个用例入库后，其余用例全会拿到 `duplicate`，
        表现为「测试莫名失败」，且**与运行顺序、以及库里是否已有该 MD5 有关**。
     """
-    out = Path(repo_path("data", "tmp")) / f"{tag}_{uuid.uuid4().hex}.pdf"
+    out = data_dir() / "tmp" / f"{tag}_{uuid.uuid4().hex}.pdf"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(SAMPLE.read_bytes() + f"\n%{uuid.uuid4().hex}".encode())
     return out
@@ -160,7 +160,7 @@ async def test_new_version_increments_and_old_stays_active(admin_id, cleanup_doc
     assert out1.status == "done"
 
     # 改一个字节，绕过 MD5 判重
-    tampered = Path(repo_path("data", "tmp")) / f"{uuid.uuid4().hex}.pdf"
+    tampered = data_dir() / "tmp" / f"{uuid.uuid4().hex}.pdf"
     tampered.parent.mkdir(parents=True, exist_ok=True)
     tampered.write_bytes(SAMPLE.read_bytes() + b"\n%tamper")
 
@@ -282,7 +282,7 @@ async def test_cleanup_leaves_both_indexes_unchanged(admin_id, cleanup_docs):
 
 async def test_bad_format_rejected_before_any_row(admin_id):
     """格式不符应在建行**之前**就被拦下（不给库里留垃圾行）。"""
-    bogus = Path(repo_path("data", "tmp")) / f"{uuid.uuid4().hex}.pdf"
+    bogus = data_dir() / "tmp" / f"{uuid.uuid4().hex}.pdf"
     bogus.parent.mkdir(parents=True, exist_ok=True)
     bogus.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 100)   # 其实是 PNG
 

@@ -103,7 +103,17 @@ def repo_path(*parts: str) -> Path:
 
 
 def data_dir() -> Path:
-    return repo_path("data")
+    """数据根目录（Chroma / BM25S / 上传件 / 规范化文本 / 抽图）。
+
+    ⚠️ `RAG_DATA_DIR` 可覆盖 —— **给测试用**：测试会往数据目录写文件，而清理只
+       删 PG 行与两处索引、**不删文件**，指向真实目录就会把孤儿堆进正在使用的
+       数据里（M5 实测：两天堆出约 9300 项 / 124MB）。见 `tests/conftest.py`。
+
+    ⚠️ 只覆盖 `data/`，**不覆盖 `models/` 与 `logs/`** —— 它们走 `repo_path()`
+       的其他分支，测试时必须仍指向真实位置（reranker 权重有 2.2GB）。
+    """
+    override = env("RAG_DATA_DIR")
+    return Path(override) if override else repo_path("data")
 
 
 def pg_dsn() -> str:
