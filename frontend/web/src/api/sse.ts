@@ -25,7 +25,12 @@ export interface SseHandlers {
 
 export interface SseOptions {
   url: string
-  body: unknown
+  /**
+   * POST 的 JSON 体。**省略时改用 GET** —— 上传进度流就是 GET
+   * （`GET /api/admin/documents/upload/{task_id}/stream`，§3.7.2 侧的上传规格）。
+   * 用本函数而不是原生 `EventSource`，正是为了带上 `Authorization` 头。
+   */
+  body?: unknown
   token: string | null
   handlers: SseHandlers
   /** 外部中断信号（组件卸载 / 用户点「停止」） */
@@ -45,16 +50,18 @@ export function streamSse({ url, body, token, handlers, signal }: SseOptions): (
     else signal.addEventListener('abort', () => controller.abort(), { once: true })
   }
 
+  const hasBody = body !== undefined
+
   void (async () => {
     try {
       const resp = await fetch(url, {
-        method: 'POST',
+        method: hasBody ? 'POST' : 'GET',
         headers: {
-          'Content-Type': 'application/json',
           Accept: 'text/event-stream',
+          ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify(body),
+        ...(hasBody ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal,
       })
 

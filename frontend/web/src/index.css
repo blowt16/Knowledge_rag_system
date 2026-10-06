@@ -1,6 +1,21 @@
+/* ⚠️ Tailwind v4（M4-D1）：只给**管理端**用。
+   下面这套手写 CSS 是登录页/聊天页的既有样式，两者并存。
+   ⚠️ preflight 是**全局重置**，会波及登录页/聊天页 ——
+      接入后必须用 bsk 在真实浏览器里回归这两页，确认没跑版。 */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
 :root {
-  --bg: #f6f7f9; --card: #fff; --line: #e3e6ea;
-  --fg: #1f2328; --muted: #6b7280; --brand: #2563eb; --danger: #b42318;
+  --bg: #f6f7f9; --card: oklch(1 0 0); --line: #e3e6ea;
+  --fg: #1f2328;
+  /* ⚠️ 这两个是**本应用**的变量，故意加 app- 前缀避开 shadcn 的同名 token：
+     shadcn 的 --muted 是浅灰**背景色**，我们的 --muted 是灰色**文字色** ——
+     同名会被 shadcn 的初始化覆盖成近白色，页面上灰字直接看不见。 */
+  --app-card: #fff; --app-muted: #6b7280; --brand: #2563eb; --danger: #b42318; --background: oklch(1 0 0); --foreground: oklch(0.145 0 0); --card-foreground: oklch(0.145 0 0); --popover: oklch(1 0 0); --popover-foreground: oklch(0.145 0 0); --primary: oklch(0.205 0 0); --primary-foreground: oklch(0.985 0 0); --secondary: oklch(0.97 0 0); --secondary-foreground: oklch(0.205 0 0); --muted-foreground: oklch(0.556 0 0); --accent: oklch(0.97 0 0); --accent-foreground: oklch(0.205 0 0); --destructive: oklch(0.577 0.245 27.325); --border: oklch(0.922 0 0); --input: oklch(0.922 0 0); --ring: oklch(0.708 0 0); --chart-1: oklch(0.87 0 0); --chart-2: oklch(0.556 0 0); --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0); --chart-5: oklch(0.269 0 0); --radius: 0.625rem; --sidebar: oklch(0.985 0 0); --sidebar-foreground: oklch(0.145 0 0); --sidebar-primary: oklch(0.205 0 0); --sidebar-primary-foreground: oklch(0.985 0 0); --sidebar-accent: oklch(0.97 0 0); --sidebar-accent-foreground: oklch(0.205 0 0); --sidebar-border: oklch(0.922 0 0); --sidebar-ring: oklch(0.708 0 0);
 }
 * { box-sizing: border-box; }
 body {
@@ -9,13 +24,13 @@ body {
 }
 button { font: inherit; cursor: pointer; }
 input { font: inherit; }
-.muted { color: var(--muted); }
+.muted { color: var(--app-muted); }
 .small { font-size: 12px; }
 .center { text-align: center; }
 .error { color: var(--danger); font-size: 13px; }
 
 .center-page { min-height: 100vh; display: grid; place-items: center; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+.card { background: var(--app-card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
 .login-card { width: 360px; display: flex; flex-direction: column; gap: 14px; }
 .login-card h1 { font-size: 18px; margin: 0; }
 .login-card label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
@@ -26,7 +41,7 @@ input { font: inherit; }
 .chat-layout { display: flex; flex-direction: column; height: 100vh; }
 .chat-header {
   display: flex; align-items: center; gap: 14px;
-  padding: 12px 18px; background: var(--card); border-bottom: 1px solid var(--line);
+  padding: 12px 18px; background: var(--app-card); border-bottom: 1px solid var(--line);
 }
 .chat-header .link { margin-left: auto; background: none; border: 0; color: var(--brand); }
 .chat-header .link + .link { margin-left: 0; }
@@ -34,7 +49,7 @@ input { font: inherit; }
 .turn { margin-bottom: 22px; }
 .bubble { padding: 11px 15px; border-radius: 12px; margin-bottom: 8px; }
 .bubble.user { background: #e8efff; margin-left: auto; max-width: 76%; width: fit-content; }
-.bubble.assistant { background: var(--card); border: 1px solid var(--line); }
+.bubble.assistant { background: var(--app-card); border: 1px solid var(--line); }
 /* 答案走 Markdown 渲染 —— 不能再 pre-wrap（换行由块级元素表达，pre-wrap 会翻倍） */
 .answer { word-break: break-word; }
 .answer > :first-child { margin-top: 0; }
@@ -69,7 +84,7 @@ input { font: inherit; }
 /* 原文抽屉（§4.2.2.1）—— 抽屉展开后对话区仍可见可滚动 */
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 62vw);
-  background: var(--card); border-left: 1px solid var(--line);
+  background: var(--app-card); border-left: 1px solid var(--line);
   display: flex; flex-direction: column; z-index: 20;
   box-shadow: -6px 0 24px rgba(0, 0, 0, .08);
 }
@@ -84,11 +99,11 @@ input { font: inherit; }
 .drawer-body { flex: 1; min-height: 0; position: relative; }
 .drawer-error { padding: 10px 16px; color: var(--danger); font-size: 13px; }
 .locate-note {
-  padding: 6px 16px; font-size: 12px; color: var(--muted);
+  padding: 6px 16px; font-size: 12px; color: var(--app-muted);
   background: #f9fafb; border-bottom: 1px solid var(--line);
 }
 .locate-note.level-L4 { color: #92400e; background: #fffbeb; }
-.resolved { font-size: 13px; color: var(--muted); margin: 4px 0 8px; }
+.resolved { font-size: 13px; color: var(--app-muted); margin: 4px 0 8px; }
 .refused { background: #fff7ed; border-left: 3px solid #f59e0b; padding: 9px 12px; border-radius: 6px; }
 .facets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .facet { border: 1px solid var(--brand); color: var(--brand); background: #fff; border-radius: 999px; padding: 5px 13px; font-size: 13px; }
@@ -96,7 +111,96 @@ input { font: inherit; }
 .citation-group { margin-top: 6px; }
 .escalated { color: var(--danger); font-size: 12px; margin-left: 6px; }
 .verify { margin-top: 8px; font-size: 13px; color: #92400e; background: #fffbeb; padding: 7px 11px; border-radius: 6px; }
-.chat-input { display: flex; gap: 10px; padding: 14px 18px; background: var(--card); border-top: 1px solid var(--line); }
+.chat-input { display: flex; gap: 10px; padding: 14px 18px; background: var(--app-card); border-top: 1px solid var(--line); }
 .chat-input input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; }
 .chat-input button { padding: 0 22px; border: 0; border-radius: 10px; background: var(--brand); color: #fff; }
 .chat-input button:disabled { opacity: .5; cursor: not-allowed; }
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Geist Variable', sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

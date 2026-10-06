@@ -6,6 +6,16 @@ import type { UserInfo } from '../api/types'
 interface AuthState {
   user: UserInfo | null
   loading: boolean
+  /**
+   * `bootstrap()` 是否已经跑完（无论成败）。
+   *
+   * ⚠️ 路由守卫必须用它、**不能**用 `loading` 来判断「还没问出来」：
+   *    `bootstrap` 是在 `useEffect` 里调的，也就是**首帧之后**才跑 ——
+   *    首帧时 `loading` 还是初始的 false，守卫会立刻判「未登录」并跳走。
+   *    实测：直接刷新 `/admin` 会被弹回 `/chat`（先出 /login 再被登录页
+   *    重定向到 /chat），刷新等于丢掉当前页。
+   */
+  bootstrapped: boolean
   error: string | null
   login: (username: string, password: string) => Promise<void>
   logout: () => Promise<void>
@@ -16,6 +26,7 @@ interface AuthState {
 export const useAuth = create<AuthState>((set) => ({
   user: null,
   loading: false,
+  bootstrapped: false,
   error: null,
 
   async login(username, password) {
@@ -41,6 +52,8 @@ export const useAuth = create<AuthState>((set) => ({
       set({ user: await me() })
     } catch {
       set({ user: null })
+    } finally {
+      set({ bootstrapped: true })
     }
   },
 
