@@ -204,6 +204,89 @@ def image_coverage(page: "fitz.Page") -> float:
     return min(covered / page_area, 1.0)
 
 
+# ---- 子集字体把汉字映射成 ASCII（§E.8.1，页级）-----------------------
+#
+# 现场：老式中文字体把汉字编码到 ASCII 码位，**抽出来是标点汤** ——
+# 它既不是 PUA 也不是 U+FFFD，`garbled_ratio` 一点都抓不到，
+# 于是以「看着正常」的正文进入索引（检索与生成的输入全被污染）。
+#
+# 判据（照搬 RAGFlow `pdf_parser.py:317-366`）：子集占比 ≥0.3 **且**
+# CJK <0.05 **且** ASCII 标点 >0.4 —— 三条**同时**成立才算。
+# 单看「子集占比」会大面积误判：现代 PDF 默认就嵌子集字体，
+# 正常中文公文同样满足，真正区分开的是后两条。
+_SUBSET_PREFIX_LEN = 6
+
+
+def _subset_font_names(page: "fitz.Page") -> set[str]:
+    """该页的子集字体名（去掉 `XXXXXX+` 前缀，与 span['font'] 的写法对齐）。
+
+    ⚠️ 前缀只出现在 `get_fonts()` 的 basefont 上；`get_text("rawdict")` 的
+       `span['font']` **不带前缀**（实测 `DJHPWB+SimHei Regular` vs
+       `SimHei Regular`）—— 不去前缀就一条都对不上，判据永远为假。
+    """
+    names: set[str] = set()
+    try:
+        fonts = page.get_fonts(full=True)
+    except Exception:  # noqa: BLE001
+        return names
+    for font in fonts:
+        base = (font[3] or "") if len(font) > 3 else ""
+        head, sep, tail = base.partition("+")
+        if sep and len(head) == _SUBSET_PREFIX_LEN and tail:
+            names.add(tail)
+    return names
+
+
+def _subset_font_ratio(page: "fitz.Page", subset: set[str]) -> float:
+    """用子集字体排出来的字符占比（按字符数加权，不是按 span 数）。"""
+    total = hit = 0
+    try:
+        raw = page.get_text("rawdict")
+    except Exception:  # noqa: BLE001
+        return 0.0
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:      # 只数文字块
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                n = len(span.get("chars", []))
+                total += n
+                if span.get("font") in subset:
+                    hit += n
+    return hit / total if total else 0.0
+
+
+def _cjk_ratio(chars: list[str]) -> float:
+    cjk = sum(1 for c in chars if "一" <= c <= "鿿" or "㐀" <= c <= "䶿")
+    return cjk / len(chars) if chars else 0.0
+
+
+def _ascii_punct_ratio(chars: list[str]) -> float:
+    punct = sum(1 for c in chars if c.isascii() and not c.isalnum())
+    return punct / len(chars) if chars else 0.0
+
+
+def subset_font_suspect(page: "fitz.Page", text: str) -> bool:
+    """页级：这一页的文字层是不是「子集字体把汉字映射成 ASCII」（§E.8.1）。"""
+    chars = [c for c in text if not c.isspace()]
+    if not chars:
+        return False
+
+    # ⚠️ 先算便宜的两条、不满足就直接返回：`get_text("rawdict")` 比
+    #    `get_text()` 贵得多，而正常中文公文（CJK 占比高）**根本到不了**
+    #    字体分析那一步。这是纯性能短路，不改判据语义 —— 三条是「与」。
+    if _cjk_ratio(chars) >= float(cfg("ingestion.quality_gate.subset_cjk_ratio", 0.05)):
+        return False
+    if _ascii_punct_ratio(chars) <= float(cfg("ingestion.quality_gate.subset_ascii_punct_ratio", 0.4)):
+        return False
+
+    subset = _subset_font_names(page)
+    if not subset:
+        return False
+    return _subset_font_ratio(page, subset) >= float(
+        cfg("ingestion.quality_gate.subset_font_ratio", 0.3))
+
+
 def _page_is_usable(page: "fitz.Page", text: str) -> bool:
     """**页级**判据：这页的文字层可不可信（§E.8.1）。
 
@@ -229,6 +312,10 @@ def _page_is_usable(page: "fitz.Page", text: str) -> bool:
     # 页级乱码率：≥30% → 该页走 OCR
     garbled_threshold = float(cfg("ingestion.quality_gate.page_garbled_ratio", 0.3))
     if garbled_ratio(stripped) >= garbled_threshold:
+        return False
+
+    # 子集字体把汉字映射成 ASCII（页级，§E.8.1）
+    if subset_font_suspect(page, stripped):
         return False
 
     # 页级图片覆盖率：≥0.8 → 该页判为扫描页
