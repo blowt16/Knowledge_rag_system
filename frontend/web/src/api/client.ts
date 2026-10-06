@@ -145,6 +145,8 @@ export async function logout(): Promise<void> {
   }
 }
 
-export async function me(): Promise<UserInfo> {
-  return request<UserInfo>('/auth/me')
+export async function me(signal?: AbortSignal): Promise<UserInfo> {
+  // `signal` 只给**引导态**用（见 stores/auth.ts 的 bootstrap）：
+  // 启动时问一次「我是谁」，网络半死（连接建立了但不回包）时必须能放弃。
+  return request<UserInfo>('/auth/me', signal ? { signal } : {})
 }

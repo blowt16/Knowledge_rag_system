@@ -401,33 +401,63 @@ async def update_document(document_id: str, *, title: str | None = None,
         "status": new_status != row["status"],
     }
 
-    if any(changed[f] for f in REINDEX_FIELDS):
-        # 先重写向量库：这三个字段冗余在 Chroma 里，检索期的过滤读的是它
-        index_service.rewrite_metadata(
-            document_id,
-            status=new_status,
-            visibility=new_visibility,
-            visible_roles=new_roles,
-            effective_date=new_effective.isoformat(),
-        )
+    async def _write_pg() -> dict:
+        async with db.tx() as conn:
+            # ⚠️ `visible_roles` 传 **list** 而不是 json.dumps 后的字符串：
+            #    连接池给 jsonb 注册了编解码器（db.py），再传字符串会被**二次编码**
+            #    成一个 JSON 字符串标量 —— 读回来就不是 list 了。
+            await conn.execute(
+                """UPDATE documents
+                      SET title = $2, visibility = $3, visible_roles = $4::jsonb,
+                          effective_date = $5, status = $6, updated_at = now()
+                    WHERE id = $1""",
+                document_id, title if title is not None else row["title"],
+                new_visibility, new_roles, new_effective, new_status,
+            )
+            return await conn.fetchrow(
+                f"""SELECT d.*, ({_CURRENT_VERSION_SQL}) AS is_current
+                      FROM documents d WHERE d.id = $1""",
+                document_id)
 
-    async with db.tx() as conn:
-        # ⚠️ `visible_roles` 传 **list** 而不是 json.dumps 后的字符串：
-        #    连接池给 jsonb 注册了编解码器（db.py），再传字符串会被**二次编码**
-        #    成一个 JSON 字符串标量 —— 读回来就不是 list 了。
-        await conn.execute(
-            """UPDATE documents
-                  SET title = $2, visibility = $3, visible_roles = $4::jsonb,
-                      effective_date = $5, status = $6, updated_at = now()
-                WHERE id = $1""",
-            document_id, title if title is not None else row["title"],
-            new_visibility, new_roles, new_effective, new_status,
-        )
-        updated = await conn.fetchrow(
-            f"""SELECT d.*, ({_CURRENT_VERSION_SQL}) AS is_current
-                  FROM documents d WHERE d.id = $1""",
-            document_id)
+    if not any(changed[f] for f in REINDEX_FIELDS):
+        return _doc_item(await _write_pg())
+
+    index_args = dict(status=new_status, visibility=new_visibility,
+                      visible_roles=new_roles,
+                      effective_date=new_effective.isoformat())
+
+    # ⚠️ **先写哪一侧取决于方向**（评审 M4-K3）。两处存储做不到原子，所以顺序
+    #    不是随意的：先写「让检索更保守」的那一侧，失败时最坏也停在偏严的一边。
+    #
+    #    原实现一律「先 Chroma 后 PG」，注释声称「最坏情况是偏严」—— 只在
+    #    **收紧**方向成立。放宽（受限→公开）时先写 Chroma：Chroma 已经公开、
+    #    PG 写失败 → 检索对所有人放开，而管理端读 PG 还显示「受限」，
+    #    **管理员被自己看到的界面骗了**。
+    if _tightens(row, new_visibility, new_roles, new_effective, new_status):
+        index_service.rewrite_metadata(document_id, **index_args)
+        return _doc_item(await _write_pg())
+
+    updated = await _write_pg()
+    index_service.rewrite_metadata(document_id, **index_args)
     return _doc_item(updated)
+
+
+def _tightens(row, visibility: str, roles: list[str], effective, status: str) -> bool:
+    """这次改动是**收紧**还是**放宽** —— 决定先写 PG 还是先写 Chroma（评审 M4-K3）。
+
+    取「更少人能看见」为收紧：公开→受限、启用→停用、角色变少、生效日推后。
+    混合改动（既收紧又放宽）按第一处命中的判；判不出来时保守地当作收紧。
+    """
+    old_roles, new_roles = set(row["visible_roles"] or []), set(roles)
+    if visibility != row["visibility"]:
+        return visibility == "restricted"
+    if status != row["status"]:
+        return status != "active"
+    if effective != row["effective_date"]:
+        return effective > row["effective_date"]
+    if new_roles != old_roles:
+        return new_roles < old_roles
+    return True
 
 
 async def set_document_status(document_id: str, status: str) -> dict:

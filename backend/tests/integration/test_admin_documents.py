@@ -67,6 +67,19 @@ async def client():
         yield c
 
 
+@pytest_asyncio.fixture
+async def raw_client():
+    """**注入故障的用例专用**。
+
+    ⚠️ httpx 的 `ASGITransport` 默认 `raise_app_exceptions=True`：
+        Starlette 处理完异常、发出 500 之后会把它**再抛一次**给调用方 ——
+        于是用例拿到的是 RuntimeError 而不是响应，状态码根本测不到。
+    """
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
 async def _create_user(role: str) -> dict:
     user_id = uuid.uuid4().hex
     username = f"t_{user_id[:8]}"
@@ -494,8 +507,8 @@ def test_upload_filename_keeps_readable_suffix():
 # 评审 M4-K6：删除失败要停在**看得见**的中间态
 # ============================================================
 
-async def test_delete_leaves_disabled_state_when_index_cleanup_fails(client, admin, doc,
-                                                                     monkeypatch):
+async def test_delete_leaves_disabled_state_when_index_cleanup_fails(
+        raw_client, admin, doc, monkeypatch):
     """★ 删索引失败时，PG 行不能停在 `active`。
 
     原实现是「先删索引 → 再删 PG 行」：索引删完、PG 那次 DELETE 若失败，
@@ -512,12 +525,7 @@ async def test_delete_leaves_disabled_state_when_index_cleanup_fails(client, adm
 
     monkeypatch.setattr(document_service.index_service, "remove_from_index", boom)
 
-    # ⚠️ 这里要的是**响应**而不是异常：httpx 的 ASGITransport 默认
-    #    `raise_app_exceptions=True`，会把 Starlette 处理完 500 之后
-    #    重新抛出的异常再抛给调用方 —— 那样就测不到状态码了。
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as raw:
-        r = await raw.delete(f"/api/admin/documents/{doc['id']}", headers=_h(admin))
+    r = await raw_client.delete(f"/api/admin/documents/{doc['id']}", headers=_h(admin))
 
     assert r.status_code >= 400, "删除失败必须报出来，不能假装成功"
     async with db.tx() as conn:
@@ -535,3 +543,61 @@ async def test_delete_leaves_disabled_state_when_index_cleanup_fails(client, adm
     async with db.tx() as conn:
         still = await conn.fetchval("SELECT 1 FROM documents WHERE id = $1", doc["id"])
     assert still, "重试路径必须成立：行还在，再删一次就能走完"
+
+
+# ============================================================
+# 评审 M4-K3：先写哪一侧，取决于这次改动是收紧还是放宽
+# ============================================================
+
+async def test_reindex_write_order_follows_direction(raw_client, admin, doc,
+                                                     monkeypatch):
+    """★ 原实现的注释声称「先 Chroma 后 PG，最坏情况是偏严」——
+    那只在**收紧**方向成立。
+
+    **放宽**（受限 → 公开）时先写 Chroma：Chroma 已经公开、PG 写失败 →
+    检索对所有人放开，而管理端读 PG 还显示「受限」—— 管理员被自己看到的界面骗了。
+
+    判据：让 Chroma 那次重写失败，看 **PG 有没有被写**，就能反推顺序。
+    """
+    from app.services import document_service
+
+    def boom(*_a, **_k):
+        raise RuntimeError("模拟向量库写入失败")
+
+    # ---------- ① 收紧方向：public → restricted ----------
+    monkeypatch.setattr(document_service.index_service, "rewrite_metadata", boom)
+    r = await raw_client.patch(f"/api/admin/documents/{doc['id']}",
+                               json={"visibility": "restricted",
+                                     "visible_roles": ["admin"]},
+                               headers=_h(admin))
+    assert r.status_code >= 400, "Chroma 写失败必须报出来"
+    async with db.tx() as conn:
+        row = await conn.fetchrow("SELECT visibility FROM documents WHERE id = $1",
+                                  doc["id"])
+    assert row["visibility"] == "public", (
+        "收紧方向必须先写 Chroma：Chroma 一失败就不该再动 PG"
+    )
+
+    # ---------- ② 放宽方向：restricted → public ----------
+    # 先走**真实路径**把它改成受限（这一步不 patch）
+    monkeypatch.undo()
+    r = await raw_client.patch(f"/api/admin/documents/{doc['id']}",
+                               json={"visibility": "restricted",
+                                     "visible_roles": ["admin"]},
+                               headers=_h(admin))
+    assert r.status_code == 200, r.text
+    assert not await _student_retrieves(doc["id"], doc["marker"]), "前置：已收紧"
+
+    # 再让 Chroma 那次重写失败，改回公开
+    monkeypatch.setattr(document_service.index_service, "rewrite_metadata", boom)
+    r = await raw_client.patch(f"/api/admin/documents/{doc['id']}",
+                               json={"visibility": "public", "visible_roles": []},
+                               headers=_h(admin))
+    assert r.status_code >= 400, "Chroma 写失败必须报出来"
+    async with db.tx() as conn:
+        row = await conn.fetchrow("SELECT visibility FROM documents WHERE id = $1",
+                                  doc["id"])
+    assert row["visibility"] == "public", (
+        "放宽方向必须先写 PG：这样 Chroma 失败时最坏是「还收紧着」，"
+        "而不是「界面说受限、学生搜得到」"
+    )

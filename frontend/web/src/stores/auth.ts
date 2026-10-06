@@ -23,6 +23,14 @@ interface AuthState {
   clearError: () => void
 }
 
+/**
+ * 引导态（问 `/auth/me`「我是谁」）的超时上限。
+ *
+ * 取 8 秒：正常局域网内这个请求是毫秒级；超过 8 秒基本可以判死，
+ * 而用户还能接受「等 8 秒后落到登录页」这种程度的等待。
+ */
+const BOOTSTRAP_TIMEOUT_MS = 8000
+
 export const useAuth = create<AuthState>((set) => ({
   user: null,
   loading: false,
@@ -49,7 +57,11 @@ export const useAuth = create<AuthState>((set) => ({
     loadTokens()
     setUnauthorizedHandler(() => set({ user: null }))
     try {
-      set({ user: await me() })
+      // ⚠️ **必须带超时**（评审 M4-K5）：`/api/auth/me` 若既不返回也不断开
+      //    （代理接了连接不回包、连接半死），`bootstrapped` 会永远为 false ——
+      //    路由守卫于是永远停在「加载中…」，没有任何重试入口。
+      //    超时就按未登录处理：跳登录页，用户重新登录即可。
+      set({ user: await me(AbortSignal.timeout(BOOTSTRAP_TIMEOUT_MS)) })
     } catch {
       set({ user: null })
     } finally {
