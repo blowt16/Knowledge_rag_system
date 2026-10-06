@@ -75,6 +75,9 @@ class RAGState(TypedDict, total=False):
     session_id: str
     user: UserContextLite
     include_restricted: bool
+    # 消融实验的开关（§5.3 / M5-3）。**线上恒为空 dict** —— 空就是默认行为，
+    # 节点只在看到显式开关时才改变行为（见 `retrieval.eval_config` 的取值校验）。
+    eval_config: dict
 
     # ---- 查询理解 ----
     history: list[Message]

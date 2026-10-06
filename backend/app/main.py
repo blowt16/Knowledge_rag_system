@@ -30,6 +30,7 @@ from app.api import chat as chat_api
 from app.api import conversations as conversations_api
 from app.api import document_access as document_access_api
 from app.api import documents as documents_api
+from app.api import eval as eval_api
 from app.api import stats as stats_api
 from app.api import users as users_api
 from app.core import metrics
@@ -146,3 +147,5 @@ app.include_router(document_access_api.router)
 app.include_router(admin_api.router)
 app.include_router(users_api.router)
 app.include_router(stats_api.router)
+# 评测（§3.7.3）：起 run / 历史 / 单轮详情 / 消融对比表
+app.include_router(eval_api.router)

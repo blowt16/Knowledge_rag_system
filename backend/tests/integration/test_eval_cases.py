@@ -131,6 +131,30 @@ async def test_calib_suite_has_both_answerable_and_unanswerable():
     assert no_gt, "校准小集里一道无据题都没有 → 误答率算不出来"
 
 
+async def test_single_turn_questions_have_no_pronouns():
+    """★ 单轮题**不许带代词** —— 这条是被评测链路真抓出来的。
+
+    首版生成器没这条，出了 8 道「这个细则管的是哪些学生啊？」。单轮提问没有
+    上文，「这个」指不明白，图的 `resolve` 判它「指代不明」→ 走 `clarify` ——
+    **那是完全正确的行为**，但评测文件里会凭空多出几条「路由错」的假失败，
+    而你会去查路由、查半天查不出问题（问题在题目）。
+
+    ⚠️ 代词表取自 `app.yaml` 的 `rules.pronoun_words`，**与 resolve 节点同源**：
+       抄一份进测试就会漂移，漂移之后生成器说没问题、图却判澄清，两边对着干。
+    """
+    import jieba
+    import yaml
+
+    rules = yaml.safe_load(
+        (repo_path("backend", "app", "config", "app.yaml")).read_text(encoding="utf-8"))
+    pronouns = set(rules["rules"]["pronoun_words"])
+
+    bad = [c["id"] for c in CASES
+           if c["case_type"] not in ("multi_turn", "refusal")
+           and set(jieba.lcut(c["question"])) & pronouns]
+    assert bad == [], f"这些单轮题带代词，会被判成指代不明：{bad}"
+
+
 async def test_multiturn_cases_carry_turns():
     """多轮题必须带 `turns`，且每一轮都有路由/澄清标注。"""
     for c in CASES:

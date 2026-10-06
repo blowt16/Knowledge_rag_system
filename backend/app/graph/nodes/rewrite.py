@@ -27,7 +27,8 @@ import time
 from app.core import llm
 from app.core.prompts import render
 from app.core.config import cfg
-from app.graph.state import RAGState, RetrievalQuery
+from app.graph.state import RAGState, RetrievalQuery, NodeTrace
+from app.retrieval import eval_config
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,20 @@ async def rewrite_node(state: RAGState) -> dict:
     started = time.perf_counter()
     query = state.get("resolved_query") or state.get("query", "")
 
+    # 消融开关（§5.3 第 1–4 行：查询扩展全关）。
+    # 线上 `eval_config` 为空 → `switches()` 返回 None → 不走这一支。
+    sw = eval_config.switches(state)
+    if sw is not None:
+        want = {s for s in ("verbatim", "keywords", "hyde") if sw.get(f"expand_{s}")}
+        if not want:
+            # 一次 LLM 调用都不付，直接用原句 —— 这就是「不做查询扩展」的基线
+            return {
+                "retrieval_queries": [_derive("verbatim", query)],
+                "trace": [NodeTrace(node="rewrite", ms=0, recalled=1, degraded=None)],
+            }
+    else:
+        want = {"verbatim", "keywords", "hyde"}
+
     queries: list[RetrievalQuery] = []
     degraded: str | None = None
     try:
@@ -74,6 +89,9 @@ async def rewrite_node(state: RAGState) -> dict:
                 source = str(item.get("source", "")).strip()
                 text = str(item.get("text", "")).strip()
                 if source in TARGET_BY_SOURCE and text and source not in seen:
+                    # 消融：只保留被打开的查询类型（§5.3 第 5–7 行逐类叠加）
+                    if source not in want:
+                        continue
                     queries.append(_derive(source, text))
                     seen.add(source)
     except llm.LLMTimeout:
@@ -98,7 +116,6 @@ async def rewrite_node(state: RAGState) -> dict:
             if q["source"] == "verbatim":
                 q["text"] = query
 
-    from app.graph.state import NodeTrace
     return {
         "retrieval_queries": queries,
         # ⚠️ 兜底必须留痕（评审 I2）：`app.cli eval-multiturn` 的护栏靠 degraded

@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 
 from app.graph.state import Chunk, NodeTrace, RAGState
+from app.retrieval import eval_config
 from app.retrieval.reranker import rerank
 
 
@@ -28,6 +29,18 @@ async def rerank_node(state: RAGState) -> dict:
             "evidence": [],
             "retrieval_confidence": None,
             "trace": [NodeTrace(node="rerank", ms=0, recalled=0, degraded=None)],
+        }
+
+    # 消融：精排关掉时按 RRF 顺序原样返回（§5.3 第 1–3 行）。
+    # 线上 eval_config 为空 → `on()` 恒 True，走下面的正常路径。
+    if not eval_config.on(state, "rerank"):
+        return {
+            "reranked": candidates,
+            # ⚠️ 仍为 None：这里是**按 RRF 分排序**的，量纲与精排分不同，
+            #    填进去会让「检索置信度」在两套量纲之间跳（M1 已定的口径）。
+            "retrieval_confidence": None,
+            "trace": [NodeTrace(node="rerank", ms=int((time.perf_counter() - started) * 1000),
+                                recalled=len(candidates), degraded=None)],
         }
 
     result = await rerank(query, candidates)

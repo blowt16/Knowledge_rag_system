@@ -64,6 +64,31 @@ REFUSAL_SEEDS = [
 ]
 
 
+def _pronoun_words() -> set[str]:
+    """代词表 —— **取自 app.yaml 的 `rules.pronoun_words`**，与 resolve 节点同源。
+
+    ⚠️ 不另抄一份：抄了就会漂移，而漂移之后「生成器认为没问题、图却判澄清」，
+       两边对着干还查不出原因。
+    """
+    import yaml
+    cfg_path = REPO / "backend" / "app" / "config" / "app.yaml"
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return set(data["rules"]["pronoun_words"])
+
+
+def _has_pronoun(question: str, pronouns: set[str] | None = None) -> bool:
+    """单轮题里**不许出现代词**。
+
+    实测教训：首版没用这条，生成了一批「这个细则管的是哪些学生啊？」——
+    单轮评测没有上文，「这个」指不明白，**图判澄清是完全正确的行为**，
+    于是评测文件里凭空多出几条「路由错」的假失败。
+    代词的活儿是多轮题库（eval_multiturn）在干的。
+    """
+    import jieba
+    return bool(set(jieba.lcut(question)) & (pronouns if pronouns is not None
+                                             else _pronoun_words()))
+
+
 def _squeeze(s: str) -> str:
     """去掉**所有空白**再比。用于「逐字」校验。
 
@@ -93,7 +118,10 @@ async def _ask(chunk: str, kind: str, title: str, retries: int = 2) -> dict | No
         "严格要求：\n"
         "1. `ground_truth` 必须是上面材料里**连续的一段原文**，一字不改（含标点）。\n"
         "2. 不许用自己的话概括，不许跨出这段材料。\n"
-        "3. 只输出 JSON：{\"question\": \"...\", \"ground_truth\": \"...\"}\n\n"
+        "3. **问句里不许出现代词**（这个 / 那个 / 该 / 其 / 上述 …）—— "
+        "这是**单轮**提问，没有上文，代词会让问题指代不明。"
+        "请用「本办法」「这份文件」这类自足的说法，或直接点出文种。\n"
+        "4. 只输出 JSON：{\"question\": \"...\", \"ground_truth\": \"...\"}\n\n"
         # ★ few-shot 是决定性的：不给例子时模型爱改写（首轮实测 50 段里只通过 19），
         #   给了例子之后通过率大幅上升 —— 这类「照抄」任务上，一个例子顶十条规则。
         "示例（假设材料里写着「学生应当在考试前向所在学院提出申请，经批准后方可缓考。」）：\n"
@@ -111,9 +139,15 @@ async def _ask(chunk: str, kind: str, title: str, retries: int = 2) -> dict | No
             continue
         q = str(data.get("question", "")).strip()
         gt = str(data.get("ground_truth", "")).strip()
-        # ★ 硬校验：答案必须是这段材料的逐字子串（忽略空白，见 `_squeeze`）
-        if q and gt and _squeeze(gt) in _squeeze(chunk) and len(_squeeze(gt)) >= 10:
-            return {"question": q, "ground_truth": gt}
+        # ★ 硬校验一：答案必须是这段材料的逐字子串（忽略空白，见 `_squeeze`）
+        if not (q and gt and _squeeze(gt) in _squeeze(chunk) and len(_squeeze(gt)) >= 10):
+            continue
+        # ★ 硬校验二：单轮题**不许带代词**（见 `_has_pronoun` 的实测教训）。
+        #   带代词会被图的 resolve 判成「指代不明」→ 走 clarify，那是**正确行为**，
+        #   但会让评测里凭空多出「路由错」的假失败。
+        if _has_pronoun(q):
+            continue        # 外层循环重试（prompt 里已明令不许用代词）
+        return {"question": q, "ground_truth": gt}
     return None
 
 

@@ -24,7 +24,7 @@ from app import db
 from app.core.config import cfg
 from app.core.deps import UserContext
 from app.graph.state import Chunk, NodeTrace, RAGState, RetrievalQuery
-from app.retrieval import bm25, vector
+from app.retrieval import bm25, eval_config, vector
 from app.retrieval.fusion import weighted_rrf
 from app.retrieval.search import bm25_retrieve, vector_retrieve
 
@@ -86,6 +86,12 @@ async def retrieve_node(state: RAGState) -> dict:
         ranked: list[tuple[RetrievalQuery, list[Chunk]]] = []
         for query in queries:
             target = query.get("target", "both")
+            # 消融开关（§5.3）：bm25 关掉时把这一路从 target 里摘掉。
+            # 线上 eval_config 为空 → `on()` 恒返回 True，行为一字不变。
+            if not eval_config.on(state, "bm25") and target == "both":
+                target = "vector"
+            elif not eval_config.on(state, "bm25") and target == "bm25":
+                continue
 
             if target in ("vector", "both") and vector_ok:
                 try:
@@ -113,9 +119,33 @@ async def retrieve_node(state: RAGState) -> dict:
     if not vector_ok and not bm25_ok:
         return _result([], started, degraded_kinds, session_id, recalled=0)
 
-    candidates = weighted_rrf(ranked)
+    # 消融第 2 行（+BM25 但 RRF 未开）：文档没定怎么合，这里用 min-max 归一化相加。
+    # ⚠️ 这是**消融脚手架**，不是产品语义（见 retrieval/eval_config.py 的说明）。
+    candidates = (weighted_rrf(ranked) if eval_config.on(state, "rrf")
+                  else _normalized_union(ranked))
     return _result(candidates, started, degraded_kinds, session_id,
                    recalled=len(candidates))
+
+
+def _normalized_union(ranked: list[tuple[RetrievalQuery, list[Chunk]]]) -> list[Chunk]:
+    """不做 RRF 的朴素融合：各路 min-max 归一化后相加，同 chunk 累加。
+
+    单路时与它自己的分数顺序一致（归一化是单调变换）。
+    """
+    merged: dict[str, Chunk] = {}
+    scores: dict[str, float] = {}
+    for _query, hits in ranked:
+        if not hits:
+            continue
+        vals = [c.score for c in hits]
+        lo, hi = min(vals), max(vals)
+        span = (hi - lo) or 1.0
+        for c in hits:
+            scores[c.chunk_id] = scores.get(c.chunk_id, 0.0) + (c.score - lo) / span
+            merged.setdefault(c.chunk_id, c)
+    for cid, chunk in merged.items():
+        chunk.score = scores[cid]
+    return sorted(merged.values(), key=lambda c: c.score, reverse=True)
 
 
 def _result(candidates: list[Chunk], started: float, degraded_kinds: list[str],
