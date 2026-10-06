@@ -20,6 +20,7 @@ function emptyDraft(): AssistantDraft {
   return {
     stage: null,
     stageHint: '',
+    clarifySkippedText: '',
     route: null,
     clarifyFacets: [],
     resolvedQuery: '',
@@ -169,6 +170,11 @@ export default function ChatPage() {
             }
             case 'resolved':
               patchTurn(id, { resolvedQuery: data.resolved_query })
+              break
+            case 'clarify_skipped':
+              // 澄清到顶：服务端不再反问，改为按最可能的理解作答，
+              // 并给一句说明 —— 文案是服务端给的，前端原样显示
+              patchTurn(id, { clarifySkippedText: data.text })
               break
             case 'route':
               // ⚠️ 读的是 clarify_facets（不是 facets）
@@ -337,6 +343,10 @@ export default function ChatPage() {
 
                     {turn.draft.resolvedQuery && turn.draft.resolvedQuery !== turn.question && (
                       <div className="resolved">我理解你在问：{turn.draft.resolvedQuery}</div>
+                    )}
+
+                    {turn.draft.clarifySkippedText && (
+                      <div className="resolved">{turn.draft.clarifySkippedText}</div>
                     )}
 
                     <div className="bubble assistant">

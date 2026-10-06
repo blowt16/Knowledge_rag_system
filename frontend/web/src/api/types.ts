@@ -85,6 +85,11 @@ export interface AssistantDraft {
   stage: StageName | null
   /** 要显示的阶段文案。**以 stage 为准** —— label 只兜底（§4.2.4.2） */
   stageHint: string
+  /**
+   * 澄清因**轮次到顶**被跳过时，服务端给的那句说明（可空）。
+   * ⚠️ 文案由服务端产出，前端**不得**自造（与 refused 同一条口径）。
+   */
+  clarifySkippedText: string
   route: RouteName | null
   /** ⚠️ 字段名是 clarify_facets，不是 facets —— 写成 evt.facets 会恒为 undefined */
   clarifyFacets: string[]

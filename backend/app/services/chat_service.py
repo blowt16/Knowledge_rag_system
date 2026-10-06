@@ -121,6 +121,38 @@ def node_ran(state: dict, node: str) -> bool:
     return any(entry.get("node") == node for entry in (state.get("trace") or []))
 
 
+# 澄清到顶时的说明。**文案的唯一来源是服务端**（§3.7.2 同一条口径）——
+# 前端不得按 reason 自造，否则两边话术迟早不一致。
+CLARIFY_LIMIT_NOTE = (
+    "我理解你想问的是【{query}】。以下回答基于这个理解。"
+    "如果你实际想问的是别的，请重新描述。"
+)
+
+
+async def _clarify_counts(session_id: str) -> tuple[int, int]:
+    """返回 (紧邻本轮的连续澄清轮次, 本会话累计澄清次数)。
+
+    ⚠️ 「链」必须是**紧邻**的：中间只要有一轮不是澄清就断了 ——
+       否则用户换了话题还会被上一轮的账压着。
+    ⚠️ 从 `messages` 数：`route` 落在**用户消息**那一行（助手行没有 route）。
+    """
+    async with db.tx() as conn:
+        rows = await conn.fetch(
+            """SELECT route FROM messages
+                WHERE conversation_id = $1 AND role = 'user'
+                ORDER BY created_at ASC""",
+            session_id,
+        )
+    routes = [r["route"] for r in rows]
+    total = sum(1 for r in routes if r == "clarify")
+    chain = 0
+    for r in reversed(routes):
+        if r != "clarify":
+            break
+        chain += 1
+    return chain, total
+
+
 def holder_id() -> str:
     """长锁持有者标识（实例 id + pid），排查「谁卡着」用。"""
     return f"{uuid.uuid4().hex[:8]}:{os.getpid()}"
@@ -159,6 +191,7 @@ async def stream_chat(
         # 历史 = 摘要 + messages[compressed_count:]；超水位会在这里**同步压缩**
         #（§3.8.3）。压缩失败只记降级，本轮照常作答 —— 绝不变用户 500。
         slice_ = await context_service.load_context(session_id)
+        clarify_chain, clarify_total = await _clarify_counts(session_id)
         state = new_state(
             query=query,
             session_id=session_id,
@@ -166,6 +199,8 @@ async def stream_chat(
             history=slice_.messages,
             summary=slice_.summary,
             last_route=await _last_route(session_id),
+            clarify_chain=clarify_chain,
+            clarify_total=clarify_total,
             # 非 admin 传了按 false 处理 —— filters.resolve_escalation 兜底
             include_restricted=bool(include_restricted) and user.role == "admin",
             # 压缩的耗时与降级要进 node_timings（静默兜底 = 评测护栏看不见）
@@ -208,6 +243,10 @@ async def stream_chat(
                                  or node_ran(final, "clarify"))
                 if not emitted_route and node_ran(final, "route") and clarify_ready:
                     emitted_route = True
+                    # 澄清到顶被跳过时，先把说明发出去 —— 文案由服务端产出
+                    if final.get("clarify_skipped"):
+                        yield sse("clarify_skipped",
+                                  {"text": CLARIFY_LIMIT_NOTE.format(query=query)})
                     event: dict = {"route": final["route"]}
                     if final.get("route") == "clarify":
                         # ⚠️ 字段名是 clarify_facets，不是 facets

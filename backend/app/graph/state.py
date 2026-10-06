@@ -85,6 +85,10 @@ class RAGState(TypedDict, total=False):
     route: RouteName
     route_source: str          # rule | llm
     last_route: str
+    # 澄清轮次上限的计数（从 messages 数出来，见 chat_service._clarify_counts）
+    clarify_chain: int          # 紧邻本轮的连续澄清轮次
+    clarify_total: int          # 本会话累计澄清次数
+    clarify_skipped: bool       # 本轮因到顶而跳过澄清
     clarify_question: str
     clarify_facets: list[str]
 

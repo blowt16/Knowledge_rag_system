@@ -100,6 +100,22 @@ def _should_clarify(state: RAGState) -> bool:
     return True
 
 
+def _clarify_limit_reached(state: RAGState) -> bool:
+    """澄清轮次上限（负责人 2026-10-06 定）。
+
+    单链最多 `max_chain_rounds` 轮、会话总计最多 `max_session_rounds` 次 ——
+    到顶就**不再反问**，改为按最可能的理解作答（`chat_service` 会下发一句说明）。
+
+    ⚠️ 计的是**已经发生过的**澄清轮次（从 `messages` 数，见
+       `chat_service._clarify_counts`），所以「最多 2 轮」的实际含义是
+       **第 3 次该澄清时被拦下**。
+    """
+    chain = int(state.get("clarify_chain") or 0)
+    total = int(state.get("clarify_total") or 0)
+    return (chain >= int(cfg("clarify.max_chain_rounds", 2))
+            or total >= int(cfg("clarify.max_session_rounds", 6)))
+
+
 async def route_node(state: RAGState) -> dict:
     started = time.perf_counter()
     query = state.get("resolved_query") or state.get("query", "")
@@ -116,6 +132,11 @@ async def route_node(state: RAGState) -> dict:
     # 否则「上一轮 knowledge + 本轮『那个呢？』」会被拉回 knowledge 直接检索，
     # 澄清分支永远触发不了。
     if _should_clarify(state):
+        if _clarify_limit_reached(state):
+            # ⚠️ 到顶**不再反问**：连续追问是体验最差的失败模式之一（E2E 实测：
+            #    用户点一下 facet 又被问一次）。改为按最可能的理解作答。
+            #    兜底必须留痕（`clarify_skipped`），否则前端没法给出那句说明。
+            return _result("knowledge", "rule", started, clarify_skipped=True)
         return _result("clarify", "rule", started)
 
     route = rule_classify(query)
@@ -158,7 +179,7 @@ async def _llm_classify(query: str, last_route: str) -> tuple[str, str | None]:
 
 
 def _result(route: str, source: str, started: float,
-            degraded: str | None = None) -> dict:
+            degraded: str | None = None, clarify_skipped: bool = False) -> dict:
     """⚠️ `degraded` 不是装饰：`app.cli eval-multiturn` 的护栏靠它判断
        「这一轮的指标还反不反映设计行为」，有降级就拒绝写评测文件。
        兜底了却不留痕 = 护栏拦不住，指标照样进了验收文档（评审 I2）。"""
@@ -166,6 +187,8 @@ def _result(route: str, source: str, started: float,
     return {
         "route": route,
         "route_source": source,   # rule | llm —— 规则命中率的数据源
+        # 澄清因到顶而被跳过 —— 前端据此给出「我理解你想问的是…」的说明
+        "clarify_skipped": clarify_skipped,
         "trace": [NodeTrace(node="route", ms=int((time.perf_counter() - started) * 1000),
                             recalled=0, degraded=degraded)],
     }

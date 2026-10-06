@@ -123,6 +123,12 @@ class ResolvedEvent(BaseModel):
     resolved_query: str
 
 
+class ClarifySkippedEvent(BaseModel):
+    """澄清因**轮次到顶**被跳过时下发（追加事件，不改既有事件）。"""
+
+    text: str
+
+
 class RouteEvent(BaseModel):
     route: RouteName
     # ⚠️ 字段名是 `clarify_facets`（不是 `facets`）——
