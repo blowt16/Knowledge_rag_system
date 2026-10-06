@@ -1,0 +1,18 @@
+# ragas 隔离环境（.venv-ragas）的依赖 —— 这个文件不是给主环境用的。
+#
+# 建环境（在仓库根跑，两条命令）：
+#     uv venv .venv-ragas
+#     uv pip install --python .venv-ragas/Scripts/python.exe -r backend/tools/requirements-ragas.txt
+#   （Linux/macOS 把 Scripts/python.exe 换成 bin/python）
+#
+# 为什么必须隔离、为什么钉 langchain-community<0.4，见 backend/tools/ragas_runner.py
+# 的模块头与 docs/评测与ragas.md。一句话：ragas 的依赖进主环境会让 reranker 加载段错误。
+
+ragas==0.4.3
+
+# ★ 必须钉在 0.4 以下：0.4.x 删掉了 langchain_community.chat_models.vertexai，
+#   而 ragas 0.4.3 在 import 时硬引用它 → ModuleNotFoundError。
+langchain-community==0.3.31
+
+# ragas 的 LLM 判官走这儿；也是 AnswerRelevancy 需要的 embed_query 来源
+langchain-openai==1.6.7

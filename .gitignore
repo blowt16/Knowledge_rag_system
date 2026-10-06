@@ -151,6 +151,8 @@ activemq-data/
 .env
 .envrc
 .venv
+# 评测侧隔离环境（ragas 的依赖不能进主环境，见 docs/评测与ragas.md）
+.venv-ragas
 env/
 venv/
 ENV/
