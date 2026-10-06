@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from app import db
 from app.api import auth as auth_api
 from app.api import chat as chat_api
+from app.api import conversations as conversations_api
 from app.api import document_access as document_access_api
 from app.api import documents as documents_api
 from app.core import telemetry
@@ -126,6 +127,7 @@ async def health():
 
 app.include_router(auth_api.router)
 app.include_router(chat_api.router)
+app.include_router(conversations_api.router)
 app.include_router(documents_api.router)
 # User 端原文访问（/file、/text、/images/{name}）—— 走 filters.py 同一套 ACL
 app.include_router(document_access_api.router)
