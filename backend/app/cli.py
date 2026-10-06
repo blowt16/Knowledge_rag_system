@@ -814,6 +814,64 @@ async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_eval_calibration(args: argparse.Namespace) -> int:
+    """跑校准小集并对着**基线**判回归（CI 的 eval-regression job 用）。
+
+    为什么走 CLI 而不是 API：CI 里没有常驻服务。这里直接调 `eval_service`，
+    结果照样落 `eval_runs`（§6.1：CI 跑的与手动跑的**必须在同一张表**，
+    否则对比表里看不到 CI 那几轮）。
+    """
+    import json
+
+    from app import db
+    from app.services import eval_service
+
+    run_id = uuid.uuid4().hex
+    await db.init_pool()
+    try:
+        async with db.tx() as conn:
+            await conn.execute(
+                """INSERT INTO eval_runs (id, name, config, role, include_restricted, status)
+                   VALUES ($1,$2,$3,'student',0,'pending')""",
+                run_id, args.name,
+                json.dumps({"suite": "refusal_calib"}, ensure_ascii=False))
+        await eval_service.run_eval(run_id)
+        async with db.tx() as conn:
+            row = await conn.fetchrow("SELECT status, metrics FROM eval_runs WHERE id=$1", run_id)
+    finally:
+        await db.close_pool()
+
+    metrics = row["metrics"] or {}
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    print(f"校准小集：status={row['status']} run_id={run_id}")
+    print(json.dumps(metrics, ensure_ascii=False, indent=1))
+
+    if row["status"] != "done":
+        print("!! 评测没有正常结束", file=sys.stderr)
+        return 1
+
+    baseline_path = BACKEND_DIR.parent / "docs" / "评测基线.json"
+    if not args.check_baseline or not baseline_path.exists():
+        print(f"（未做基线比对：{'未开启' if not args.check_baseline else f'{baseline_path} 不存在'}）")
+        return 0
+
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    worse: list[str] = []
+    for key, floor in baseline.items():
+        got = metrics.get(key) if not isinstance(metrics.get(key), dict) else None
+        if got is None:
+            ragas = metrics.get("ragas") or {}
+            got = ragas.get(key)
+        if isinstance(got, (int, float)) and isinstance(floor, (int, float)) and got < floor:
+            worse.append(f"{key}: {got} < 基线 {floor}")
+    if worse:
+        print("!! 指标低于基线：\n  " + "\n  ".join(worse), file=sys.stderr)
+        return 1
+    print("基线比对通过")
+    return 0
+
+
 def main() -> int:
     # Windows 控制台默认 GBK，打不出 emoji/中文全角会抛 UnicodeEncodeError
     for stream in (sys.stdout, sys.stderr):
@@ -855,6 +913,12 @@ def main() -> int:
     p_seed.add_argument("--fixture", default="tests/fixtures/eval_cases_v1.json",
                         help="题库路径（相对 backend/）")
 
+    p_cal = sub.add_parser("eval-calibration",
+                           help="跑校准小集并比对基线（CI 的 eval-regression 用）")
+    p_cal.add_argument("--name", default="CI 校准小集")
+    p_cal.add_argument("--check-baseline", action="store_true",
+                       help="与 docs/评测基线.json 比对，低于基线时退出码 1")
+
     args = parser.parse_args()
     handlers = {
         "init-db": cmd_init_db,
@@ -863,6 +927,7 @@ def main() -> int:
         "eval-retrieval": cmd_eval_retrieval,
         "eval-multiturn": cmd_eval_multiturn,
         "seed-eval-cases": cmd_seed_eval_cases,
+        "eval-calibration": cmd_eval_calibration,
     }
     return asyncio.run(handlers[args.command](args))
 

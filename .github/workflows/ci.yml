@@ -1,0 +1,93 @@
+# CI（§6.1 的三个 job）
+#
+# ⚠️ **跑在自托管 runner 上**（负责人 2026-10-06 定）。理由：
+#    - `unit` 里有相当一部分用例走**真实嵌入 API** 与**真 PostgreSQL**
+#    - `eval-regression` 还要 GPU、本机模型（reranker 2.2 GB）与 10 份语料
+#    托管 runner 上跑不了这些，除非把密钥放进仓库 Secrets ——
+#    而本仓库历史上已经有过一次密钥进 git 的事故，不再往云端搬密钥。
+#
+# 在本机装 runner：仓库 Settings → Actions → Runners → New self-hosted runner，
+# 打标签 `campus-rag`（下面三个 job 都按这个标签挑机器）。
+#
+# ⚠️ 自托管 runner 上跑之前，**必须先停掉本机的后端**（A10：Chroma 内嵌，
+#    同一份索引不能两个进程同时写）。
+
+name: CI
+
+on:
+  push:
+    branches: [refactor/campus-rag]
+  pull_request:
+    branches: [refactor/campus-rag]
+  workflow_dispatch:
+  schedule:
+    # 每周一 03:17（避开整点：整点是最拥挤的时刻，排队会让定时任务漂很久）
+    - cron: "17 3 * * 1"
+
+concurrency:
+  # 同一分支只跑最新一次；但**定时与手动的不取消**（评测烧钱，跑一半被砍更亏）
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  # ---- ① 单元 + 集成（含安全用例）—— 阻断（§6.1）-----------------------
+  unit:
+    runs-on: [self-hosted, campus-rag]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起基础设施
+        run: docker compose up -d --wait postgres
+      - name: 跑测试
+        # ⚠️ 跑之前**不要**起后端（A10）。runner 上若残留 uvicorn，先手动停。
+        run: uv run pytest backend/tests -q
+      - name: 索引洁净检查（孤儿会让后续召回悄悄变差）
+        run: |
+          cd backend
+          uv run python -c "
+          from app.services import index_service
+          s = index_service.index_stats()
+          print(s)
+          assert s['vector'] == s['bm25'], f'Chroma 与 BM25 条数不一致：{s}'
+          "
+
+  # ---- ② 契约：openapi.json vs 前端 TS 类型 —— 阻断（§6.1 / 3.1）--------
+  contract:
+    runs-on: [self-hosted, campus-rag]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 生成 openapi.json（**不需要起服务**）
+        run: |
+          cd backend
+          uv run python -c "
+          import json
+          from app.main import app
+          json.dump(app.openapi(), open('../openapi.json','w',encoding='utf-8'),
+                    ensure_ascii=False, indent=1)
+          "
+      - name: 用同一份 schema 重生成 TS 类型
+        run: |
+          cd frontend/web
+          npm ci --no-audit --no-fund
+          npx openapi-typescript ../../../openapi.json -o src/api/schema.d.ts
+      - name: 有 diff 就是契约漂移
+        run: |
+          git diff --exit-code frontend/web/src/api/schema.d.ts \
+            || (echo "::error::前端 TS 类型与后端 openapi 不一致 —— 跑 npm run gen:api 后提交" && exit 1)
+
+  # ---- ③ 评测回归：手动 + 每周定时，结果落 eval_runs（§6.1）-------------
+  eval-regression:
+    # 不挂在每次 push 上：要调 LLM、耗时且花钱（§6.1）
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: [self-hosted, campus-rag]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起基础设施（PG + 可观测三件套）
+        run: |
+          docker compose up -d --wait postgres
+          docker compose up -d jaeger otel-collector prometheus
+      - name: 跑校准小集并与基线比对
+        run: |
+          cd backend
+          # ⚠️ 这个入口是**批处理**：不要在里面引入 to_thread(torch) ——
+          #    Windows 上「asyncpg 连接池 + to_thread(torch)」同存时退出码 127。
+          uv run python -m app.cli eval-calibration --check-baseline

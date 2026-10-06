@@ -135,6 +135,11 @@ def main() -> int:
         embeddings=emb,
         raise_exceptions=False,     # 单题失败不该拖垮整轮
         show_progress=False,
+        # ⚠️ **必须设**：不设时 ragas 逐题串行，每题约 40 秒 ——
+        #    消融 8 行 × 63 题会变成 5 小时量级（实测第 1 行跑了 25 分钟还没完）。
+        #    设成 8 之后同一批并发算，整轮从"小时"降到"分钟"。
+        #    不要调太大：每题要调若干次 LLM 判官，并发高了会被上游限流。
+        batch_size=8,
     )
     ms = int((time.time() - t0) * 1000)
 
