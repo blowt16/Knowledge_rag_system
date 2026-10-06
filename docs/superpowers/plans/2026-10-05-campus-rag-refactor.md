@@ -1287,6 +1287,101 @@ Minor 3 条已顺手修（`test_route` 里一句恒真断言、题库陈旧 note
 
 ---
 
+### 9.9 M4 完工交接（2026-10-06 实跑，**新会话先读这一节**）
+
+> 口径同 §5.9/§6.9/§7.9/§8.9：**开工前实测见 §9.0** —— M4 的形态是
+> 「几乎全是『没有』，而且前半段是后端活」（§9.2 把阶段提示/会话列表写成前端任务，
+> 但它们的驱动源 `stage` 事件与会话接口在服务端根本不存在）。
+> 本轮实际做的是：**先补三条后端链路 → 再做管理端前端 → 最后 User 端**，
+> 过程中实测抓出 **2 个功能缺陷 + 2 个测试基础设施缺陷**，评审又抓出 **3 个 Important**。
+
+#### 本阶段交付
+
+| # | 交付 | 落在哪 |
+|---|---|---|
+| 1 | **`stage` 事件下发**（M4-1a） | `chat_service.py`（`stream_mode` 加 `debug` + `NODE_TO_STAGE` 映射）、`tests/integration/test_stage_events.py`(8) |
+| 2 | **会话接口**（M4-1b） | `api/conversations.py`、`schemas/conversation.py`、`conversation_service` 补 4 个函数）、`tests/integration/test_conversations_api.py`(17) |
+| 3 | **管理端文档接口**（M4-2a） | `api/admin.py`、`schemas/document.py`、`document_service` 补 6 个函数、顺修 K-3、`test_admin_documents.py`(22) |
+| 4 | **用户角色 + 拒答标注**（M4-2b） | `api/users.py`、`services/user_service.py`、`schemas/{user,refusal}.py`、`migrations/002_user_active.sql`、`test_admin_{users,refusals}.py`(22) |
+| 5 | **统计**（M4-2c） | `api/stats.py`、`services/stats_service.py`、`schemas/stats.py`、`test_admin_stats.py`(11) |
+| 6 | **管理端前端**（M4-3a..3f） | Tailwind v4 + shadcn/ui + ECharts；`layouts/AdminLayout.tsx`、`views/admin/*`(5 页)、`api/admin.ts` + `api/schema.d.ts`（`openapi-typescript` 接上） |
+| 7 | **User 端**（M4-4a..4e） | `markdown/blocks.ts` + `StreamingAnswer.tsx`、ChatPage 重做（会话列表 / 虚拟滚动 / 贴底 / 阶段提示 / 提权开关）、`api/conversations.ts`、`scripts/stream_blocks_probe/run.ts`(30) |
+| 8 | 修 2 个功能缺陷 + 2 个测试基础设施缺陷 | 见下表 |
+
+#### 实测证据（都能重跑复现）
+
+| 项 | 证据 |
+|---|---|
+| 测试 | `uv run pytest backend/tests -q` → **377 passed**（M3 结束时 297，本轮 +80） |
+| 前端构建 | `npm run build` 过；ECharts 单独成 chunk（1127 kB，只在管理端加载） |
+| 标注回归（M3 的护栏） | `npx tsx scripts/annotation_probe/run.ts` → **12/12**（新流式管道下仍全绿） |
+| 分块回归（M4 新增） | `npx tsx scripts/stream_blocks_probe/run.ts` → **30/30** |
+| **stage 真图可用性** | 探针：真图（11 节点 + 条件边）跑 `stream_mode=["custom","values","debug"]` → 给出 `resolve → route → rewrite → retrieve` 的开工信号 |
+| **重索引真进 Chroma** | `test_patch_visibility_reindexes_chroma_and_hides_from_student`：改前 student 搜得到 → PATCH 受限 → **同一 query 立刻搜不到** → 改回公开又搜得到 |
+| **preflight 回归（M4-D1 验收项）** | bsk 实测登录页/聊天页计算样式全部与预期一致（`h1` 仍 18px、按钮仍 `rgb(37,99,235)`、`.cite-badge` 规则仍在）——**preflight 没打乱既有版式**。附记：`dpr=1.5` 下 Chrome 把 1px 报成 `0.666667px`，是设备像素吸附，不是回归 |
+| **User 端端到端** | bsk：发送后 1 秒抓到阶段提示「正在检索知识库…」；一次知识型提问 → 答案 635 字、行内角标 **10**、引用分组 1、**置灰 1 处**（M3 的标注在新管道下完好）、会话列表自动变「共 1 条」 |
+| **会话列表（4c）** | 点侧栏会话 → 恢复 1 轮 + 10 个角标 + 1 个引用分组；**灰标 0 处** —— 正是 §3.7.2 写的「`verify_report` 只存 qa_logs，重开历史灰标不再显示」，是实现对了 |
+| **上翻不被拉回（4d）** | 内容 1105px / 视口 488px；流式中上翻到 `scrollTop=120` 后**又流 5 秒内容涨到 660px 缺口，`scrollTop` 仍是 120** |
+| **提权开关（4e）** | 拦截到的请求体 = `{"query":"测试提权开关",…,"include_restricted":true}` |
+| **索引洁净** | 清理后 Chroma/BM25 **148/148**（= M1 基线）；整套 `test_admin_documents.py` 跑完再查 → **孤儿 0** |
+| 管理端五页 | `/admin` 各页 `tbody tr` 分别 10/—/1/8；仪表盘 3 个 canvas 正常出图；「运行指标暂不可用（prometheus_unavailable）—— 业务指标不受影响」 |
+
+#### 本轮实测发现并修掉的缺陷
+
+| # | 缺陷 | 怎么发现的 | 影响 |
+|---|---|---|---|
+| **D-1** | **刷新任何受保护页面都会被弹走**：`bootstrap()` 在 `useEffect` 里跑（**首帧之后**），首帧 `user` 必为 null，守卫立刻判「未登录」→ 跳 `/login` → 登录页又按已登录跳 `/chat` | bsk 实测：直接打开 `/admin` 落在 `/chat` | 刷新 = 丢当前页。**M0 就有**，只是 `/chat` 恰好是重定向目标所以没暴露。修法：`bootstrapped` 标志（**不能用 `loading`** —— 它同样是首帧之后才置位，第一次修就没修对） |
+| **D-2** | shadcn 初始化把它的 CSS 变量**合并进本应用同一个 `:root`**，静默覆盖 `--card` / `--muted` —— 它的 `--muted` 是浅灰**背景色**，本应用的 `--muted` 是灰色**文字色** | 读 `npx shadcn init` 改完的 `index.css` | `.muted`/`.locate-note`/`.resolved` 的灰字会变近白、在白底上看不见。修法：把**本应用**两个变量改名 `--app-card`/`--app-muted`（shadcn 的 token 一个没动） |
+| **D-3** | 上传进度流最初写成 `EventSource` + token 塞查询串 —— 正是 §3.2.2 明令禁止的 | 自查 | token 会进访问日志与浏览器历史。修法：**扩展共用的 `streamSse` 支持 GET**（省略 `body` 即 GET，仍带 `Authorization` 头） |
+| **D-4** | **测试孤儿泄漏**：`test_patch_title_does_not_reindex` 会改名，而夹具按**原标题**清理 → `SELECT` 查不到 → 索引一条不删 | 顺着评审 I-1 查索引时发现 Chroma 160 / BM25 163 而语料基线 148；孤儿把后续用例的 Top-K 挤掉，**三个用例同时红在正控上** | 索引每跑一轮脏一点、召回悄悄变差，且表现成「重索引坏了」的假象。修法：`purge_documents_by_id()` 按 id 清（不依赖会被改写的字段）。**验证：清到 148/148 后跑完一轮 → 孤儿 0** |
+| **D-5** | 用例的正控不唯一：所有用例共用同一个 MARKER 短语 | 同上 | 索引一脏，正控必红。修法：`_marker()` 每份文档一个唯一关键词（M1 的 ACL 用例本来就这么做） |
+
+#### 与计划的偏差
+
+| # | 计划口径 | 实际 | 依据 |
+|---|---|---|---|
+| E-1 | §9.2 把「流式渲染/阶段提示/会话列表」写成一条前端任务 | 拆成 **1a（stage 后端）+ 1b（会话接口后端）+ 4a–4e（前端）** | §9.0 开工前实测：两个驱动源在服务端不存在 |
+| E-2 | §9.1 未列 `api/stats.py` | 新增（另加 `api/users.py`） | 与 `document_access` / `admin` 同粒度；§0.5 的目录清单本身声明是「按里程碑排期未到」 |
+| E-3 | — | **新增 `migrations/002_user_active.sql`** 加 `users.is_active` | §4.3 用户管理页要求「停用」，而库里原本**没有这个字段的落点**（M4-D6，见 §9.0 决策表外的补充） |
+| E-4 | — | 流式渲染**分两段用两套渲染器**：流式中按块、收尾整段 | 置灰标注的偏移是相对**整段**原始答案的；流式期间 `verify` 还没到，按块渲染时没有偏移可错 |
+| E-5 | 方案点名 `use-stick-to-bottom` | 装了但**未用**，吸底自己写了 20 行 | 两个库同时管同一个滚动容器容易互相打架（虚拟滚动已用方案点名的 `@tanstack/react-virtual`） |
+| E-6 | — | `purge_documents()` 保留但降级为「标题不被改写时才可靠」 | 见 D-4 |
+
+#### 完工评审（fresh reviewer，2026-10-06，范围 `m3-done..HEAD`）
+
+**0 Critical / 3 Important / 6 Minor**。评审自己跑了代码（分块器反例、PG 时区与分桶、真 `trend`、Windows `Path.resolve()` 穿越、三个测试文件）。Important 一个 pass 全部修掉：
+
+| # | 评审发现 | 修法 |
+|---|---|---|
+| I-1 | `trend` 的「一天」按 **UTC** 切（PG 会话时区 UTC、进程本地 +08:00）→ 本地 00:00–07:59 的问答全算进前一天，「今天」在早上永远是 0 | 窗口与分桶改到 Python 按**本地日**算，SQL 只按绝对时刻取窗口 |
+| I-2 | 版本管理页只取第一页（上限 100 行），超过的文档组**整组静默消失** | 按 `has_more` 翻页取全 |
+| I-3 | **预存在**：上传文件名未净化，`..\..\..\..\evil.txt` 能穿出 `data/tmp` 写到仓库任意路径，且写入发生在**入库之前** | 只取基名 + 双向分隔符 + 去前导点 |
+
+Minor 6 条未修，见下。
+
+#### 已知问题（**未修**，如实记录）
+
+| # | 问题 | 影响 | 建议 |
+|---|---|---|---|
+| K-1 | 分块器的「逐字还原」不变式在**纯空白段**上失效（跳过空白块但仍推进游标） | 只丢空白，且收尾会整段重渲染 → 肉眼不可见 | 去掉 `trim()` 判断即可；当前不影响正确性 |
+| K-2 | 同字符**不等长**的围栏（`` ```` `` 里嵌 `` ``` ``）会配错对 | 流式期间短暂分块、收尾自愈 | 记围栏的游程长度再判闭合 |
+| K-3 | 「先 Chroma 后 PG」的注释断言只在**收紧**方向成立 | 放宽方向失败会出现「界面说受限、学生搜得到」 | 注释改准；或用 `indexing → 写索引 → 翻正` 的两段式 |
+| K-4 | `is_active` 只在登录时校验（`/refresh` 不判） | 经接口停用会自增 `token_version`，已堵；纯手改库或日后新增写路径忘了自增才会漏 | `/refresh` 顺手带上 `is_active` |
+| K-5 | 引导态无超时 | 网络半死时可能停在「加载中…」 | bootstrap 加 `AbortSignal.timeout` |
+| K-6 | DELETE 先删索引后删 PG 行 | PG 删失败会留下「看着活着、其实检索不到」的记录 | 先落中间态 |
+| K-7 | `npm run gen:api` 指向 `127.0.0.1:8000`，而项目实际跑 **8090** | 手动跑 codegen 时要先改端口 | M5 写 CI 的 contract job 时统一 |
+
+#### 下一里程碑开工前的提醒
+
+- **M5 的消融实验要用的 `refusal_rate` 口径是 §9.0 的 M4-D2**（文档缺口，§5.2 里没有），校准后若与文档冲突**以实测为准并回写**
+- **评测若也写 `qa_logs`，`stats.overview` 的 `qa_count` 必须加过滤**（现在靠「评测结果落 `eval_case_results`」天然隔离）
+- `_PROM_QUERIES` 是**占位 PromQL**，起 spanmetrics 后按实测改（调用方不变）
+- **跑测试/CLI 前先停后端**（Chroma 内嵌，A10）；跑完测试**查一下索引孤儿**（Chroma 应为 148，本轮修了泄漏源，但老现场提醒值得保留）
+- 前端 markdown 管道**不要引 `rehype-sanitize`**，两个 remark 插件的**顺序不能反**（置灰在前、角标在后）—— 两条护栏都还在
+- `stage` 的映射表在 `chat_service.NODE_TO_STAGE`；**新增图节点要同时登记**，否则新节点不发阶段提示（不发不报错，只是没有）
+
+---
+
 ## 10. M5 — 评测与打磨
 
 **交付**：10–15 题拒答校准小集、测试集（分两阶段）、ragas 接入、消融实验、测试补齐、可观测性（OTel + trace_id 贯通 + 阈值标红）、CI、部署配置、扫描件与乱码字体 PDF 回归样本各一份。
