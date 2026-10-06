@@ -86,7 +86,7 @@
 先给我一个 M2 的执行计划（任务顺序与各自怎么验），我确认后再动手。
 ```
 
-### H.3 M3 开工提示词（当前待执行）
+### H.3 M3 开工提示词（已执行，tag `m3-done`，交接见 §8.9）
 
 ```
 读 docs/superpowers/plans/2026-10-05-campus-rag-refactor.md，
@@ -143,6 +143,66 @@
    并把「完工交接」小节写进本文档、打 tag m3-done。
 
 先给我一个 M3 的执行计划（任务顺序与各自怎么验），我确认后再动手。
+```
+
+### H.4 M4 开工提示词（当前待执行）
+
+```
+读 docs/superpowers/plans/2026-10-05-campus-rag-refactor.md，
+重点读 §0（施工规程）、§8.9（M3 完工交接）与 §9（M4 原文 —— 那才是你要做的）。
+
+我是这个项目的负责人，你接着做 M4（React 两端）。几条前提：
+
+1. **M4 的形态又和前三轮不同：这一轮几乎全是「没有」，而且是前端为主。**
+   下面是我开工前实测摸过的（不是照 §9.1 推断的），直接按它排计划：
+
+   | §9.2 任务 | 代码实际状态 |
+   |---|---|
+   | M4-1 流式渲染 / 阶段提示 / 长列表 | ❌ **完全没有**。⚠️ 而且 `stage` 事件**服务端从来没发过**（grep 全后端零命中）—— 契约（`StageEvent` + §3.7.2 的取值表）M0 就冻住了，但**发送端没实现**。所以 M4-1 的前半段是**后端活**：先把 stage 下发补出来，前端才有东西可驱动 |
+   | M4-2 管理端接口 | ❌ **完全没有**。`api/` 只有 auth / chat / documents（**仅上传**）/ document_access；**没有** users、admin（文档管理 CRUD、拒答分析）、stats。`services/` 里**没有** `stats_service.py` |
+   | 会话列表（M4-1 后半段） | ⚠️ **半截**：`services/conversation_service.py` 的 `list_conversations` / `get_messages` 都写好了，但**接口层根本没建** —— 没有任何 `/api/conversations` 路由（只有一句注释提过它）。前端因此拿不到历史消息，刷新后引用角标无从渲染（§4.2.4） |
+   | M4-3 管理端页面 + 仪表盘 | ❌ 完全没有。前端只有这些：`api/{client,sse,types}`、`components/DocumentDrawer`、`markdown/*`、`stores/auth`、`views/{login,chat}`。`react-router-dom` **已经在用**（`App.tsx` 有 `RequireAuth`，且已支持 `roles` 参数、`/admin/*` 留了占位注释）；**没有** ECharts、没有 shadcn/ui、没有 `api/schema.d.ts`（`gen:api` 脚本在，但 `openapi-typescript` 没装） |
+
+   所以 M4 的量是：**三条后端链路（stage 下发 / 会话接口 / 管理与统计接口）
+   + 一整块管理端前端**（布局、5 个页面、仪表盘、会话列表、流式优化）。
+
+2. **开工第一件事：`uv run pytest backend/tests -q` 应是 297 passed**；PG 起着；
+   后端当前**没在跑**。
+
+3. ⚠️ **浏览器验收要一个能登录的 admin**：库里 `admin` 账号在，但 `.env` 里
+   **没有 `ADMIN_PASSWORD`**（M1 按 D-5 删了）。M3 的做法是**建一个临时账号**、
+   验收完删掉（连同它的会话与 qa_logs）；也可以用 `bsk request-help` 让我自己输口令。
+
+4. ⚠️ **两个环境坑（M3 实测，会直接影响你的验收）**：
+   - **GPU 被别的程序占满时，知识型提问会卡死**（不是代码问题）：`chat` 分支
+     1.15 秒答完、LLM 自检也过，但走 rerank 的那条路一直不返回。定位手法：
+     把 `reranker.model_path` 故意指错 → 同一问题 8.2 秒答完。
+     **答辩前记得确认没有别的程序占 GPU。**
+   - **bsk 的整页截图在 Agent 窗口被遮挡时会定格**（两次不同滚动位置 md5 相同），
+     而 `bsk observe` 与元素裁剪仍是最新的 → 取证时开新标签页，或让我把窗口置前。
+
+5. 施工注意事项见 §0.3（A1–A12）。最近两个里程碑又添了这些**实测**教训：
+   - **别让中间层（Chroma / PG / 任何 get 类接口）的返回顺序决定最终排序**（M1 的 B-2）
+   - **新增节点必须写 trace**，漏写会让 SSE 事件静默缺失（A3）
+   - **兜底必须留痕**：静默兜底却不写 `degraded`，评测护栏就拦不住（M2 评审 I2）
+   - **做对照实验时，两腿只能差一个变量**（M2 评审 I1）
+   - **SSE 事件顺序有锁**（`tests/integration/test_refusal_paths.py`）：M4 要改
+     `ChatPage` 的流式渲染，但**不要动服务端的事件顺序**
+   - **前端 markdown 管道**：不要引入 `rehype-sanitize`（默认 schema 剥 `class`，
+     置灰会静默失效）；两个 remark 插件的**顺序不能反**（置灰在前、角标在后）
+     —— 有回归脚本守着（`frontend/web/scripts/annotation_probe/run.ts`，12/12）
+   - **改 `api/` 照 A7 分层**：只做参数校验与响应封装，业务放 `services/`
+   - **批处理入口（CLI）不要引入 `to_thread(torch)`**（Windows 退出码 127）
+
+6. 环境：PG 起着；测试 297 passed；前端 `cd frontend/web && npx vite --port 5273`；
+   后端单 worker 起在 8090。
+   ⚠️ **跑测试或跑 CLI 之前先停掉后端**（Chroma 内嵌，A10）。
+
+7. 规矩：提交只进 refactor/campus-rag，禁止动 main、禁止 force push。
+   M4 做完停下汇报（交付 / 实测证据 / 偏差 / 已知问题），
+   并把「完工交接」小节写进本文档、打 tag m4-done。
+
+先给我一个 M4 的执行计划（任务顺序与各自怎么验），我确认后再动手。
 ```
 
 ---
