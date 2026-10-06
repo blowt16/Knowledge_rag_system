@@ -3850,13 +3850,21 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | 7 | 上下文组装逻辑在两个文件中重复 | `rag_service.py` / `agent_service.py` | 收敛为单一 `build_context` 节点 |
 | 8 | 零测试、无 CI | 全项目 | 见第六章 |
 | 9 | `MAX_MEMORY_TURNS` 在 `.env` 声明但**全仓无代码读取**，静默失效 | `.env:57`（实际生效的是 `chroma.yaml:63` 的 `llm_history_turns`） | 与第 3 条同类：配置项与代码严格对应 |
-| 10 | 现有 Streamlit 前端（`front/`）对接的是旧后端接口（`/chat`、`/knowledge/*`、`/conversation/*`、`/api/knowledge/*`），**M0 起旧后端被新骨架替换后即失效** | `front/` | **冻结停用**（决策）。**具体动作**：① `front/README.md` 顶部加「⚠️ 本目录已停用，对接的是旧后端接口」② **`streamlit` 依赖从 `pyproject.toml` 移除**——但**代码保留**（参考用，需要时再装即可）③ 新前端的 `frontend/web/` 与之完全分离，不共用任何文件 |
+| 10 | 现有 Streamlit 前端（`front/`）对接的是旧后端接口（`/chat`、`/knowledge/*`、`/conversation/*`、`/api/knowledge/*`），**M0 起旧后端被新骨架替换后即失效** | `front/` | **已删除**（2026-10-06 决策变更——原为「冻结停用、**代码保留**」，见下方「旧代码已清理」）。`streamlit` 依赖已从 `pyproject.toml` 移除；新前端的 `frontend/web/` 与之本就完全分离 |
 
 > **实测确认**：`MAX_MEMORY_TURNS` 只在旧版 `.pyc` 残留里出现，**源码已无任何地方读它**。当前真正生效的是 **`llm_history_turns: 5` 直接截最近 5 轮**——正是 3.8.1 批评的「简单截断」，也是新设计要替掉的（见 3.8.3）。
 
-> **第 3 条的定位说明（v1.1 补充）**：`intent_classifier.py` 的**源码已不在当前工作区**（`refactor/campus-rag` 与 `main` 都没有，只剩 `app/intent/__pycache__/` 下的 `.pyc` 残留），源码仅存于 `feature/intent-recognition` 分支（1c47541）。
+> **第 3 条的定位说明（v1.1 补充）**：`intent_classifier.py` 的**源码已不在当前工作区**（`refactor/campus-rag` 与 `main` 都没有；原先只剩 `app/intent/__pycache__/` 下的 `.pyc` 残留，**该残留也已随 2026-10-06 的旧代码清理删除**），源码仅存于 `feature/intent-recognition` 分支（1c47541）。
 >
 > 不影响本条结论——**决策 #3 已废弃 Agent 模式**，intent 分类器整体不进新项目；这条只是把它列为「旧项目的教训：配置项与代码必须严格对应」，而**不是**要求去改那个文件。施工时**不要去仓库里找它**。
+
+> **旧代码已清理（2026-10-06，commit `1f2ffa1`）**：重构前的整套代码已从仓库删除，根目录只留新项目。
+>
+> ⚠️ **因此本附录及各节里引用的旧实现——`front/app.py:NNN`、`rag_service.py`、`agent_service.py`、`app/config/chroma.yaml` 等——都无法再在仓库里打开了。** 它们描述的是**重构前的行为**，作为「新设计为什么不这么做」的论据仍然有效；要对着源码核实时从 git 历史取：`git show 1f2ffa1^:<路径>`。
+>
+> **删除清单**：`app/`（旧后端，61 文件）、`front/`（旧 Streamlit 前端，7 文件）、`main.py`、`test_main.http`、`__pycache__/`、`README.md`、`VERIFICATION_CHECKLIST.md`、`rag项目分析报告.md`、`db/conversation.db`（旧 SQLite 元数据库）、`data_backup_20261005_m1/`。
+>
+> ⚠️ **保留未删，别把它们当旧代码误清**：`models/`（2.2 GB reranker 权重，`.env` 的 `RERANKER_MODEL_PATH` 与 CI 都依赖）、`data/`（现役 Chroma + BM25S 索引与上传件）、`corpus/`（现役语料）。这三者的修改时间可能比旧代码还早，判据要看**是否被当前代码引用**，不是时间戳。
 
 ---
 
@@ -4540,7 +4548,7 @@ model_dir = snapshot_download(repo_id=scope_name, cache_dir=...)
 | venv | 6.4 GB | **约 5.5 GB**（保留 CUDA torch）——⚠️ **该数字以「删 `modelscope` 后 `rapid_doc` 确实消失」为前提取值**，而上面已标注这条因果链**未经验证**。实测不成立时收益会缩水 |
 | 依赖条目 | **35** | **31**——类别 A 删 **6** 个（含 `python-magic`）、类别 C 补 **1** 个（`docx2txt`）、类别 B 是换实现（条数不变） |
 
-> **`streamlit` 保留**：它随附录 A 第 10 条的「旧前端冻结」一并处理——**代码保留、依赖从主环境移除**（需要跑旧前端时再装）。**清理时不要顺手删掉 `front/`**，它是参考实现。
+> **`streamlit` 已移除**：它随附录 A 第 10 条一并处理——依赖已从主环境移除。原决策是「代码保留、需要时再装」，但 **2026-10-06 起 `front/` 已随旧后端一并删除**（决策变更，见附录 A 的「旧代码已清理」）；要这份参考实现时从 git 历史取：`git show 1f2ffa1^:front/app.py`。
 >
 > **口径**：「依赖条目 35 → 31」是**清理后**的数；`streamlit` 的移除**不计入**这个差值（它不属于类别 A/B/C 任何一类，是随决策 #5 单独处理的）。
 
