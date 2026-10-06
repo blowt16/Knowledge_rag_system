@@ -1604,6 +1604,88 @@ Minor 6 条未修，见下。
 
 ---
 
+## 10.9 M5 完工交接（2026-10-06 实跑，**新会话先读这一节**）
+
+> 口径同 §5.9 / §6.9 / §7.9 / §8.9 / §9.9：**开工前实测见 §9.9 的「M4 之后的追加工作」**。
+> M5 的形态是「六条轨道彼此独立」—— 不是补一块代码，是三件事：
+> ① 把已有链路测出来 ② 接上观测性 ③ 让它能部署。
+>
+> ⚠️ **本节写作时消融实验的第 2–8 行仍在后台跑**（第 1 行已出数，见下）。
+> 其余五条轨道均已完成并有实测证据。
+
+### 本阶段交付
+
+| # | 交付 | 落在哪 |
+|---|---|---|
+| 1 | **ragas 四指标接入**（隔离环境 + 子进程） | `backend/tools/ragas_runner.py`、`backend/app/services/ragas_service.py`、`backend/tools/requirements-ragas.txt`、`docs/评测与ragas.md` |
+| 2 | **扫描件 / 子集字体回归样本** + 补上缺失的子集字体判据 | `backend/tools/make_regression_pdfs.py`、`backend/tests/fixtures/pdf_samples/`、`loaders/pdf.py::subset_font_suspect` |
+| 3 | **可观测性三容器 + trace 贯通** | `docker-compose.yml`、`otel-collector-config.yaml`、`prometheus.yml`、`prometheus-rules.yml`、`core/metrics.py`、`builders.traced` |
+| 4 | **评测题库 90 题** + 逐字闸门 + 导入命令 | `backend/tests/fixtures/eval_cases_v1.json`、`tools/make_eval_cases.py`、`app.cli seed-eval-cases` |
+| 5 | **评测链路**（异步 run / 历史 / 对比表）+ 前端评测页 | `api/eval.py`、`services/eval_service.py`、`retrieval/eval_config.py`、`views/admin/EvalPage.tsx` |
+| 6 | **CI 三 job + 部署四件** | `.github/workflows/ci.yml`、`Dockerfile`、`.env.example`、`scripts/start.sh` |
+| 7 | 消融 / ACL 实验的运行器 | `backend/tools/run_ablation.py`、`backend/tools/run_acl_experiment.py` |
+
+### 实测证据（都能重跑复现）
+
+| 项 | 证据 |
+|---|---|
+| 测试 | `uv run pytest backend/tests -q` → **443 passed**（M4 末 406，本轮 +37） |
+| 索引洁净 | Chroma / BM25 **148 / 148**，无孤儿 |
+| **ragas 四指标** | 真出数：faithfulness **0.456** / answer_relevancy **0.653** / context_precision **0.333** / context_recall **0.556**（冒烟 4 题） |
+| **按 trace_id 还原全链路** | 一次真实问答 → Jaeger 里 **9 个 span**（HTTP + resolve/route/rewrite/retrieve/rerank/build_context/generate/cite），逐段耗时可见 |
+| **span 无正文** | 54 条属性/事件里「桂电教」「28号」「这份文件」等特征串**全部为假**；属性键全集只有 `http.*` / `span.kind` / `rag.node` / `rag.duration_ms` / `rag.recalled` |
+| **告警标红路径** | 临时塞必然 firing 的规则 → 接口返回 `firing=1` → 探针已删（现 3 条真规则全 inactive） |
+| 真跑云 OCR | MinerU token 有效；扫描件样本 8.7s/2页，**读出正确中文**（含「桂林电子科技大学」「桂电教」）；子集字体样本 3.0s/2页走 OCR |
+| 题库闸门 | 变异检验：改坏 2 条答案 → 用例立刻红 |
+| **消融第 1 行** | 纯向量检索：90 题、recall@5 **0.678**、MRR **0.611**、faithfulness **0.591** |
+
+### 与计划的偏差
+
+| # | 计划口径 | 实际 | 依据 |
+|---|---|---|---|
+| D-1 | `uv add ragas` 接进主环境 | **隔离 venv + 子进程** | 实测两条硬阻断：① ragas 0.4.3 与 langchain-community 0.4.x 不兼容（空环境也复现）② 装进主环境会让 `import sentence_transformers` **段错误**（access violation，崩在 pyarrow 初始化），而 reranker 靠它加载。受控实验：装 → 退出码 139；回滚 → 退出码 0 |
+| D-2 | §E.8.1 的六项质量判据「写了没跑过」 | **其中两项根本没写**（子集字体、框级乱码率） | 造样本时逐项对照代码发现。本轮补上子集字体；**框级乱码率未做**（MinerU 是页级服务，落地要改合并语义） |
+| D-3 | 消融 8 行逐项叠加 | 第 7 行与第 8 行**配置完全相同** | 六个开关键对应第 2–7 行（`eval_runs.config` 建表注释点名），第 8 行没有第七个键可加。故第 8 行的作用是**噪声下限的测量**（同配置跑两次） |
+| D-4 | 8 行跑 90 题 | 第 1 行 90 题；后续行仍在跑 | ragas 逐题串行时每题约 40 秒（8 行 × 63 题 ≈ 5 小时），已设 `batch_size=8` 并发；即便如此一行仍要十几到几十分钟 |
+| D-5 | CI 三 job | **自托管 runner** | 负责人定：`unit` 走真嵌入 API 与真 PG，`eval-regression` 还要 GPU + 本机模型，托管 runner 跑不了；且本仓库已有过一次密钥进 git 的事故，不再往云端搬密钥 |
+
+### 本轮实测发现并修掉的七处缺陷
+
+| # | 缺陷 | 怎么发现的 | 影响 |
+|---|---|---|---|
+| **D-1** | **span 异常事件漏正文**：`traced()` 的注释写着「刻意不用 `record_exception`」，但没传 `record_exception=False` —— 而 `start_as_current_span` 会**自动**记录异常 message 与栈 | 新写的 `test_span_redaction.py` 当场证伪 | Jaeger 里会摆着学号姓名。**注释声称的安全 ≠ 实际的安全**，这条测试就是两者的对账 |
+| **D-2** | collector 的 metrics 管道**漏了 `otlp` 接收器** | 起完栈发现 `llm_tokens_total` 不存在 | 应用自发的指标被静默丢掉（不报错，只是「指标怎么没有」） |
+| **D-3** | `rewrite` 用了 `eval_config` **忘了 import** | 冒烟评测 3 题里 2 题抛 NameError | 失败是**按题静默记录**的（记进 `eval_case_results.metrics.error`），不修会一路带进消融表 |
+| **D-4** | 题库里 **8 道单轮题带代词**（「这个细则管的是哪些学生啊？」） | 冒烟评测发现路由判成 clarify | 单轮没有上文，代词指不明白，**图判澄清是正确的行为** —— 但会在评测里凭空多出「路由错」的假失败。生成器加「单轮不许带代词」（复用 app.yaml 代词表，与 resolve 同源） |
+| **D-5** | 逐字校验**把空白也算进去了** | 事实题通过率只有 38%（50 段过 19） | 规范化正文里有 PDF 提取的硬换行，模型复述时写一行 → 我把「同一句话」判成了「不是原文」。去空白比对后升到 45/50 |
+| **D-6** | 评测崩溃后轮次**永远卡在 `running`** | 脚本被杀之后 | 而 `POST /eval/run` 有「同时只允许一轮」的保护 → **一行僵死记录把之后所有评测全挡死**（409），看起来还像「有人在跑」。修法：启动时清理（`main._fail_stale_evals`，实测清掉 1 条） |
+| **D-7** | 占位 PromQL **两处都不对** | 起 spanmetrics 后从 Prometheus 直读指标名 | 实际是 `spanmetrics_duration_milliseconds_bucket`（不是 `span_metrics_latency_bucket`）；token 用量要用累计值而非 `rate`（稀疏计数器窗口两端常相同 → rate 恒 0，面板看起来像没接上） |
+
+另外：`tools/run_ablation.py` 第一版**开头登录一次一路用**，而 access token 只有 15 分钟、一行评测要跑十几分钟 → 轮询到 401 抛 KeyError 把脚本带崩（评测本身在服务端照常跑完）。已改 401 自动重登。
+
+### 已知问题（**未修**，如实记录）
+
+| # | 问题 | 影响 | 建议 |
+|---|---|---|---|
+| K-1 | **框级乱码率未实现**（§E.8.1 六项里的第二项） | 整框乱码但整页乱码率不足 30% 的页，文字层仍会被当正文 | MinerU 是**页级**服务，落地要么「框不合格 → 整页送 OCR」（保守但费钱），要么改合并语义。需要时再定 |
+| K-2 | `answer_relevancy` **有跑间随机性**：同一样本两次 0.8901 / 0.712 | 消融表里这一列**不能用于小于 ~0.15 的差值判断** | 需要更稳就给判官固定 seed 或调 n |
+| K-3 | 消融第 2–8 行**本轮未跑完** | 主表只有第 1 行 | 脚本已就绪：`cd backend && uv run python tools/run_ablation.py --only 2,3,4,5,6,7,8`（需后端在跑） |
+| K-4 | ACL 对照实验**未跑** | §5.3 的第二张表还没有数 | `cd backend && uv run python tools/run_acl_experiment.py`（自建自清，不污染 148 基线） |
+| K-5 | 告警卡的**浏览器渲染**未单独取证 | 只验到 API 层（真 firing 规则 → `firing=1`） | 与评测页一起做一次 bsk 验收 |
+| K-6 | 段错误根因**未定位到具体包** | 只影响「能不能装进主环境」这个已放弃的方案 | 不必再查；隔离方案已规避 |
+| K-7 | 前端评测页未做浏览器验收 | 只过了 `tsc` | 同上 |
+
+### 下一里程碑（端到端深度测试）开工前的提醒
+
+- **跑测试 / CLI 前先停后端**（A10）；跑完查索引孤儿（**Chroma 应为 148**）
+- 启动全套用 `bash scripts/start.sh`；只起基础设施用 `--infra-only`
+- 可观测栈的端点由 `OTEL_EXPORTER_OTLP_ENDPOINT` 控制，**没配就不导出**（跑测试不会去连不存在的 Collector）
+- 评测走 `POST /api/admin/eval/run`，同一时刻**只允许一轮**（要占 GPU）；僵死轮次会在下次启动时自动清理
+- 前端 markdown 管道**不要引 `rehype-sanitize`**，两个 remark 插件的**顺序不能反**（护栏仍在：annotation 12/12、stream_blocks 37/37）
+- `stage` 的映射表在 `chat_service.NODE_TO_STAGE`，**新增图节点要同时登记**
+
+---
+
 ## 11. 端到端深度测试方案（全部施工完成后执行）
 
 > 用户指定的 11 个覆盖面全覆盖。**用 `bsk` 驱动真实浏览器**做 UI 部分（按 CLAUDE.md 的真实数据获取约束：`bsk daemon start --port 35000` → `bsk session start` → 用完 `bsk session stop`），后端接口部分用 pytest + httpx 直连。
