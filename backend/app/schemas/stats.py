@@ -49,6 +49,18 @@ class HotQuestionsResponse(BaseModel):
     items: list[QuestionCount] = []
 
 
+class AlertRuleState(BaseModel):
+    name: str
+    #: inactive / pending / firing —— 前端「有 firing 即标红」（§4.4）
+    state: str
+
+
+class AlertStatus(BaseModel):
+    firing: int
+    pending: int
+    rules: list[AlertRuleState] = []
+
+
 class RetrievalMetricsResponse(BaseModel):
     available: bool
     status: str | None = None
@@ -56,3 +68,5 @@ class RetrievalMetricsResponse(BaseModel):
     latency_p95: float | None = None
     error_rate: float | None = None
     token_usage: float | None = None
+    #: 告警状态（Prometheus 规则，非 Alertmanager）—— 读不到时为 None
+    alerts: AlertStatus | None = None

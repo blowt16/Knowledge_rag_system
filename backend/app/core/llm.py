@@ -18,8 +18,10 @@ import logging
 from typing import Any, AsyncIterator
 
 import httpx
+from opentelemetry import trace as otel_trace
 
 from app.core.config import cfg, secret
+from app.core.metrics import record_llm_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,29 @@ def _apply_thinking(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _current_node() -> str:
+    """当前所处的图节点名，用作 token 指标的 `rag.node` 标签。
+
+    从**当前 span 名**反推（图节点 span 叫 `node.<名字>`，见 builder.traced）——
+    这样不用给每个调用方加参数，也不会漏掉将来新增的节点。
+    """
+    span = otel_trace.get_current_span()
+    name = getattr(span, "name", "") or ""
+    return name[len("node."):] if name.startswith("node.") else "unknown"
+
+
+def _record_usage(usage: dict[str, Any] | None) -> None:
+    """把一次调用的 token 用量记进指标（无 usage 时静默跳过）。"""
+    if not usage:
+        return
+    record_llm_tokens(
+        int(usage.get("prompt_tokens") or 0),
+        int(usage.get("completion_tokens") or 0),
+        _model(),
+        _current_node(),
+    )
+
+
 async def complete(
     messages: list[dict[str, str]],
     *,
@@ -88,6 +113,7 @@ async def complete(
         raise LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
 
     data = r.json()
+    _record_usage(data.get("usage"))
     try:
         return data["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError) as e:
@@ -140,6 +166,11 @@ async def stream_raw(
         "model": _model(),
         "messages": messages,
         "stream": True,
+        # ⚠️ 流式默认**不返回 usage**，必须显式要。实测（2026-10-06）DeepSeek 支持：
+        #    最后一个 chunk 带 `usage` 且 `choices` 为**空数组** ——
+        #    所以取 usage 必须在下面那个 `if not choices: continue` **之前**，
+        #    否则这一行统计永远拿不到数（而且不报错，看起来只是"token 一直是 0"）。
+        "stream_options": {"include_usage": True},
         "max_tokens": max_tokens or int(cfg("llm.max_output_tokens_runtime", 8192)),
         "temperature": (temperature if temperature is not None
                         else float(cfg("llm.temperature", 0.3))),
@@ -163,6 +194,9 @@ async def stream_raw(
                         chunk = json.loads(payload)
                     except ValueError:
                         continue
+                    # ★ 先取 usage 再判 choices：带 usage 的那个 chunk 的
+                    #   choices 是空数组，放到下面就被 continue 掉了
+                    _record_usage(chunk.get("usage"))
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue

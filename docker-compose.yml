@@ -27,6 +27,53 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ---- 可观测性三容器（§3.2.3.3，M5 加入）--------------------------------
+  #
+  # ⚠️ 三者缺一不可，分工不同：
+  #      Jaeger   看**单条 trace**（这一次请求到底慢在哪）—— 不存指标
+  #      Collector 中转 + `spanmetrics` connector 把 span 聚合成指标 —— 没有它
+  #                追踪数据上不了仪表盘（Jaeger 不算分位数）
+  #      Prometheus 存指标供 `stats/retrieval` 用 PromQL 查
+  #
+  # 端口一律只绑 127.0.0.1（与 postgres 同口径）—— 不暴露到局域网。
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.65.0
+    container_name: campus-rag-jaeger
+    environment:
+      # all-in-one 默认关 OTLP 接收，必须显式打开，否则 Collector 推过来是 404
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"      # UI：按 trace_id 查全链路
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    container_name: campus-rag-otel-collector
+    # ★ 必须是 contrib 镜像 —— spanmetrics connector 不在核心发行版里
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"        # 应用 OTLP gRPC 入口
+      - "127.0.0.1:4318:4318"        # OTLP HTTP（备用）
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: campus-rag-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
 volumes:
   # named volume，不用 bind mount —— Windows 下 bind mount 的权限与性能都有坑
   pgdata:
+  promdata:

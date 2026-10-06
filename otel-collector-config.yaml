@@ -1,0 +1,71 @@
+# OTel Collector —— 可观测性三容器里的中转站（§3.2.3.3）
+#
+# 数据流：
+#   应用 --OTLP--> Collector ┬─ otlp/jaeger --> Jaeger（看单条 trace 与 span 树）
+#                            └─ spanmetrics --> Prometheus（看分位数、调用数、错误数）
+#
+# ⚠️ `spanmetrics` 是「追踪数据能上仪表盘」的那一环：Jaeger 只存 trace，
+#    不算分位数、不存趋势。没有它，仪表盘的「节点耗时分位数」就没数据源。
+#
+# ⚠️ 必须是 **contrib** 镜像：`spanmetrics` connector 不在核心发行版里。
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  spanmetrics:
+    # 指标名前缀。默认（namespace 为空）会产出 latency_bucket / calls_total，
+    # 名字太泛、与其它 exporter 撞车；加上前缀后是 spanmetrics_latency_bucket。
+    namespace: spanmetrics
+    histogram:
+      explicit:
+        # 覆盖本项目实测区间：精排 1.5s 上下、检索 3.7s 上下、冷启预热另计。
+        # 桶太粗会让 p95 直接退化成桶边界（只能报「≤5s」这种数）。
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 3s, 5s, 8s, 13s, 21s, 30s]
+    dimensions:
+      # 按图节点分组 —— 仪表盘「节点耗时分位数（按节点分组）」靠它
+      - name: rag.node
+      # HTTP 状态码 —— 错误率面板靠它
+      - name: http.status_code
+
+processors:
+  batch:
+    # 流量低（校园内网、单 worker），缩短批量窗口让 Jaeger 里几乎实时可见
+    timeout: 1s
+    send_batch_size: 64
+
+exporters:
+  # → Jaeger。容器名走 docker 内网 DNS；all-in-one 的 OTLP 口就是 4317（不加密）
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # → Prometheus 拉取口（内部网络，不对宿主暴露）
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # ⚠️ 不加 `resource_to_telemetry_conversion`：那会把 service.name 等
+    #    资源属性变成每条指标的标签，基数暴涨（本项目单服务，没有收益）。
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      # ★ spanmetrics 同时出现在 traces 的 exporters 里（它是 connector：吃 trace、吐 metric）
+      exporters: [otlp/jaeger, spanmetrics]
+    metrics:
+      # ⚠️ **两个接收器都要**：
+      #   otlp      —— 应用自己发的指标（如 llm_tokens_total）
+      #   spanmetrics —— 从 span 派生的指标（node 耗时、调用数）
+      # 少写 otlp 的话应用发的指标会被静默丢掉（不报错，只是「指标怎么没有」）。
+      receivers: [otlp, spanmetrics]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: warn

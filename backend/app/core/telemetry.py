@@ -25,6 +25,8 @@ M0 只做 trace_id 的生成与传播；指标栈（Collector/Prometheus/Jaeger�
 
 from __future__ import annotations
 
+import logging
+import os
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -35,6 +37,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, set_span_in_context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+logger = logging.getLogger(__name__)
+
 _propagator = TraceContextTextMapPropagator()
 _initialized = False
 
@@ -42,7 +46,12 @@ TRACEPARENT_HEADER = "traceparent"
 
 
 def setup_tracing(service_name: str = "campus-rag") -> None:
-    """初始化 TracerProvider。
+    """初始化 TracerProvider，并在配了端点时挂上 OTLP 导出（§3.2.3.3）。
+
+    ⚠️ **没配 `OTEL_EXPORTER_OTLP_ENDPOINT` 就不挂 exporter** —— 保持 M0 以来的
+       行为不变：span 照建（`current_trace_id()`、日志里的 trace_id 都靠它），
+       只是不往外发。跑测试、跑 CLI 时不会去连一个不存在的 Collector
+       （BatchSpanProcessor 连不上会刷错误日志、拖慢退出）。
 
     采样策略：本项目流量低（校园内网），**默认全量采样，不设采样率**（§3.2.3.4）。
     将来若要改 head sampling，有一条硬约束：错误与降级的 trace 不能被采样丢弃 ——
@@ -52,6 +61,22 @@ def setup_tracing(service_name: str = "campus-rag") -> None:
     if _initialized:
         return
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    if endpoint:
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider.add_span_processor(BatchSpanProcessor(
+            # 容器内直连 http://otel-collector:4317，明文（不加密）
+            OTLPSpanExporter(endpoint=endpoint, insecure=True),
+        ))
+        logger.info("OTLP 导出已启用", extra={"event": "telemetry.exporter",
+                                          "endpoint": endpoint})
+    else:
+        logger.info("未配置 OTEL_EXPORTER_OTLP_ENDPOINT —— span 只用于本地 trace_id，不外发",
+                    extra={"event": "telemetry.exporter_disabled"})
+
     trace.set_tracer_provider(provider)
     _initialized = True
 

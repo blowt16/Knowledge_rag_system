@@ -186,14 +186,64 @@ async def _prom_query(query: str) -> float | None:
         return None
 
 
-# ⚠️ 这几条 PromQL 是**占位口径**：M5 起 OTel Collector 的 spanmetrics 之后，
-#    真正的指标名与标签以那时的实测为准，届时改这里即可（调用方不变）。
+# ⚠️ 指标名**按实测写**（M4 那版是占位，两处都不对）。
+#    2026-10-06 起 spanmetrics 后从 Prometheus 的
+#    `/api/v1/label/__name__/values` 直读，实际是：
+#        spanmetrics_calls_total
+#        spanmetrics_duration_milliseconds_{bucket,sum,count}
+#    占位那版写的是 `span_metrics_latency_bucket` —— 名字不对、单位也不是 ms。
+#    `duration_milliseconds_*` 的直方图单位就是**毫秒**，与前端「延迟 p50（ms）」对得上。
 _PROM_QUERIES = {
-    "latency_p50": 'histogram_quantile(0.50, sum(rate(span_metrics_latency_bucket[5m])) by (le))',
-    "latency_p95": 'histogram_quantile(0.95, sum(rate(span_metrics_latency_bucket[5m])) by (le))',
-    "error_rate": 'sum(rate(http_requests_total{status=~"5.."}[5m]))',
-    "token_usage": 'sum(rate(llm_tokens_total[5m]))',
+    "latency_p50": ('histogram_quantile(0.50, '
+                    'sum(rate(spanmetrics_duration_milliseconds_bucket[5m])) by (le))'),
+    "latency_p95": ('histogram_quantile(0.95, '
+                    'sum(rate(spanmetrics_duration_milliseconds_bucket[5m])) by (le))'),
+    # HTTP 5xx 占比。http.status_code 是应用在 HTTP span 上打的属性，
+    # 已在 collector 里登记为 spanmetrics 维度（值为空串的其它 span 用 != "" 排除）。
+    # ⚠️ 分子要 `or vector(0)`：一次 5xx 都没有时该序列**不存在**，
+    #    整条表达式会算成「无结果」→ 接口返回 null → 面板显示「—」，
+    #    看起来像没接上。补 0 之后是 0/总量 = 0，语义正确。
+    "error_rate": ('(sum(rate(spanmetrics_calls_total{http_status_code=~"5.."}[5m]))'
+                   ' or vector(0))'
+                   ' / clamp_min(sum(rate(spanmetrics_calls_total'
+                   '{http_status_code!=""}[5m])), 0.001)'),
+    # 应用自己发的计数器（collector 的 metrics 管道接了 otlp 接收器才有）。
+    # ⚠️ 用**累计值**而不是 `rate(...)`：问答是稀疏事件，窗口两端数值常常相同，
+    #    rate 会算成 0（实测踩过 —— 指标明明有 331，rate 报 0），
+    #    在「token 用量」这种展示型面板上会让人以为没接上。
+    "token_usage": 'sum(llm_tokens_total)',
 }
+
+
+async def _prom_rules() -> dict | None:
+    """读 Prometheus 的**告警规则状态**（§4.4 状态卡：有 firing 即标红）。
+
+    ⚠️ 走 Prometheus 自己的 `/api/v1/rules`，**不接 Alertmanager**（§3.2.3.3）：
+       Alertmanager 解决的是通知的分组/去重/静默/分发，而本项目无人值班、
+       没有接收方。Prometheus 自己就把「当前是否越限」算好了，读出来展示即可。
+    """
+    if not PROMETHEUS_URL:
+        return None
+    try:
+        async with httpx.AsyncClient(base_url=PROMETHEUS_URL, timeout=_PROM_TIMEOUT,
+                                     transport=_prom_transport) as client:
+            resp = await client.get("/api/v1/rules", params={"type": "alert"})
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception as e:  # noqa: BLE001 —— 告警读不到不该让页面挂掉
+        logger.warning("Prometheus 规则查询失败：%s", e,
+                       extra={"event": "stats.prom_rules_failed"})
+        return None
+
+    rules: list[dict] = []
+    for group in (payload.get("data") or {}).get("groups") or []:
+        for rule in group.get("rules") or []:
+            rules.append({"name": rule.get("name", ""), "state": rule.get("state", "")})
+    return {
+        "firing": sum(1 for r in rules if r["state"] == "firing"),
+        "pending": sum(1 for r in rules if r["state"] == "pending"),
+        "rules": rules,
+    }
 
 
 async def retrieval_metrics() -> dict:
@@ -208,8 +258,13 @@ async def retrieval_metrics() -> dict:
     for key, query in _PROM_QUERIES.items():
         values[key] = await _prom_query(query)
 
-    if all(v is None for v in values.values()):
-        # 地址配了但一条都答不上来（Prometheus 没起 / 指标名还没对上）
+    alerts = await _prom_rules()
+
+    # ⚠️ 加 `alerts is None` 这一支：Prometheus 起来了、规则也读到了，但 span
+    #    还没产生过（刚起服务、还没人来提问）时会「四条 query 全空」——
+    #    那种情况仍算**可用**，否则仪表盘会把「已接好、只是还没流量」
+    #    显示成「暂不可用」，让人以为接错了。
+    if all(v is None for v in values.values()) and alerts is None:
         return {"available": False, "status": "prometheus_unavailable"}
 
-    return {"available": True, **values}
+    return {"available": True, **values, "alerts": alerts}

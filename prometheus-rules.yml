@@ -1,0 +1,50 @@
+# 告警规则（§3.2.3.3 / §4.4）
+#
+# ⚠️ **不接 Alertmanager**：本项目无人值班、没有接收方。Prometheus 自己算出
+#    「当前是否越限」，仪表盘通过 `/api/v1/rules` 读出来展示（有 firing 即标红）。
+#
+# ⚠️ 阈值是**初值**，M5 用真实流量标定后才作数 —— 现在这份的作用是
+#    让「标红」这条路径能真的被走通（构造一个必然 firing 的规则去验）。
+
+groups:
+  - name: campus-rag
+    rules:
+      # 节点 p95 耗时越限。按 spanmetrics 的 span_name 维度分节点判断。
+      - alert: RAGNodeP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(spanmetrics_latency_bucket{span_name=~"node\\..*"}[5m])) by (le, span_name)
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "节点 {{ $labels.span_name }} 的 p95 超过 10 秒"
+
+      # span 错误率。spanmetrics 的 status_code 取值为 STATUS_CODE_ERROR / STATUS_CODE_UNSET，
+      # 只有显式把 span 标成错误才会进 ERROR —— 本项目当前不标，所以这条**平时恒为 0**，
+      # 它是等「以后真去标注 span 状态」时能直接用的口子（写明，免得被当成没用）。
+      - alert: RAGSpanErrorRateHigh
+        expr: |
+          sum(rate(spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[5m]))
+          /
+          clamp_min(sum(rate(spanmetrics_calls_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "span 错误率超过 5%"
+
+      # HTTP 5xx 比例。http.status_code 是应用在 HTTP span 上打的属性，
+      # 已在 collector 里登记为 spanmetrics 维度。
+      - alert: RAGHttp5xxRate
+        expr: |
+          sum(rate(spanmetrics_calls_total{http_status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(spanmetrics_calls_total{http_status_code!=""}[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP 5xx 比例超过 5%"

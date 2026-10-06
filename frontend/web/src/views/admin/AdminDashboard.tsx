@@ -150,20 +150,51 @@ export default function AdminDashboard() {
               <Stat title="延迟 p95（ms）" value={retrieval.latency_p95 ?? '—'} />
               <Stat title="错误率" value={retrieval.error_rate ?? '—'} />
               <Stat title="token 用量" value={retrieval.token_usage ?? '—'} />
+              <AlertCard alerts={retrieval.alerts} />
               <p className="col-span-2 text-xs text-muted-foreground lg:col-span-4">
-                下钻到 Jaeger 看单次请求的具体环节 —— 需 M5 起可观测容器后可用。
+                下钻到 Jaeger（<code>http://127.0.0.1:16686</code>）看单次请求
+                的具体环节：搜这条回答响应头里的 <code>traceparent</code> 即可。
               </p>
             </div>
           ) : (
             <p className="py-6 text-center text-sm text-muted-foreground">
               运行指标暂不可用
               {retrieval?.status ? `（${retrieval.status}）` : ''} ——
-              业务指标不受影响。M5 接入 Prometheus / Jaeger 后可用。
+              业务指标不受影响。启动脚本会一并拉起 Prometheus / Jaeger。
             </p>
           )}
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+/** 告警状态卡（§4.4）：**有 firing 即标红**。
+ *
+ * ⚠️ 读的是 **Prometheus 自己的规则状态**（`/api/v1/rules`），本项目不接
+ *    Alertmanager（无人值班、没有接收方，见方案 3.2.3.3）。
+ */
+function AlertCard({ alerts }: {
+  alerts?: { firing: number; pending: number; rules: { name: string; state: string }[] } | null
+}) {
+  if (!alerts) {
+    return <Stat title="告警状态" value="—" hint="未读到规则" />
+  }
+  const red = alerts.firing > 0
+  return (
+    <Card className={red ? 'border-red-500 bg-red-50' : ''}>
+      <CardContent className="pt-6">
+        <p className="text-sm text-muted-foreground">告警状态</p>
+        <p className={`mt-1 text-2xl font-semibold ${red ? 'text-red-600' : ''}`}>
+          {red ? `⚠ ${alerts.firing} 条触发` : '正常'}
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {red
+            ? alerts.rules.filter(r => r.state === 'firing').map(r => r.name).join('、')
+            : `共 ${alerts.rules.length} 条规则`}
+        </p>
+      </CardContent>
+    </Card>
   )
 }
 

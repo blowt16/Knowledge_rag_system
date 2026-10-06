@@ -32,6 +32,7 @@ from app.api import document_access as document_access_api
 from app.api import documents as documents_api
 from app.api import stats as stats_api
 from app.api import users as users_api
+from app.core import metrics
 from app.core import telemetry
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
@@ -66,7 +67,13 @@ def _warm_reranker() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     install_logging()
-    telemetry.setup_tracing(service_name=cfg("app.name", "campus-rag"))
+    # ⚠️ service.name 用**固定 ASCII 名**，不用 `cfg("app.name")`（那是中文显示名）。
+    #    实测：中文 service.name 经 collector 的 prometheus exporter 出来是
+    #    `exported_job="校园 RAG 检索问答系统"` 的**乱码**（编码坏掉），
+    #    而它会出现在每一条指标的标签上。
+    telemetry.setup_tracing(service_name="campus-rag")
+    # 指标（§3.2.3.3）—— 与 tracing 同一开关：没配 OTEL_EXPORTER_OTLP_ENDPOINT 就不导出
+    metrics.setup_metrics(service_name="campus-rag")
     await db.init_pool()
     # 握住引用，避免任务被 GC 掉
     warmup = asyncio.create_task(asyncio.to_thread(_warm_reranker))

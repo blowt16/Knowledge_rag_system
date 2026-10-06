@@ -262,11 +262,18 @@ async def test_hot_questions_is_top_10_by_default(client, admin, logs):
 # retrieval（运行指标）
 # ============================================================
 
-async def test_retrieval_is_200_and_unavailable_without_prometheus(client, admin):
-    """★ M4 没有 Prometheus —— 必须 `available:false` + **HTTP 200**（M4-D5）。
+async def test_retrieval_is_200_and_unavailable_without_prometheus(client, admin,
+                                                                   monkeypatch):
+    """★ Prometheus 不可用时必须 `available:false` + **HTTP 200**（M4-D5）。
 
     返 500 的话前端整个仪表盘会白屏，而 §4.4 要求**业务指标区块照常渲染**。
+
+    ⚠️ **必须显式打桩成空**：M5 起 app.yaml 里配了 `observability.prometheus_url`
+       的默认值，不再依赖"没配"这个前提 —— 不显式清空的话，这条用例的结果
+       会取决于**本机 Prometheus 有没有在跑**（本地起着就变红，CI 上就绿）。
     """
+    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "")
+
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     assert r.status_code == 200, "不可用不是错误，不能 500"
@@ -295,6 +302,62 @@ async def test_retrieval_returns_metrics_when_prometheus_answers(client, admin,
     body = r.json()
     assert body["available"] is True
     assert body["latency_p95"] is not None or body["error_rate"] is not None
+
+
+async def test_retrieval_reports_firing_alerts(client, admin, monkeypatch):
+    """告警状态（§4.4）—— 状态卡「有 firing 即标红」的数据源。
+
+    读的是 Prometheus 自己的 `/api/v1/rules`，**不接 Alertmanager**。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/v1/rules"):
+            return httpx.Response(200, json={"status": "success", "data": {"groups": [
+                {"name": "campus-rag", "rules": [
+                    {"name": "RAGNodeP95High", "state": "firing"},
+                    {"name": "RAGSpanErrorRateHigh", "state": "inactive"},
+                ]},
+            ]}})
+        return httpx.Response(200, json={
+            "status": "success", "data": {"resultType": "vector",
+                                          "result": [{"value": [0, "1.23"]}]}})
+
+    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "http://prom.test")
+    monkeypatch.setattr("app.services.stats_service._prom_transport",
+                        httpx.MockTransport(handler))
+
+    r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["alerts"]["firing"] == 1
+    assert body["alerts"]["pending"] == 0
+    assert [x["name"] for x in body["alerts"]["rules"]] == [
+        "RAGNodeP95High", "RAGSpanErrorRateHigh"]
+
+
+async def test_retrieval_available_even_before_any_span(client, admin, monkeypatch):
+    """★ Prometheus 活着、规则读到了，但**还没有流量**（四条 query 全空）时，
+    必须报 `available: true`。
+
+    报 false 的话，仪表盘会把「已接好、只是还没人提问」显示成「暂不可用」，
+    让人以为接错了、跑去查配置。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/v1/rules"):
+            return httpx.Response(200, json={"status": "success", "data": {"groups": []}})
+        return httpx.Response(200, json={
+            "status": "success", "data": {"resultType": "vector", "result": []}})
+
+    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "http://prom.test")
+    monkeypatch.setattr("app.services.stats_service._prom_transport",
+                        httpx.MockTransport(handler))
+
+    r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
+
+    body = r.json()
+    assert body["available"] is True, "读到了规则就不算不可用"
+    assert body["latency_p95"] is None
+    assert body["alerts"] == {"firing": 0, "pending": 0, "rules": []}
 
 
 async def test_student_cannot_read_stats(client):

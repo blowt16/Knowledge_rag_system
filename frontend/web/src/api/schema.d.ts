@@ -610,6 +610,25 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AlertRuleState */
+        AlertRuleState: {
+            /** Name */
+            name: string;
+            /** State */
+            state: string;
+        };
+        /** AlertStatus */
+        AlertStatus: {
+            /** Firing */
+            firing: number;
+            /** Pending */
+            pending: number;
+            /**
+             * Rules
+             * @default []
+             */
+            rules: components["schemas"]["AlertRuleState"][];
+        };
         /**
          * AnnotateRequest
          * @description 两个字段**至少填一个**，否则 400（§4.3.1.3）。
@@ -1001,6 +1020,7 @@ export interface components {
             error_rate?: number | null;
             /** Token Usage */
             token_usage?: number | null;
+            alerts?: components["schemas"]["AlertStatus"] | null;
         };
         /**
          * RoleItem

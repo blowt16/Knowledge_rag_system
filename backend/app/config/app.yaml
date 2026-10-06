@@ -260,6 +260,14 @@ mineru:
   # 按页限定范围调用（§E.8.6）—— 不把整份 PDF 送出去
   timeout: 900
 
+# 可观测性（§3.2.3.3）—— 运行指标那一块
+observability:
+  # Prometheus 查询地址。后端在本机跑时是宿主端口；**部署进容器要改成
+  # http://prometheus:9090**（docker 内网 DNS）。留空则 stats/retrieval 恒返
+  # available:false（M4-D5 的口径：不可用不是错误，HTTP 仍 200）。
+  # 也可用环境变量 PROMETHEUS_URL 覆盖（优先级更高）。
+  prometheus_url: "http://127.0.0.1:9090"
+
 logging:
   level_env: LOG_LEVEL
   default_level: INFO
