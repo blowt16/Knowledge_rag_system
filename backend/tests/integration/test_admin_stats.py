@@ -306,3 +306,35 @@ async def test_student_cannot_read_stats(client):
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM users WHERE id = $1", u["id"])
+
+
+# ============================================================
+# 评审 I-1：trend 的「一天」必须按**本地**时区切
+# ============================================================
+
+async def test_trend_buckets_by_local_day_not_utc(client, admin, logs):
+    """★ 评审实测发现：PG 会话时区是 **UTC** 而进程本地是 **+08:00**，
+    于是本地 00:00–07:59 的问答全被算进**前一天** —— 「今天」在早上永远显示 0。
+
+    判据：在**本地今天凌晨 02:00** 落一条，它必须出现在今天那一格里。
+    （本地 0–8 点跑这条用例时，按 UTC 分桶会把它落到昨天，用例立刻红。）
+    """
+    from datetime import datetime, time as dtime
+    local_2am = datetime.combine(date.today(), dtime(2, 0)).astimezone()
+
+    log_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO qa_logs (id, session_id, user_id, user_role, question,
+                                    route, is_refused, created_at)
+               VALUES ($1, 's', $2, 'student', '凌晨的问题', 'knowledge', 0, $3)""",
+            log_id, admin["id"], local_2am)
+    logs["ids"]["qa"].append(log_id)
+
+    r = await client.get("/api/admin/stats/trend?days=3", headers=_h(admin["token"]))
+    days = r.json()["days"]
+    today_row = next(d for d in days if d["date"] == date.today().isoformat())
+
+    assert today_row["qa_count"] >= 1, (
+        f"本地今天凌晨的问答没算进今天 —— 分桶用的不是本地时区：{days}"
+    )

@@ -27,17 +27,35 @@ from app.core.security import hash_password
 from app.main import app
 from app.retrieval import bm25, vector
 from app.retrieval.search import vector_retrieve
-from tests.support import delete_admin, ingest_text_doc, make_user, purge_documents
+from tests.support import (
+    delete_admin,
+    ingest_text_doc,
+    make_user,
+    purge_documents,
+    purge_documents_by_id,
+)
 
 PASSWORD = "Test@12345"
 MARKER = "钴蓝色飞艇"
 
 
-def _body(tag: str) -> str:
+def _marker() -> str:
+    """**每份测试文档一个唯一关键词**。
+
+    ⚠️ 不要所有用例共用同一个 MARKER：正文里的关键词必须唯一，检索才**必然**
+       把这份文档排在最前 —— 否则一旦索引里残留了别的同样含该短语的 chunk，
+       Top-K 被占满，`_student_retrieves` 的正控就会红
+       （实测：三个 `test_patch_*_removes_from_retrieval` 同时红在正控上）。
+       这是 M1 的 ACL 用例早就立下的做法（「用例的正文是合成的唯一短语」）。
+    """
+    return f"{MARKER}{uuid.uuid4().hex[:6]}"
+
+
+def _body(tag: str, marker: str) -> str:
     return (
         f"【管理端接口测试专用文档 {tag}】\n\n"
-        f"本文含唯一关键词「{MARKER}」，用于验证可见范围变更是否真的写进了向量库。\n"
-        f"再次出现「{MARKER}」以便分块后仍然集中。\n"
+        f"本文含唯一关键词「{marker}」，用于验证可见范围变更是否真的写进了向量库。\n"
+        f"再次出现「{marker}」以便分块后仍然集中。\n"
         + "本段是为了凑足分块长度而重复的正文，不含其他关键词。\n" * 12
     )
 
@@ -92,18 +110,26 @@ def _h(u: dict) -> dict:
 async def doc(admin):
     """一份**公开**的合成文档（默认可被 student 检索到，用于做正向对照）。"""
     title = f"管理端测试_{uuid.uuid4().hex[:8]}"
+    marker = _marker()
     doc_id = await ingest_text_doc(admin_id=admin["id"], title=title,
-                                   text=_body(title), visibility="public")
+                                   text=_body(title, marker), visibility="public")
     try:
-        yield {"id": doc_id, "title": title}
+        yield {"id": doc_id, "title": title, "marker": marker}
     finally:
-        await purge_documents([title])
+        # ⚠️ 按 **id** 清：这个夹具服务的用例里有会改标题的
+        #    （`test_patch_title_does_not_reindex`），按 title 清会静默漏孤儿
+        await purge_documents_by_id([doc_id])
 
 
-async def _student_retrieves(doc_id: str) -> bool:
-    """student 走**向量路**能不能拿到这份文档 —— 走的是真实的 `build_where` + Chroma。"""
+async def _student_retrieves(doc_id: str, marker: str) -> bool:
+    """student 走**向量路**能不能拿到这份文档 —— 真实的 `build_where` + Chroma。
+
+    ⚠️ query 用**这份文档自己的**唯一关键词：共用短语的话，
+       索引里任何残留的同短语 chunk 都能把 Top-K 占满，
+       正控会红在「本该第一的没出现」上。
+    """
     async with db.tx() as conn:
-        chunks = await vector_retrieve(conn, MARKER, make_user("student"))
+        chunks = await vector_retrieve(conn, marker, make_user("student"))
     return doc_id in {c.document_id for c in chunks}
 
 
@@ -113,13 +139,13 @@ def _meta(doc_id: str) -> dict:
     return rows[0]["metadata"]
 
 
-def _bm25_hits(chunk_ids: list[str]) -> set[str]:
+def _bm25_hits(chunk_ids: list[str], marker: str) -> set[str]:
     """BM25 索引里**还活着**的那部分 chunk_id。
 
     直接问索引（而不是读映射表文件）：孤儿条目的危害就是「还能被搜出来」，
     所以判据也应该是「还搜不搜得到」。
     """
-    hits = bm25.search(MARKER, k=50)
+    hits = bm25.search(marker, k=50)
     return {h.chunk_id for h in hits} & set(chunk_ids)
 
 
@@ -200,8 +226,10 @@ async def test_student_cannot_use_admin_api(client, student):
 async def test_versions_lists_all_and_flags_current(client, admin):
     """同 title 传两次 = 同组两个版本；当前生效版本要标出来（§3.3.1 的折叠规则）。"""
     title = f"版本测试_{uuid.uuid4().hex[:8]}"
-    v1 = await ingest_text_doc(admin_id=admin["id"], title=title, text=_body(title + "v1"))
-    v2 = await ingest_text_doc(admin_id=admin["id"], title=title, text=_body(title + "v2"))
+    v1 = await ingest_text_doc(admin_id=admin["id"], title=title,
+                               text=_body(title + "v1", _marker()))
+    v2 = await ingest_text_doc(admin_id=admin["id"], title=title,
+                               text=_body(title + "v2", _marker()))
     try:
         group = (await client.get("/api/admin/documents", headers=_h(admin))).json()
         gid = next(i["doc_group_id"] for i in group["items"] if i["id"] == v1)
@@ -278,7 +306,7 @@ async def test_patch_visibility_reindexes_chroma_and_hides_from_student(client, 
     只断言「PG 那一行变了」是测不出这个缺陷的 —— 检索期的 ACL 读的是
     Chroma 的 `visibility` / `vis_*` 字段。
     """
-    assert await _student_retrieves(doc["id"]), "正向对照：改之前学生本来就该搜得到"
+    assert await _student_retrieves(doc["id"], doc["marker"]), "正向对照：改之前学生本来就该搜得到"
 
     r = await client.patch(f"/api/admin/documents/{doc['id']}",
                            json={"visibility": "restricted", "visible_roles": ["admin"]},
@@ -290,14 +318,14 @@ async def test_patch_visibility_reindexes_chroma_and_hides_from_student(client, 
     assert meta["vis_student"] is False, "Chroma 的 vis_student 没被重写"
     assert meta["vis_admin"] is True
 
-    assert not await _student_retrieves(doc["id"]), \
+    assert not await _student_retrieves(doc["id"], doc["marker"]), \
         "改完受限后学生仍然搜得到 —— 重索引没生效"
 
     # 改回去，学生必须又能搜到（排除「索引整个坏掉」这种假通过）
     assert (await client.patch(f"/api/admin/documents/{doc['id']}",
                                json={"visibility": "public", "visible_roles": []},
                                headers=_h(admin))).status_code == 200
-    assert await _student_retrieves(doc["id"]), "改回公开后学生又该搜得到"
+    assert await _student_retrieves(doc["id"], doc["marker"]), "改回公开后学生又该搜得到"
 
 
 async def test_patch_status_disable_removes_from_retrieval(client, admin, doc):
@@ -305,26 +333,26 @@ async def test_patch_status_disable_removes_from_retrieval(client, admin, doc):
 
     这是原方案漏掉的一半（只写了 visibility/effective_date）。
     """
-    assert await _student_retrieves(doc["id"])
+    assert await _student_retrieves(doc["id"], doc["marker"])
 
     r = await client.patch(f"/api/admin/documents/{doc['id']}",
                            json={"status": "disabled"}, headers=_h(admin))
     assert r.status_code == 200, r.text
 
     assert _meta(doc["id"])["status"] == "disabled", "Chroma 的 status 没被重写"
-    assert not await _student_retrieves(doc["id"]), "停用后仍能被检索到"
+    assert not await _student_retrieves(doc["id"], doc["marker"]), "停用后仍能被检索到"
 
 
 async def test_patch_effective_date_future_removes_from_retrieval(client, admin, doc):
     """生效日在未来 → 暂不参与检索（§15 #8，不能出现政策真空期）。"""
-    assert await _student_retrieves(doc["id"])
+    assert await _student_retrieves(doc["id"], doc["marker"])
 
     future = (date.today() + timedelta(days=30)).isoformat()
     r = await client.patch(f"/api/admin/documents/{doc['id']}",
                            json={"effective_date": future}, headers=_h(admin))
     assert r.status_code == 200, r.text
 
-    assert not await _student_retrieves(doc["id"]), "未来生效日的文档不该参与检索"
+    assert not await _student_retrieves(doc["id"], doc["marker"]), "未来生效日的文档不该参与检索"
 
 
 async def test_patch_rejects_immutable_fields(client, admin, doc):
@@ -357,11 +385,11 @@ async def test_patch_empty_body_is_rejected(client, admin, doc):
 async def test_disable_enable_toggle(client, admin, doc):
     assert (await client.post(f"/api/admin/documents/{doc['id']}/disable",
                               headers=_h(admin))).status_code == 200
-    assert not await _student_retrieves(doc["id"])
+    assert not await _student_retrieves(doc["id"], doc["marker"])
 
     assert (await client.post(f"/api/admin/documents/{doc['id']}/enable",
                               headers=_h(admin))).status_code == 200
-    assert await _student_retrieves(doc["id"]), "重新启用后必须恢复可检索"
+    assert await _student_retrieves(doc["id"], doc["marker"]), "重新启用后必须恢复可检索"
 
 
 async def test_delete_removes_row_and_index_but_keeps_source_file(client, admin):
@@ -370,7 +398,9 @@ async def test_delete_removes_row_and_index_but_keeps_source_file(client, admin)
     源文件不删是刻意的 —— 删了既不能回滚、也再拿不到原文。
     """
     title = f"删除测试_{uuid.uuid4().hex[:8]}"
-    doc_id = await ingest_text_doc(admin_id=admin["id"], title=title, text=_body(title))
+    marker = _marker()
+    doc_id = await ingest_text_doc(admin_id=admin["id"], title=title,
+                                   text=_body(title, marker))
 
     async with db.tx() as conn:
         row = await conn.fetchrow(
@@ -391,7 +421,7 @@ async def test_delete_removes_row_and_index_but_keeps_source_file(client, admin)
         after = await conn.fetchval("SELECT count(*) FROM documents WHERE id = $1", doc_id)
     assert after == 0, "PG 行应被删除（不是软删）"
     assert vector.get_chunks(doc_id, limit=10) == [], "Chroma 里的 chunk 没删干净"
-    assert not (_bm25_hits(chunk_ids)), "BM25 里还留着孤儿条目"
+    assert not (_bm25_hits(chunk_ids, marker)), "BM25 里还留着孤儿条目"
     assert source.exists(), "源文件**不该**被删（可回溯）"
 
 
@@ -404,17 +434,57 @@ async def test_remove_from_index_without_chunk_ids_still_clears_bm25(admin):
     from app.services import index_service
 
     title = f"孤儿测试_{uuid.uuid4().hex[:8]}"
-    doc_id = await ingest_text_doc(admin_id=admin["id"], title=title, text=_body(title))
+    marker = _marker()
+    doc_id = await ingest_text_doc(admin_id=admin["id"], title=title,
+                                   text=_body(title, marker))
 
     chunk_ids = [r["chunk_id"] for r in vector.get_chunks(doc_id, limit=100000)]
     assert chunk_ids
-    assert _bm25_hits(chunk_ids), "前置：BM25 里本来有这批 chunk"
+    assert _bm25_hits(chunk_ids, marker), "前置：BM25 里本来有这批 chunk"
 
     # 先把 Chroma 清空，制造「removed_chroma == 0 但 BM25 还在」的现场
     vector.delete_document(doc_id)
 
     index_service.remove_from_index(doc_id)          # 不传 chunk_ids
 
-    assert not _bm25_hits(chunk_ids), \
+    assert not _bm25_hits(chunk_ids, marker), \
         "Chroma 已空时按条数推断 chunk_id，BM25 的条目全成了搜得到的孤儿"
     await purge_documents([title])
+
+
+# ============================================================
+# 评审 I-3：上传文件名必须净化（**预存在**，M4 评审发现）
+# ============================================================
+
+def test_upload_filename_cannot_escape_tmp_dir():
+    """★ 文件名里的 `..` 能穿出 `data/tmp` —— 实测（Windows）：
+
+        Path('data/tmp') / 'TASK_..\..\..\..\evil.txt'
+            → D:\Knowledge_rag_system\evil.txt
+
+    `{task_id}_` 前缀只挡住第一段，`..` 照样往上跳，而 `write_bytes`
+    发生在**入库之前** —— 等于管理员上传即可往仓库任意路径写文件，
+    且落在**下次启动会加载**的位置。
+
+    只有 admin 能调，但「任意文件写」不该因为调用者可信就留着。
+    """
+    from app.core.config import repo_path
+    from app.services import document_service
+
+    tmp_root = Path(repo_path("data", "tmp")).resolve()
+    evil = r"task123_..\..\..\..\evil.txt"
+    for name in (evil, "../../evil.txt", r"..\..\evil.txt", "/etc/passwd",
+                 r"C:\Windows\evil.txt"):
+        p = Path(document_service._tmp_path("task123", name)).resolve()
+        assert p.parent == tmp_root, (
+            f"文件名 {name!r} 穿出了临时目录：{p}"
+        )
+
+
+def test_upload_filename_keeps_readable_suffix():
+    """净化不能把扩展名一起砍掉 —— 后面靠扩展名判格式（file_type）。"""
+    from app.services import document_service
+
+    p = Path(document_service._tmp_path("task123", "桂林电子科技大学 学籍管理规定.pdf"))
+    assert p.suffix == ".pdf", p
+    assert p.parent.name == "tmp", p

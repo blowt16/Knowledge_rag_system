@@ -22,14 +22,23 @@ export default function VersionsPage() {
 
   const load = useCallback(async () => {
     try {
-      // 每个 doc_group_id 只取「当前生效（或最新）的那一行」作为折叠头
-      const r = await listDocuments({ page: 1, page_size: 100 })
+      // ⚠️ **必须翻页取全**（评审 I-2）：后端每页上限 100 行，而返回的是
+      //    **文档行**（含各组的历史版本、disabled/failed 行）——
+      //    只取第一页的话，排序落在 100 行之后的文档组会**整组静默消失**，
+      //    页面上没有任何迹象。
       const byGroup = new Map<string, DocumentItem>()
-      for (const d of r.items ?? []) {
-        const cur = byGroup.get(d.doc_group_id)
-        if (!cur || d.is_current || (!cur.is_current && d.version > cur.version)) {
-          byGroup.set(d.doc_group_id, d)
+      let page = 1
+      for (;;) {
+        const r = await listDocuments({ page, page_size: 100 })
+        for (const d of r.items ?? []) {
+          const cur = byGroup.get(d.doc_group_id)
+          if (!cur || d.is_current || (!cur.is_current && d.version > cur.version)) {
+            byGroup.set(d.doc_group_id, d)
+          }
         }
+        if (!r.has_more) break
+        page += 1
+        if (page > 50) break   // 兜底：5000 行还取不完就不再往上翻
       }
       setGroups([...byGroup.values()])
     } catch (e) {
@@ -65,7 +74,7 @@ export default function VersionsPage() {
                 <button className="flex-1 text-left" onClick={() => void toggle(g.doc_group_id)}>
                   <span className="font-medium">{g.title}</span>
                   <span className="ml-2 text-xs text-muted-foreground">
-                    {open === g.doc_group_id ? '▾' : '▸'} 共 {g.version} 个版本记录
+                    {open === g.doc_group_id ? '▾' : '▸'} 版本 v{g.version}
                   </span>
                 </button>
                 <Badge variant={g.is_current ? 'default' : 'secondary'}>

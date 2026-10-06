@@ -88,29 +88,44 @@ async def ingest_text_doc(
     return outcome.document_id
 
 
-async def purge_documents(titles: list[str]) -> None:
-    """按 title 清掉测试造的文档：PG 两行 + **两处**索引。"""
-    if not titles:
+async def purge_documents_by_id(doc_ids: list[str]) -> None:
+    """按 **document_id** 清掉测试造的文档：PG 两行 + 两处索引。
+
+    ⚠️ 为什么要有按 id 的版本（而不是只有按 title 的）：**title 会被用例改掉**。
+       实测：`test_patch_title_does_not_reindex` 把标题改成了「改过的标题」，
+       而夹具按**原标题**清理 —— SELECT 查不到 → `doc_ids = []` →
+       索引一条都没删，每跑一次就往真实索引里漏一条孤儿
+       （连续跑几次后 Chroma 里躺着 4 条 `管理端测试_*`，
+       把后续用例的 Top-K 挤掉，三个用例同时红在正控上）。
+       按 id 清理不依赖任何会被改写的字段。
+    """
+    if not doc_ids:
         return
     async with db.tx() as conn:
-        rows = await conn.fetch(
-            "SELECT id FROM documents WHERE title = ANY($1::text[])", titles)
-        doc_ids = [r["id"] for r in rows]
         await conn.execute(
             "DELETE FROM ingestion_tasks WHERE document_id = ANY($1::text[])", doc_ids)
         await conn.execute("DELETE FROM documents WHERE id = ANY($1::text[])", doc_ids)
     for doc_id in doc_ids:
         try:
-            # chunk_id 必须在删 Chroma **之前**取：删完就查不到了，
-            # 只剩按条数推断这一个不可靠的路子
+            # chunk_id 必须在删 Chroma **之前**取：删完就查不到了
             chunk_ids = [r["chunk_id"]
                          for r in vector.get_chunks(doc_id, limit=100000)]
             vector.delete_document(doc_id)
             bm25.remove_document(chunk_ids)
         except Exception as e:  # noqa: BLE001
-            # ⚠️ 这里原本是 `pass` —— 而清理失败**不会让用例失败**，只会把死条目
-            #    留进真实索引（M1 现场：映射表 186 条 / 31 个 document_id，
-            #    库里却只有 1 个文档）。最典型的成因是 Chroma 被占用（本机真遇到过）。
-            #    宁可吵一点，也不要静默留孤儿。回归锁见 test_purge_logging.py
             logger.warning("测试清理失败，索引里可能留下孤儿条目：document_id=%s（%s）",
                            doc_id, e, extra={"event": "test.purge_failed"})
+
+
+async def purge_documents(titles: list[str]) -> None:
+    """按 title 清理（先查 id 再走 `purge_documents_by_id`）。
+
+    ⚠️ 只在**标题不会被用例改写**时可靠；会改名/改状态的用例请直接用
+       `purge_documents_by_id`。
+    """
+    if not titles:
+        return
+    async with db.tx() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM documents WHERE title = ANY($1::text[])", titles)
+    await purge_documents_by_id([r["id"] for r in rows])

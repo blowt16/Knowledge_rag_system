@@ -43,9 +43,23 @@ def counts_for(status: str) -> dict[str, int]:
 
 
 def _tmp_path(task_id: str, filename: str) -> Path:
+    """临时落盘路径。
+
+    ⚠️ **文件名来自 multipart，必须净化**（评审 I-3 实测）：原样拼进去时
+       `Path("data/tmp") / "TASK_..\..\..\..\evil.txt"` 会解析到
+       **仓库根目录**，而 `write_bytes` 发生在入库**之前** ——
+       等于「上传即可往任意路径写文件」，且落在下次启动会加载的位置。
+       `{task_id}_` 前缀只挡住第一段，`..` 照样往上跳。
+
+    只取最后一段、去掉前导点、两个方向的分隔符都当分隔符处理
+       （反斜杠在 POSIX 上不是分隔符，但不能因此把它当普通字符放行）。
+    """
     tmp_dir = repo_path("data", "tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    return tmp_dir / f"{task_id}_{filename}"
+
+    base = (filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    safe = base.lstrip(".") or "unnamed"
+    return tmp_dir / f"{task_id}_{safe}"
 
 
 def normalize_roles(visible_roles: str, visibility: str) -> list[str]:

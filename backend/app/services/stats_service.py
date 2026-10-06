@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import httpx
 
@@ -97,30 +97,44 @@ async def trend(*, days: int = 30) -> dict:
 
     没有问答的那天也要出现 —— 缺席的那天在折线图上表现为断开，
     看上去像「服务挂过一天」。
+
+    ⚠️ **「一天」按本地时区切**（评审 I-1 实测）：PG 会话时区是 **UTC**，
+       而进程本地是 **+08:00** —— 用 `date_trunc('day', created_at)` 分桶，
+       本地 00:00–07:59 的每一次问答都会被算进**前一天**，
+       「今天」在早上永远显示 0。所以窗口与分桶都在 Python 里按本地日算，
+       SQL 只负责按**绝对时刻**取窗口（`timestamptz` 比较与会话时区无关）。
+
+    数据量有界（一个校园系统的问答日志），取回本地过滤比在 SQL 里
+       拼时区表达更不容易错。
     """
+    today = date.today()
+    first = today - timedelta(days=days - 1)
+    # 本地零点对应的**绝对时刻**
+    window_start = datetime.combine(first, time.min).astimezone()
+
     async with db.tx() as conn:
         rows = await conn.fetch(
-            """SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS d,
-                      count(*) AS qa_count,
-                      count(*) FILTER (WHERE is_refused = 1) AS refusal_count
-                 FROM qa_logs
-                WHERE created_at >= date_trunc('day', now())
-                                    - ($1 - 1) * interval '1 day'
-                GROUP BY d""",
-            days)
-    by_day = {r["d"]: r for r in rows}
+            """SELECT created_at, is_refused FROM qa_logs
+                WHERE created_at >= $1""",
+            window_start)
 
-    today = date.today()
-    out = []
-    for offset in range(days - 1, -1, -1):
-        key = (today - timedelta(days=offset)).isoformat()
-        hit = by_day.get(key)
-        out.append({
-            "date": key,
-            "qa_count": hit["qa_count"] if hit else 0,
-            "refusal_count": hit["refusal_count"] if hit else 0,
-        })
-    return {"days": out}
+    buckets: dict[date, list[int]] = {
+        first + timedelta(days=i): [0, 0] for i in range(days)
+    }
+    for r in rows:
+        # asyncpg 给的是 UTC-aware；astimezone() 不带参数 → 转本机时区
+        day = r["created_at"].astimezone().date()
+        slot = buckets.get(day)
+        if slot is None:
+            continue
+        slot[0] += 1
+        if r["is_refused"]:
+            slot[1] += 1
+
+    return {"days": [
+        {"date": day.isoformat(), "qa_count": counts[0], "refusal_count": counts[1]}
+        for day, counts in sorted(buckets.items())
+    ]}
 
 
 async def refusals_aggregate() -> dict:
