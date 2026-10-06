@@ -63,6 +63,53 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# 图节点 → 面向用户的阶段（§3.7.2 的取值表）。
+# ⚠️ 阶段**与内部节点名解耦**：节点重构不该改 SSE 协议 —— 所以映射只此一份。
+# ⚠️ `clarify` 与 `refuse` **刻意不在此表里**：
+#    - clarify 之后用户看到的是一句反问、不是答案，发 `generating` 是骗人；
+#    - refuse 是 rerank 之后零成本短路，没有可提示的耗时。
+#    （回归锁：`tests/integration/test_stage_events.py`）
+NODE_TO_STAGE = {
+    "resolve": "resolving",
+    "route": "routing",
+    "rewrite": "retrieving",
+    "retrieve": "retrieving",
+    "rerank": "reranking",
+    "build_context": "generating",
+    "generate": "generating",
+    "cite": "verifying",
+    "chat": "generating",
+}
+
+# ⚠️ 展示文案**以 `stage` 为准**（§4.2.4.2 的文案映射表在**前端**）：
+#    label 只是兜底与调试。两个文案源并存必然不一致 ——
+#    服务端改了 label，前端还显示自己那份。
+STAGE_LABELS = {
+    "resolving": "正在理解你的问题…",
+    "routing": "正在判断问题类型…",
+    "retrieving": "正在检索知识库…",
+    "reranking": "正在筛选最相关的资料…",
+    "generating": "正在组织答案…",
+    "verifying": "正在核对引用…",
+}
+
+
+def stage_of(payload: dict) -> str | None:
+    """`debug` 通道的「节点开工」事件 → stage 名；不是开工事件就 None。
+
+    ⚠️ 必须**宽容**：图会继续长（M5 还要加评测链路），映射表里没有的节点、
+       形状变化的载荷都只能安静跳过 —— 一个未知节点名不该让整条 SSE 流中断。
+
+    ⚠️ 只认 `type == "task"`：同一通道还会回放 `task_result`（节点**结束**），
+       拿它当阶段提示就晚了一整步。
+    """
+    if payload.get("type") != "task":
+        return None
+    inner = payload.get("payload")
+    name = inner.get("name") if isinstance(inner, dict) else None
+    return NODE_TO_STAGE.get(name or "")
+
+
 def node_ran(state: dict, node: str) -> bool:
     """该节点是否真的执行过 —— 看 trace 累积（有 operator.add reducer，不会丢）。
 
@@ -131,9 +178,13 @@ async def stream_chat(
         # 节点自己发的 error（generate 的降级、chat/clarify 的上游故障）——
         # `error` 是**终止事件**，见下面的收尾段
         emitted_error = False
+        last_stage: str | None = None
 
+        # `debug` 通道给出**节点开工**信号 —— 阶段提示靠它，
+        # 而不是靠 `values` 快照：快照是「节点跑完之后」才有的，
+        # 那一刻再报「正在检索知识库…」已经晚了一步（静默期早过了）。
         async for mode, payload in get_graph().astream(
-            state, stream_mode=["custom", "values"]
+            state, stream_mode=["custom", "values", "debug"]
         ):
             if await is_disconnected():
                 # ⚠️ 客户端断连也必须释放锁 —— 否则该会话会永久「正在生成」，
@@ -164,6 +215,17 @@ async def stream_chat(
                     yield sse("route", event)
                     if final.get("resolved_query") and final["resolved_query"] != query:
                         yield sse("resolved", {"resolved_query": final["resolved_query"]})
+            elif mode == "debug":
+                # 阶段提示：填充首个 token 到达前的静默期（§4.2.4.2）。
+                # ⚠️ 连续同名只发一次 —— build_context 与 generate 都归
+                #    `generating`，连发两次只会让提示闪一下再回到同一句。
+                # ⚠️ error 之后一律停：`error` 是终止事件（§3.7.2），
+                #    这之后再冒「正在核对引用…」等于告诉用户还在正常往下走。
+                stage = stage_of(payload)
+                if stage and not emitted_error and stage != last_stage:
+                    last_stage = stage
+                    yield sse("stage", {"stage": stage,
+                                        "label": STAGE_LABELS.get(stage, "")})
             elif mode == "custom":
                 # generate / chat / clarify 节点边收边发的 token / error
                 if payload.get("type") == "token":
