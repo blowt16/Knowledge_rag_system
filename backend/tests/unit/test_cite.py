@@ -119,6 +119,14 @@ def test_only_valid_markers_count_as_supported():
     ("综上。", False),                   # 纯过渡句
     ("太短。", False),                   # 过短
     ("", False),
+    # ★ 元陈述（§3.5.3 节点 9 的排除项）：断言的不是文档中的事实，而是
+    #   「我查没查、资料里有没有」。M3 的 K-1：实测「资料中未找到针对黄色、
+    #   橙色、红色预警各自具体后果的进一步规定。」被当成结论句**标了灰**。
+    ("资料中未找到针对黄色预警各自具体后果的进一步规定。", False),
+    ("知识库中未找到相关规定。", False),
+    ("未在文档中提及该情形。", False),
+    ("我查阅了相关资料。", False),        # 方案 §3.5.3 给的原例
+    ("本文档未包含此类条款。", False),
 ])
 def test_conclusion_sentence_judgement_is_conservative(sentence, expected):
     """「结论句」判定必须保守：拿不准的一律不算，**宁可漏，不可错**。"""

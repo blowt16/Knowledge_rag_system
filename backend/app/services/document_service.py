@@ -43,7 +43,7 @@ def counts_for(status: str) -> dict[str, int]:
 
 
 def _tmp_path(task_id: str, filename: str) -> Path:
-    """临时落盘路径。
+    r"""临时落盘路径。
 
     ⚠️ **文件名来自 multipart，必须净化**（评审 I-3 实测）：原样拼进去时
        `Path("data/tmp") / "TASK_..\..\..\..\evil.txt"` 会解析到
@@ -455,7 +455,17 @@ async def delete_document(document_id: str) -> None:
     if not exists:
         raise NotFound("文档不存在")
 
-    # 先删索引（内部已按「先取 chunk_id、再删 Chroma、后删 BM25」的正确顺序）
+    # ⚠️ **先把行落到 `disabled` 中间态**（评审 M4-K6）：原实现是
+    #    「先删索引 → 再删 PG 行」，PG 那次 DELETE 若失败，行还显示 `active`、
+    #    `chunk_count>0`，而内容其实已经检索不到了 —— **没有任何状态能标记
+    #    这个不一致**，管理员看不出该重试。
+    #    落到 `disabled` 之后：检索立刻停、管理端看得见、重试一次删除即可。
+    async with db.tx() as conn:
+        await conn.execute("UPDATE documents SET status = 'disabled' WHERE id = $1",
+                           document_id)
+
+    # 再删索引（内部已按「先取 chunk_id、再删 Chroma、后删 BM25」的正确顺序）。
+    # 这一步失败 → 行停在 `disabled`，正是我们要的中间态。
     index_service.remove_from_index(document_id)
 
     async with db.tx() as conn:

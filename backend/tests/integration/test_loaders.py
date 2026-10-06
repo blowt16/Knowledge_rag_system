@@ -71,16 +71,19 @@ def test_no_ocr_triggered_on_text_layer_corpus(loaded):
 
 def test_chapters_extracted_for_most_documents(loaded):
     """PDF 的 current_chapter 原先**从未被写入**（E.3.2，实测 1244/1244 全为空串）。
-    正则修复后应当有值。
 
-    §E.4.2 实测：9 份有「章」，只有第 10 份真的没有 —— 不为个别文档补特例规则。
+    ⚠️ **2026-10-06 更新（M3 的 K-2 跟进）**：这里原本断言第 10 份
+       「本就没有『章』，不应有标记」。实测把话说完整是：它**确实没有「第X章」**，
+       但它用「一、二、」作顶层条号 —— 整份 5 条 chunk 因此一条章节都抽不出来，
+       引用只能落到「只跳页」（§9.9 K-2）。
+
+       现在加的是**有门槛的回退**（只在完全抽不到章标记时才认「一、」），
+       不是按文件名开的特例 —— 另外 9 份有「第X章」→ 不启用回退，一行不受影响
+       （回归锁见 `tests/unit/test_chapter_marks.py`）。
     """
     for name, (_r, normalized, _s, _c) in loaded.items():
         marks = extract_chapter_marks(normalized)
-        if name.startswith("10_"):
-            assert marks == [], "第 10 份本就没有「章」，不应有标记"
-        else:
-            assert marks, f"{name} 未抽到任何章节标记"
+        assert marks, f"{name} 未抽到任何章节标记"
 
 
 def test_chapter_marks_are_ordered_and_in_range(loaded):

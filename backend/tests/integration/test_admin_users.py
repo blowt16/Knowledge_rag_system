@@ -244,3 +244,43 @@ async def test_patch_unknown_user_is_404(client, admin):
                            headers=_h(admin["token"]))
     assert r.status_code == 404, r.text
     assert r.json()["code"] == "not_found"
+
+
+# ============================================================
+# 评审 M4-K4：refresh 也必须看 is_active
+# ============================================================
+
+async def test_refresh_rejected_for_disabled_account(client, victim):
+    """★ 停用后，**即使令牌版本没变**，`/refresh` 也必须拒绝。
+
+    经接口停用会自增 `token_version`（那条路本来就被 tv 比对堵住了），
+    所以这里**直接改库**模拟「版本没变、但账号被停用」—— 那正是剩下的口子：
+    `/refresh` 只比 tv，完全不看 `is_active`，被停用的账号能一直换出新的
+    7 天 access。日后任何一处新增的「写 users」路径忘了自增 tv，同一个口子就开了。
+
+    注：这条与「停用后旧 access 立刻 401」不重复 —— 那条走的是 tv，
+    这条走的是 is_active，两条路各堵各的。
+    """
+    fresh = await _login(client, victim["username"])
+    refresh_token = fresh.json()["refresh_token"]
+
+    # 直接改库：只置停用，**不动 token_version**
+    async with db.tx() as conn:
+        await conn.execute("UPDATE users SET is_active = FALSE WHERE id = $1",
+                           victim["id"])
+        tv = await conn.fetchval("SELECT token_version FROM users WHERE id = $1",
+                                 victim["id"])
+    assert tv == int(pyjwt_decode_tv(refresh_token)), "前置：令牌版本没变（正是要测的场景）"
+
+    r = await client.post("/api/auth/refresh", json={"refresh_token": refresh_token})
+
+    assert r.status_code == 401, f"被停用的账号还能刷新出新的 access：{r.text}"
+
+
+def pyjwt_decode_tv(token: str) -> str:
+    """只取 payload 里的 tv，不验签（测试里自己造的令牌，不需要验）。"""
+    import base64
+    import json as _json
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return str(_json.loads(base64.urlsafe_b64decode(payload))["tv"])

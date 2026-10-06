@@ -102,6 +102,27 @@ console.log('— 尾巴里的半截语法不能崩 —')
   }
 }
 
+console.log('— ★ 评审抓到的两个边界（M4-K1 / M4-K2）—')
+{
+  // M4-K1：纯空白段。跳过一个空白块却仍然推进游标，那些字符就既不在
+  //         closed 也不在 tail 里 —— 「逐字还原」当场失效。
+  for (const text of ['\n\n甲段。', '甲。\n\n\n\n乙。', '   \n\n乙。', '\n\n']) {
+    roundTrip(text)
+  }
+}
+{
+  // M4-K2：**同字符不等长**的围栏。只看首字符的话，```` 会被 ``` 闭合，
+  //        于是在未闭合的围栏中间切一刀（CommonMark 里 ``` 不闭合 ````）。
+  const text = '````\n```\n\n```\n````\n\n结束。'
+  const { closed, tail } = splitBlocks(text)
+  check('不等长围栏不被切开（整体是一块）',
+        closed.length === 1 && closed[0].text.includes('````')
+        && !closed.some((b) => b.text.trim() === '结束。'),
+        JSON.stringify(closed.map((b) => b.text)))
+  check('围栏之后才是尾部', tail.text.trim() === '结束。', tail.text)
+  roundTrip(text)
+}
+
 console.log('— 幂等与空串 —')
 {
   const a = splitBlocks('')

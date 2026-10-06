@@ -113,6 +113,9 @@ def reverse_line_order(text: str) -> str:
 #    —— 它们的章标题与后续文字排在同一行。
 _CHAPTER_RE = re.compile(r"第\s*([一二三四五六七八九十百零〇\d]+)\s*章")
 _ARTICLE_RE = re.compile(r"第\s*([一二三四五六七八九十百零〇\d]+)\s*条")
+# 顶层条号的另一种形态：「一、」**在行首**（允许前导空白）。
+# ⚠️ 只作回退用 —— 见 `extract_chapter_marks` 的门槛说明。
+_SECTION_RE = re.compile(r"^[ \t]*[一二三四五六七八九十]+\s*、", re.M)
 _CN_NUM = {c: i for i, c in enumerate("零一二三四五六七八九", start=0)}
 
 
@@ -136,12 +139,30 @@ def _cn_to_int(text: str) -> int:
 
 
 def extract_chapter_marks(text: str) -> list[ChapterMark]:
-    """正则抽取章节标记 —— 公文结构极规整，不需要任何模型。"""
+    """正则抽取章节标记 —— 公文结构极规整，不需要任何模型。
+
+    ⚠️ **回退规则**（M3 的 K-2）：有些公文用「一、二、」作**顶层条号**，
+       全文没有「第X章」—— `10_参军入伍…桂电2021-2号` 就是，实测
+       整份 5 条 chunk 一条章节都抽不出来、引用只能落到「只跳页」。
+
+       ⚠️ 回退**必须有门槛**：只在「一个章标记都抽不到」时才启用。
+          「一、」在别的公文里是**条内的枚举**（如「一、申请条件」），
+          无条件认它会把枚举误判成章节、把 9 份公文的结构搞乱。
+          实测：那 9 份行首「一、」都是 0 次，但那是这份语料恰好如此，
+          不能指望以后传的也这样。
+    """
     marks: list[ChapterMark] = []
     for m in _CHAPTER_RE.finditer(text):
         line_end = text.find("\n", m.start())
         title = text[m.start():line_end if line_end != -1 else len(text)].strip()
         marks.append(ChapterMark(chapter=title[:60], level=1, char_offset=m.start()))
+
+    if not marks:
+        for m in _SECTION_RE.finditer(text):
+            line_end = text.find("\n", m.start())
+            title = text[m.start():line_end if line_end != -1 else len(text)].strip()
+            marks.append(ChapterMark(chapter=title[:60], level=1, char_offset=m.start()))
+
     for m in _ARTICLE_RE.finditer(text):
         line_end = text.find("\n", m.start())
         title = text[m.start():line_end if line_end != -1 else len(text)].strip()

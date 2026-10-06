@@ -488,3 +488,50 @@ def test_upload_filename_keeps_readable_suffix():
     p = Path(document_service._tmp_path("task123", "桂林电子科技大学 学籍管理规定.pdf"))
     assert p.suffix == ".pdf", p
     assert p.parent.name == "tmp", p
+
+
+# ============================================================
+# 评审 M4-K6：删除失败要停在**看得见**的中间态
+# ============================================================
+
+async def test_delete_leaves_disabled_state_when_index_cleanup_fails(client, admin, doc,
+                                                                     monkeypatch):
+    """★ 删索引失败时，PG 行不能停在 `active`。
+
+    原实现是「先删索引 → 再删 PG 行」：索引删完、PG 那次 DELETE 若失败，
+    行还在列表里显示 `active`、`chunk_count>0`，而内容其实已经检索不到了 ——
+    **没有任何状态能标记这个不一致**，管理员看不出该重试。
+
+    修法：先把行落到 `disabled`（管理端看得见、检索也停了），再删索引。
+    失败就停在这个中间态，重试一次删除即可。
+    """
+    from app.services import document_service
+
+    def boom(*_a, **_k):
+        raise RuntimeError("模拟索引清理失败")
+
+    monkeypatch.setattr(document_service.index_service, "remove_from_index", boom)
+
+    # ⚠️ 这里要的是**响应**而不是异常：httpx 的 ASGITransport 默认
+    #    `raise_app_exceptions=True`，会把 Starlette 处理完 500 之后
+    #    重新抛出的异常再抛给调用方 —— 那样就测不到状态码了。
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as raw:
+        r = await raw.delete(f"/api/admin/documents/{doc['id']}", headers=_h(admin))
+
+    assert r.status_code >= 400, "删除失败必须报出来，不能假装成功"
+    async with db.tx() as conn:
+        row = await conn.fetchrow("SELECT status FROM documents WHERE id = $1", doc["id"])
+    assert row is not None, "失败时行必须保留 —— 否则重试无从下手"
+    assert row["status"] == "disabled", (
+        f"失败后停在 {row['status']} —— 就是原实现那个「看不出该重试」的现场"
+    )
+
+    # ⚠️ **不断言「已经检索不到」**：检索期的 status 过滤读的是 **Chroma 元数据**，
+    #    而失败场景恰恰是索引没清掉 —— 所以它**仍然搜得到**。
+    #    这是跨存储做不到原子的固有代价，本轮不假装解决：能给的保证是
+    #    「行还在、状态看得见、重试一次即可」，不是「立刻不可检索」。
+    #    （写成断言会是一条永远为假的假断言 —— 我第一版就是这么写的。）
+    async with db.tx() as conn:
+        still = await conn.fetchval("SELECT 1 FROM documents WHERE id = $1", doc["id"])
+    assert still, "重试路径必须成立：行还在，再删一次就能走完"

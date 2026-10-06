@@ -89,10 +89,20 @@ async def refresh(body: RefreshRequest) -> TokenPair:
     user_id = payload.get("sub")
     async with db.tx() as conn:
         row = await conn.fetchrow(
-            "SELECT id, username, role, token_version FROM users WHERE id = $1", user_id
+            "SELECT id, username, role, token_version, is_active "
+            "  FROM users WHERE id = $1",
+            user_id,
         )
     if row is None:
         raise Unauthorized("用户不存在")
+
+    # ⚠️ 停用也要**在这里**判（M4 评审 K-4）：登录那条路已经堵了，
+    #    但 refresh 只比 tv —— 被停用的账号能一直用旧 refresh_token
+    #    换出新的 7 天 access，等于停用没生效。
+    #    不能只依赖「停用会自增 tv」：那要求每一处写 users 的代码都记得自增，
+    #    是个靠约定维持的不变式，而这里是**兜底的那一道**。
+    if not row["is_active"]:
+        raise Unauthorized("账号已停用，请联系管理员", code="account_disabled")
 
     # tv 匹配校验：登出后 refresh 也必须失效
     if int(payload.get("tv", -1)) != row["token_version"]:

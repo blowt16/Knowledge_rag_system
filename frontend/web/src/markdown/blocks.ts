@@ -42,7 +42,7 @@ export function splitBlocks(text: string): SplitResult {
   const closed: Block[] = []
   let blockStart = 0
   let i = 0
-  let fence: string | null = null
+  let fence: { marker: string; len: number } | null = null
   /** 当前块最后一条**非空**行 —— 判断列表要不要连在一起 */
   let lastLine = ''
 
@@ -52,9 +52,15 @@ export function splitBlocks(text: string): SplitResult {
 
     const fenceMatch = FENCE.exec(line)
     if (fenceMatch) {
-      const marker = fenceMatch[1][0]
-      if (fence === null) fence = marker
-      else if (fence === marker) fence = null
+      const run = fenceMatch[1]
+      const marker = run[0]
+      if (fence === null) {
+        // 记下**开围栏的游程长度**：CommonMark 里 ``` 不闭合 ````，
+        // 只看首字符会把两对错配成一对，于是在未闭合的围栏中间切一刀
+        fence = { marker, len: run.length }
+      } else if (marker === fence.marker && run.length >= fence.len) {
+        fence = null
+      }
     }
 
     const isBlank = line.trim() === ''
@@ -65,8 +71,11 @@ export function splitBlocks(text: string): SplitResult {
       const keepTogether = LIST_ITEM.test(lastLine) && LIST_ITEM.test(nextLine)
       if (!keepTogether) {
         const blockEnd = nl === -1 ? text.length : nl + 1
-        const blockText = text.slice(blockStart, blockEnd)
-        if (blockText.trim()) closed.push({ text: blockText, start: blockStart })
+        // ⚠️ **纯空白块也要收**：跳过一个块却仍然推进游标，那些字符就既不在
+        //    `closed` 也不在 `tail` 里，「逐字还原」当场失效（评审 M4-K1 实测：
+        //    `"\n\n甲段。"` 拼回来是 `"甲段。"`）。它渲染出来是空块，无害；
+        //    但少了它，引用角标与置灰的偏移参照就不完整了。
+        closed.push({ text: text.slice(blockStart, blockEnd), start: blockStart })
         blockStart = blockEnd
         lastLine = ''
       }

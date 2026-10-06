@@ -311,6 +311,28 @@ def extract_markers(answer: str, *, evidence_count: int) -> list[int]:
     return [int(m) for m in re.findall(r"\[(\d+)\]", answer or "")]
 
 
+# 元陈述（§3.5.3 节点 9 的排除项，M3 的 K-1）：断言的不是**文档中的事实**，
+# 而是「我查没查、资料里有没有」。方案给的原例就是「我查阅了资料」。
+#
+# ⚠️ M3 实测的误标：「资料中未找到针对黄色、橙色、红色预警各自具体后果的
+#    进一步规定。」被当成结论句**标了灰** —— 那句话本身是在声明「没找到」，
+#    灰标它属于误报。
+# ⚠️ 判定方向与整条规则一致：**宁可漏，不可错** —— 认出来就排除（不标灰）。
+_EVIDENCE_ABSENCE = re.compile(
+    r"(?:"
+    # 「资料中未找到 X」—— 材料词在前
+    r"(资料|文档|知识库|原文|文中|材料)[^。？！]{0,16}?"
+    r"(未找到|未提及|未包含|未涵盖|未涉及|未收录|未提供"
+    r"|没有找到|没有提及|没有相关|不存在)"
+    r"|"
+    # 「未在文档中提及 X」—— 否定词在前（两种语序都真实存在）
+    r"(未|没有)[^。？！]{0,8}?(资料|文档|知识库|原文|文中|材料)"
+    r"[^。？！]{0,8}?(找到|提及|包含|涵盖|涉及|收录|提供)"
+    r")"
+)
+_SELF_META = re.compile(r"^我(们)?(已)?(查阅|参考|阅读|检索|浏览|看了|查了)")
+
+
 def is_conclusion_sentence(sentence: str) -> bool:
     """「结论句」定义 —— 生成与校验**共用同一套**。
 
@@ -329,6 +351,9 @@ def is_conclusion_sentence(sentence: str) -> bool:
     if text.endswith("？") or text.endswith("?"):
         return False
     if text.startswith(("请", "建议", "应当", "需", "可以", "如需")):
+        return False
+    # 元陈述：对「资料里有没有」的声明，不是对事实的断言（§3.5.3 节点 9）
+    if _EVIDENCE_ABSENCE.search(text) or _SELF_META.match(text):
         return False
     if any(text.startswith(t) for t in _TRANSITION) and len(text) < 12:
         return False
