@@ -1,4 +1,4 @@
-"""管理端：文档（§3.7.3 / §4.3.1 / §4.3.2）。
+"""管理端：文档（§3.7.3 / §4.3.1 / §4.3.2）+ 拒答分析（§4.3.1.3）。
 
 **分层**（A7）：这里只做参数校验与响应封装，业务在 `services/document_service.py`。
 
@@ -12,6 +12,12 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.deps import require_role
 from app.core.exceptions import AppError
+from app.schemas.refusal import (
+    AnnotateRequest,
+    AnnotateResponse,
+    AnnotationItem,
+    RefusalListResponse,
+)
 from app.schemas.document import (
     ChunkListResponse,
     DocumentItem,
@@ -20,6 +26,7 @@ from app.schemas.document import (
     VersionListResponse,
 )
 from app.services import document_service as docs
+from app.services import qa_log_service as qa_logs
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -90,3 +97,30 @@ async def enable_document(document_id: str, user=AdminUser) -> DocumentItem:
 async def delete_document(document_id: str, user=AdminUser) -> dict:
     await docs.delete_document(document_id)
     return {"message": "已删除"}
+
+
+# ============================================================
+# 拒答分析（§4.3.1.3）
+# ============================================================
+
+@router.get("/refusals", response_model=RefusalListResponse)
+async def list_refusals(
+    user=AdminUser,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> RefusalListResponse:
+    """**明细**（含可标注的 `qa_logs.id`）—— 聚合看 `stats/refusals`。"""
+    return RefusalListResponse(**await qa_logs.list_refusals(
+        page=page, page_size=page_size))
+
+
+@router.post("/refusals/{log_id}/annotate", response_model=AnnotateResponse)
+async def annotate_refusal(log_id: str, body: AnnotateRequest, user=AdminUser
+                           ) -> AnnotateResponse:
+    if body.suggested_document_id is None and body.note is None:
+        # 两个字段至少填一个（§4.3.1.3）
+        raise AppError("建议补充的文档与备注至少要填一个")
+    return AnnotateResponse(annotation=AnnotationItem(
+        **await qa_logs.annotate_refusal(
+            log_id, suggested_document_id=body.suggested_document_id,
+            note=body.note, annotated_by=user.id)))

@@ -30,6 +30,7 @@ from app.api import chat as chat_api
 from app.api import conversations as conversations_api
 from app.api import document_access as document_access_api
 from app.api import documents as documents_api
+from app.api import users as users_api
 from app.core import telemetry
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
@@ -135,3 +136,4 @@ app.include_router(document_access_api.router)
 # 管理端（文档 CRUD / 版本 / 分块预览）—— 注册在 documents 之后，
 # 同前缀下段数不同、不冲突，但顺序上更稳
 app.include_router(admin_api.router)
+app.include_router(users_api.router)

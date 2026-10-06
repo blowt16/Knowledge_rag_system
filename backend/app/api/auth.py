@@ -50,7 +50,7 @@ def _access_ttl_seconds() -> int:
 async def login(body: LoginRequest) -> TokenPair:
     async with db.tx() as conn:
         row = await conn.fetchrow(
-            "SELECT id, username, role, password_hash, token_version "
+            "SELECT id, username, role, password_hash, token_version, is_active "
             "  FROM users WHERE username = $1",
             body.username,
         )
@@ -58,6 +58,12 @@ async def login(body: LoginRequest) -> TokenPair:
     # 用户不存在与口令错误返回同一条消息 —— 不用错误响应泄露用户名是否存在
     if row is None or not verify_password(body.password, row["password_hash"]):
         raise Unauthorized("用户名或口令不正确", code="invalid_credentials")
+
+    # ⚠️ **停用只在口令校验通过之后才判**：反过来的话，任何猜口令的人
+    #    都能从错误消息里区分「这个账号存在但被停用」与「账号不存在」。
+    #    口令都对了他本来就知道这个账号存在，这时给一句明确提示才是有用的。
+    if not row["is_active"]:
+        raise Unauthorized("账号已停用，请联系管理员", code="account_disabled")
 
     tv = row["token_version"]
     return TokenPair(
