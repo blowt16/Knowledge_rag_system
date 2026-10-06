@@ -67,6 +67,11 @@ dev = [
 # 否则 `import app` 直接找不到（pytest 的 rootdir 是仓库根）
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]
+# pytest 自己的临时目录（basetemp，`tmp_path` 那些用例用的）默认落在 %TEMP%，
+# 也就是 C 盘。指到仓库内，测试产物就全在一个地方了。
+# ⚠️ 路径是相对的，**须在仓库根跑 pytest**（rootdir 所在处，也是 CI 的做法）。
+# ⚠️ 这个目录归 pytest 自己轮换，conftest 清空 test_data/ 时会跳过它。
+addopts = ["--basetemp=test_data/pytest"]
 asyncio_mode = "auto"
 # asyncpg 的连接池绑定在创建它的事件循环上。若 fixture 与用例分属不同循环，
 # 会报 ConnectionDoesNotExistError / WinError 10038 —— 故统一到 session 级。

@@ -15,6 +15,10 @@ import pytest_asyncio
 from app import db
 from app.core.config import repo_path
 
+#: pytest 自己的 basetemp 落在 `test_data/` 下的这个名字（见 pyproject 的 `--basetemp`）。
+#: 清空数据目录时必须跳过它 —— 它归 pytest 管，删了 `tmp_path` 就没了根。
+_PYTEST_BASETEMP_NAME = "pytest"
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_data_dir():
@@ -42,15 +46,24 @@ def _isolated_data_dir():
     代价：路径写死意味着两个进程同时跑测试会互相踩（CI 与本地同时跑）。
        隔离修复之前测试直接写真实 `data/`，那时并发踩得更死，故非新增风险。
 
+    ⚠️ **`test_data/pytest/` 要留着不能删** —— 那是 pytest 自己的 basetemp
+       （见 pyproject 的 `--basetemp`）。pytest 先建它、本夹具后跑，
+       整个 rmtree 会把它一起删掉，之后 `tmp_path` 就没根了。
+
     回归锁见 `integration/test_data_isolation.py`。
     """
     root = repo_path("test_data")
-    # 守卫：这个 rmtree 是破坏性的，先确认算出来的确实是我们自己的临时目录
+    # 守卫：这个删除是破坏性的，先确认算出来的确实是我们自己的临时目录
     assert root.name == "test_data" and root.parent == repo_path(), \
         f"拒绝清理非预期的路径：{root}"
-    if root.exists():
-        shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
+    for entry in root.iterdir():
+        if entry.name == _PYTEST_BASETEMP_NAME:   # pytest 的，归它自己管
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
 
     previous = os.environ.get("RAG_DATA_DIR")
     os.environ["RAG_DATA_DIR"] = str(root)
