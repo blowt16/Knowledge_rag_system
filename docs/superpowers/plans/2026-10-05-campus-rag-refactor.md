@@ -1195,10 +1195,67 @@ Minor 3 条已顺手修（`test_route` 里一句恒真断言、题库陈旧 note
 **交付**：4.2.4（流式渲染 / 检索过程反馈 / 长列表）+ 会话列表 + 管理端（4.3）+ 仪表盘（4.4）。
 **明确不含**：登录、最简聊天、引用展示、消解与澄清交互、置灰标注、原文回跳（M0–M3 已做）；**评测页归 M5**。
 
+### 9.0 M4 开工前实测与已定决策（2026-10-06，**新会话先读这一节**）
+
+> 体例同 §5.9 / §6.9 / §7.9 / §8.9：先实测、再排计划。
+> M4 的形态又不同 —— **几乎全是「没有」，而且前半段是后端活**（§9.2 把「流式渲染/阶段提示/会话列表」写成一条前端任务，
+> 实测发现它的两个驱动源 `stage` 事件与会话接口在服务端根本不存在）。
+
+#### 开工前实测（2026-10-06 实跑，非推断）
+
+| §9.2 任务 | 代码实际状态 |
+|---|---|
+| M4-1 流式渲染 / 阶段提示 / 长列表 | ❌ **完全没有**。⚠️ 而且 **`stage` 服务端从来没发过**（grep 全后端零命中；`schemas/chat.py:21,133` 的 `StageName`/`StageEvent` 是悬空契约）—— 契约 M0 就冻住了，**发送端没实现**。所以 M4-1 的前半段是**后端活** |
+| M4-2 管理端接口 | ❌ **完全没有**。`api/` 只有 auth / chat / documents（仅上传）/ document_access；没有 users、admin、stats。`services/stats_service.py`、`schemas/{conversation,document,stats}.py` 均不存在 |
+| 会话列表（M4-1 后半段） | ⚠️ **半截**：`conversation_service.list_conversations` / `get_messages` 已写好，但**接口层根本没建**（无任何 `/api/conversations` 路由），且 service 缺 create / rename / set_top / soft_delete |
+| M4-3 管理端页面 + 仪表盘 | ❌ **完全没有**。前端只有 9 个源文件；**无 Tailwind、无组件库、无 ECharts、无 `@/` alias、无 `api/schema.d.ts`**（`gen:api` 脚本在，`openapi-typescript` 没装）。`RequireAuth` 的 `roles` 参数已可用，只是没人传 |
+| 环境基线 | `uv run pytest backend/tests -q` → **297 passed**（126s）；PG 10 份 active 语料完好；`qa_logs` 11 / `messages` 22 / `refusal_annotations` 0 |
+
+**`stage` 下发机制已实测定案**：用最小 LangGraph 图跑 `stream_mode=["custom","values","debug"]` —— `debug` 通道给出
+`type=task, name=<节点名>`（在该节点**开工那一刻**到达）与 `task_result`（结束）。→ **七个节点一行都不用改**，
+只在 `chat_service` 加一路 `debug` 分支 + 一张 node→stage 映射表。
+映射：`resolve→resolving`、`route→routing`、`rewrite`/`retrieve→retrieving`、`rerank→reranking`、
+`build_context`/`generate→generating`、`cite→verifying`、`chat→generating`；`clarify`/`refuse` 不发；连续同名去重。
+⚠️ **不得改动既有事件顺序**（`test_refusal_paths.py` 有锁）。
+
+#### 施工顺序（2026-10-06 负责人确认）
+
+**三条后端链路 → 管理端前端 → User 端流式优化。**
+理由：`stage` 与会话接口不先做出来，前端的阶段提示和会话列表就是无源之水；管理端 5 个页面全部依赖第二条链路，
+先做后端能一次性把「改可见范围真的重写了 Chroma metadata」这种硬骨头验掉。
+
+| 阶段 | 任务 | 顺序依据 |
+|---|---|---|
+| 1a | **stage 下发**（后端） | M4-1 的阶段提示依赖它 |
+| 1b | **会话接口**（后端） | M4-1 的会话列表依赖它 |
+| 2a–2c | **管理端文档 / 用户角色 / stats 接口**（后端） | 阶段 3 全部依赖 |
+| 3 | **管理端页面 + 仪表盘** | 阶段 2 的消费方 |
+| 4a–4e | **User 端**（流式切分 / 阶段提示 / 会话列表 / 长列表 / 提权开关） | 依赖 1a、1b |
+
+#### M4 已定决策（施工前拍板，2026-10-06）
+
+| # | 事项 | 定案 | 依据 |
+|---|---|---|---|
+| **M4-D1** | 管理端 UI 技术栈 | **Tailwind + shadcn/ui + ECharts**（照 §4.1）；登录/聊天页保持现有手写 CSS 不动 | 负责人拍板。代价：管理端出现第二套样式体系，**Tailwind 的 preflight 是全局重置 —— 接上后必须先跑一遍 bsk 回归确认登录/聊天页没跑版** |
+| **M4-D2** | `refusal_rate` 口径 | **分母 = `route='knowledge'` 的轮次**（`COUNT(is_refused=1 AND route='knowledge') / COUNT(route='knowledge')`） | **文档缺口**：§3.7.3 说「定义与分母见 5.2」，而 §5.2 只有评测集的漏答率/误答率，**全文没有这个公式**。闲聊/澄清轮次没有可拒答的证据面，计入会把拒答率稀释成无意义的偏低值。**本行即口径落点**，M5 校准以此为基础 |
+| **M4-D3** | `DELETE /api/admin/documents/{id}` 语义 | **真删索引三处**（Chroma chunk + BM25 条目 + PG 行），**源文件归档保留** | **文档缺口**：§3.7.3 全文只有接口清单那一行，无语义定义。照 §3.3.1 既有版本语义「删掉新版即可，旧版自动恢复生效」；源文件不删（可回溯，符合「破坏性操作先归档」）。**顺带修 M1 的 K-3**（`remove_from_index` 在 Chroma 已空时留孤儿） |
+| **M4-D4** | 会话消息越权 | `get_messages` 对非本人会话**静默返回 `[]`** → M4 改为 **404** | 与 `/file` 的「不可探测存在性」口径一致；静默空列表让前端分不清「空会话」与「不是你的会话」 |
+| **M4-D5** | `stats/retrieval` 在 M4 | M4 **没有 Prometheus**，该接口固定返回 `{available:false, status:"prometheus_unavailable"}` 且 **HTTP 200** | §4.4 明文：运行指标不可用时业务区块照常渲染。M5 接真 Prometheus 后走可用分支 |
+
+#### 要交给 M5 的口径
+
+- `refusal_rate` 的口径是 **M4-D2 自定**（文档缺口）——M5 用真实流量校准时若与文档冲突，**以 M5 实测为准并回写**
+- `qa_count`「不含评测轮次」在 M4 的实现是「只数 `qa_logs`」（评测结果落 `eval_case_results`）。**若 M5 让评测也写 `qa_logs`，必须在此加过滤**
+
 ### 9.1 改动文件
 `frontend/web/src/{views/admin/*, layouts/AdminLayout.tsx, stores/*, router/*, api/schema.d.ts}`、`backend/app/api/{admin,users}.py`、`backend/app/services/stats_service.py`
 
 ### 9.2 任务
+
+> ⚠️ **施工顺序与开工前实测见 §9.0**：本节的 M4-1 把「阶段提示 / 会话列表」写成前端任务的措辞**已过时** ——
+> 它们的驱动源（`stage` 事件、`/api/conversations` 路由）在服务端不存在。实际顺序是
+> **先补三条后端链路（stage 下发 / 会话接口 / 管理端与统计接口）→ 再做管理端前端 → 最后做 User 端流式优化**。
+> 下表的 M4-3 也把管理端页面与仪表盘并成了一条，实际按页面拆开做、逐页 bsk 验收。
 
 **Task M4-1 流式渲染与长列表**
 - [ ] 按**已完结块**切分，已完结块 `memo` 只渲染一次，每 token 只重渲染尾部未完结块（**不要每个 token 全量重解析**）
