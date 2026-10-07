@@ -425,7 +425,7 @@ function CaseDialog({ state, setId, onClose, onDone }: {
 
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         {/* 弹窗里**没有「题目类型」**（参考图就没有）—— `case_type` 由服务端填
             `'factual'`，它是 NOT NULL 且无默认值，不填服务端当场报错（§5.2） */}
         <DialogHeader><DialogTitle>{editing ? '编辑用例' : '评测用例'}</DialogTitle></DialogHeader>
@@ -558,6 +558,13 @@ function GenerateDialog({ setId, setName, onClose, onDone }: {
 // 弹窗四：核对标准答案（§6.5）
 // ============================================================
 
+/** Chroma 的 chunk id 形如 `<文档 id>:<片段序号>` —— 取序号那一截；取不到就退回 `—`。 */
+function segNo(chunkId: string | null | undefined): string {
+  if (!chunkId) return '—'
+  const i = chunkId.lastIndexOf(':')
+  return i >= 0 && i < chunkId.length - 1 ? `#${chunkId.slice(i + 1)}` : '—'
+}
+
 function SourceDialog({ payload, onClose }: {
   payload: EvalCaseSource | null
   onClose: () => void
@@ -570,7 +577,7 @@ function SourceDialog({ payload, onClose }: {
 
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader><DialogTitle>核对标准答案</DialogTitle></DialogHeader>
         <div className="space-y-4 text-sm">
           {/* 三个小标题加粗 —— 负责人明确要求（§6.5） */}
@@ -588,8 +595,13 @@ function SourceDialog({ payload, onClose }: {
               模型就是照着这段出的题，对不上说明这条标准答案不能用
             </p>
             <div className="mt-2 rounded-md border border-border bg-muted/40 p-3">
-              <p className="mb-2 text-xs text-muted-foreground">
-                片段 {payload.source_chunk_id ? `#${payload.source_chunk_id}` : '—'}
+              {/* ⚠️ 只显示**片段序号**，不铺整串 chunk id。
+                  Chroma 的 id 是 `<文档 id>:<片段序号>`（34 个字符），原样打在
+                  定位行上会把真正有用的「第几段 / 第几页」挤到中间，整行全是噪声。
+                  完整 id 放悬停里 —— 真要拿它去核对分块预览的人也拿得到。*/}
+              <p className="mb-2 text-xs text-muted-foreground"
+                 title={payload.source_chunk_id ?? undefined}>
+                片段 {segNo(payload.source_chunk_id)}
                 {para ? ` · 第 ${para} 段` : ''}
                 {payload.source_page ? ` · 第 ${payload.source_page} 页` : ''}
                 {payload.source_document_title ? ` · ${payload.source_document_title}` : ''}

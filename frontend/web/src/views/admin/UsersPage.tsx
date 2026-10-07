@@ -228,7 +228,7 @@ function CreateDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>新建账号</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
@@ -293,7 +293,7 @@ function ResetDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>重置「{user.username}」的口令</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">

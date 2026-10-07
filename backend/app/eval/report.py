@@ -138,6 +138,27 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
     }
 
 
+#: 结论句里最多引用错误原文多少字。超出的部分**不进句子** —— 全文仍在
+#: `ragas_errors` 里（接口可见、前端悬停可见），只是不铺在这一行上。
+_MAX_REASON_CHARS = 60
+
+
+def _reason(errors: list[str]) -> str:
+    """把后端错误压成一行能读的话。
+
+    ⚠️ `ragas_errors` 里放的是**诊断原文**，可能是一整段子进程输出
+    （库里真实存在一条 349 字的：`ragas 退出码 0，输出不是 JSON: {"ok": true, …}`）。
+    原样拼进结论句，报告顶上就会出现三行密密麻麻的 JSON —— 读不出任何能行动的
+    信息，排版也被撑乱。短的照原样留着（那才是能排查的东西），长的截断 + 指个去处。
+    """
+    if not errors:
+        return ""
+    first = " ".join(str(errors[0]).split())
+    if len(first) <= _MAX_REASON_CHARS:
+        return first
+    return f"{first[:_MAX_REASON_CHARS]}…（完整输出见 ragas_errors 字段与后端日志）"
+
+
 def _verdict(cards: list[dict], available: Any, errors: list[str]) -> str:
     """结论句（§7.5）。
 
@@ -147,11 +168,12 @@ def _verdict(cards: list[dict], available: Any, errors: list[str]) -> str:
     missing = [c["key"] for c in cards if c["score"] is None]
     if missing:
         names = "、".join(LABELS[k] for k in missing)
+        reason = _reason(errors)
         if available is False:
-            why = f"（{errors[0]}）" if errors else ""
+            why = f"（{reason}）" if reason else ""
             return f"{names}没算出来：ragas 隔离环境不可用{why}，见 docs/评测与ragas.md。"
-        if errors:
-            return f"{names}没算出来：{errors[0]}"
+        if reason:
+            return f"{names}没算出来：{reason}"
         return (f"缺少{names} —— 这几项没有可评分的样本（缺标准答案或检索上下文），"
                 "综合得分先不给。")
 

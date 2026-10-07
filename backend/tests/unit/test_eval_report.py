@@ -228,3 +228,30 @@ def test_verdict_names_the_ones_that_missed():
 def test_verdict_says_why_when_it_cannot_judge():
     verdict = report.build(_run(), [])["report"]["verdict"]
     assert "上下文召回" in verdict and "缺少" in verdict
+
+
+def test_verdict_never_embeds_a_raw_diagnostic_dump():
+    """⚠️ 结论句里**不能整段照抄后端输出**（评审后实测发现的那面「JSON 墙」）。
+
+    库里存着一条真实的历史错误，`ragas_errors[0]` 是一整串 349 字的输出
+    （`ragas 退出码 0，输出不是 JSON: {"ok": true, ...}`）。原样拼进结论句之后，
+    报告弹窗顶上会出现三行密密麻麻的 JSON —— 用户从中读不到任何能行动的信息，
+    而排版被彻底撑乱。
+
+    全文仍然留在 `report.ragas_errors` 里（接口可见、悬停可见），
+    只是**结论句**这一行要短。
+    """
+    long_err = 'ragas 退出码 0，输出不是 JSON: ' + '{"ok": true, "rows": [' + 'x' * 340
+    out = report.build(_run(available=True, errors=[long_err]), [])
+    verdict = out["report"]["verdict"]
+    assert "上下文召回" in verdict, "还得说清是哪几项没算出来"
+    assert "见" in verdict or "日志" in verdict, "要指个去处，不能只说一句空话"
+    assert len(verdict) < 120, f"结论句被后端输出撑爆了：{len(verdict)} 字"
+    # ⚠️ 全文不能丢 —— 要排查的人从接口/悬停里照样拿得到
+    assert out["report"]["ragas_errors"] == [long_err]
+
+
+def test_short_errors_are_still_shown_verbatim():
+    """短错误照原样显示 —— 不能一律截断，那样就查不出东西了。"""
+    out = report.build(_run(available=False, errors=["ragas 隔离环境不存在"]), [])
+    assert "ragas 隔离环境不存在" in out["report"]["verdict"]

@@ -203,7 +203,7 @@ function AnnotateDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>标注拒答问题</DialogTitle></DialogHeader>
         <div className="space-y-4">
           <p className="rounded bg-muted/50 p-2 text-sm">{item.question}</p>

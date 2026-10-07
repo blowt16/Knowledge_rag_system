@@ -155,17 +155,22 @@ async def test_suite_path_ignores_in_eval(scratch_set, monkeypatch):
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
 
 
-async def test_suite_full_still_selects_all_ninety_cases(monkeypatch):
-    """决策 22：`suite='full'` 仍选中**全部 90 条**，不是「默认题库」的 75 条。"""
+async def test_suite_full_still_selects_every_case(monkeypatch):
+    """决策 22：`suite='full'` 仍选中**全表**用例，不是「默认题库」那一批。
+
+    ⚠️ **不要写死 90 这个数。** 评测集管理页现在能直接加用例了，
+       写死数字会让这个测试在任何人加过题之后无缘无故变红 ——
+       而它真正要守的是「`suite` 路径不碰集合」，不是「库里恰好有 90 条」。
+    """
     monkeypatch.setattr(runner, "_drive_to_end",
                         lambda state: _final([]))          # 不实际跑图
     async with db.tx() as conn:
         total = await conn.fetchval("SELECT count(*) FROM eval_cases")
-        full = await conn.fetchval(
-            "SELECT count(*) FROM eval_cases WHERE suite='full'")
+        default_set = await conn.fetchval(
+            "SELECT count(*) FROM eval_cases WHERE set_id='eval-set-default'")
         picked = await runner._select_cases(conn, set_id=None, config={"suite": "full"})
-    assert len(picked) == total == 90
-    assert len(picked) > full, "§full 路径必须比「默认题库」的 75 条多"
+    assert len(picked) == total, "suite='full' 要选全表"
+    assert len(picked) > default_set, "必须比「默认题库」那一批多（多出来的正是校准题）"
 
 
 async def test_empty_set_fails_with_an_explanation(scratch_set, monkeypatch):

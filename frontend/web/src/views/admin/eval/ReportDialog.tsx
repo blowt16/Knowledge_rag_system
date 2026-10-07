@@ -22,7 +22,12 @@ import type { EvalReport, EvalReportCase, EvalRunDetail } from '@/api/eval'
  * 「ragas 环境不可用」自相矛盾。
  */
 function whyMissing(report: EvalReport | undefined): string {
-  const errs = report?.ragas_errors?.join('；')
+  // ⚠️ 错误原文可能是一整段后端输出（库里真有一条 349 字的 JSON）。短的照原样
+  //    留着（那才是有用的诊断），长的截断 —— 全文仍在悬停提示里。
+  const first = report?.ragas_errors?.[0]
+  const errs = first
+    ? (first.length > 60 ? `${first.slice(0, 60)}…` : first)
+    : undefined
   if (report?.ragas_available === false) {
     return errs ? `ragas 没跑起来（${errs}）` : 'ragas 没跑起来'
   }
@@ -76,7 +81,7 @@ export function ReportDialog({ detail, onClose }: {
 
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="max-h-[88vh] w-[95vw] max-w-6xl overflow-y-auto">
+      <DialogContent className="max-h-[88vh] w-[95vw] overflow-y-auto sm:max-w-6xl">
         <DialogHeader>
           <DialogTitle>评测报告</DialogTitle>
         </DialogHeader>
@@ -130,10 +135,14 @@ export function ReportDialog({ detail, onClose }: {
                   {missing ? '—' : c.score!.toFixed(4)}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">{meta.hint}</p>
-                <p className={`mt-2 text-xs ${
+                {/* ⚠️ `line-clamp-2` + `title`：`ragas_errors` 里可能是后端整段输出
+                    （实测 349 字的一串 JSON），铺在卡片里会把四张卡都撑成一屏高。
+                    夹住显示、全文放悬停里 —— 要排查的人照样看得到，不排查的人不被打扰。*/}
+                <p className={`mt-2 line-clamp-2 text-xs ${
                   missing ? 'text-muted-foreground'
                     : c.passed ? 'text-success' : 'text-destructive'
-                }`}>
+                }`}
+                   title={missing ? (report?.ragas_errors?.join('；') || missingWhy) : undefined}>
                   {missing
                     ? missingWhy
                     : `${c.passed ? '达标' : '未达标'}（≥ ${c.threshold}）`}
@@ -145,11 +154,11 @@ export function ReportDialog({ detail, onClose }: {
 
         {/* 结论条：浅绿底（服务端给的句子，前端不拼） */}
         {report?.verdict && (
-          <p className={`rounded-md px-3 py-2 text-sm ${
+          <p className={`line-clamp-3 rounded-md px-3 py-2 text-sm ${
             composite === null
               ? 'bg-muted text-muted-foreground'
               : 'bg-success/10 text-success'
-          }`}>
+          }`} title={report.verdict}>
             {report.verdict}
           </p>
         )}
@@ -162,8 +171,14 @@ export function ReportDialog({ detail, onClose }: {
                 <th className="py-2 pr-3">问题</th>
                 <th className="py-2 pr-3">标准答案</th>
                 <th className="py-2 pr-3">生成的答案</th>
-                {COLUMNS.map(c => <th key={String(c.key)} className="py-2 pr-3">{c.label}</th>)}
-                <th className="py-2">失败原因</th>
+                {/* ⚠️ 这六列的表头必须 `whitespace-nowrap`：表格是 `w-full`，
+                    三个文字列吃掉大部分宽度之后，指标列只剩 40 多像素 ——
+                    「忠实度」会被拆成**一列一个字**竖着排。让表头撑开列宽，
+                    值本身只有几位数，撑开也不会浪费。 */}
+                {COLUMNS.map(c => (
+                  <th key={String(c.key)} className="whitespace-nowrap py-2 pr-3">{c.label}</th>
+                ))}
+                <th className="whitespace-nowrap py-2">失败原因</th>
               </tr>
             </thead>
             <tbody>

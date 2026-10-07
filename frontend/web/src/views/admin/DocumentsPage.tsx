@@ -419,7 +419,7 @@ function EditDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>编辑「{doc.title}」</DialogTitle>
         </DialogHeader>
@@ -510,7 +510,7 @@ function ChunksDialog({ doc, onClose }: { doc: DocumentItem; onClose: () => void
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
+      <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>分块预览 · {doc.title}</DialogTitle>
         </DialogHeader>
