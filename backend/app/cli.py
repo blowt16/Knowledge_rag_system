@@ -54,13 +54,13 @@ async def cmd_init_db(_args: argparse.Namespace) -> int:
         expected = {
             "users", "documents", "ingestion_tasks", "conversations", "messages",
             "session_locks", "qa_logs", "degradation_events", "refusal_annotations",
-            "eval_cases", "eval_runs", "eval_case_results",
+            "eval_cases", "eval_runs", "eval_case_results", "eval_sets",
         }
         missing = expected - set(tables)
         if missing:
             print(f"❌ 缺少表：{sorted(missing)}")
             return 1
-        print("✅ 12 张表齐全（含 session_locks）")
+        print("✅ 13 张表齐全（含 session_locks 与 eval_sets）")
         return 0
     finally:
         await conn.close()
@@ -734,6 +734,13 @@ def repo_root() -> Path:
 
 # ============================================================
 
+#: 迁移（`004_eval_sets.sql` ⑤）建的两个默认评测集 —— id 写死在那里，这里直接引用。
+#: 跟着 `suite` 走，与迁移 ⑥ 的回填口径**逐字一致**。
+_SET_ID_DEFAULT = "eval-set-default"
+_SET_ID_CALIB = "eval-set-refusal-calib"
+_SET_ID_BY_SUITE = {"full": _SET_ID_DEFAULT, "refusal_calib": _SET_ID_CALIB}
+
+
 async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
     """把题库 JSON 导进 `eval_cases`（**幂等**：按 id upsert）。
 
@@ -777,8 +784,9 @@ async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
                 await conn.execute(
                     """INSERT INTO eval_cases
                          (id, question, ground_truth, expected_doc_ids, case_type,
-                          turns, visible_roles, suite, expected_route, should_clarify)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                          turns, visible_roles, suite, expected_route, should_clarify,
+                          set_id, source)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'generated')
                        ON CONFLICT (id) DO UPDATE SET
                          question = EXCLUDED.question,
                          ground_truth = EXCLUDED.ground_truth,
@@ -796,6 +804,12 @@ async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
                     c.get("visible_roles"),
                     c.get("suite", "full"),
                     c.get("expected_route"), c.get("should_clarify"),
+                    # ⚠️ `set_id` / `source` **只写在 INSERT 分支，不进 DO UPDATE**：
+                    #    重灌题库不该动已有行的归属（那是用户看得见的状态）。
+                    #    迁移（004）对老库做的是同一件事，两条安装路径的终态必须一致
+                    #    —— 否则「先建库再灌题」的人会得到 90 条不属于任何评测集的题，
+                    #    在新界面里一条都看不见，而升级上来的人一切正常。
+                    _SET_ID_BY_SUITE.get(c.get("suite", "full"), _SET_ID_DEFAULT),
                 )
                 if exists:
                     updated += 1
