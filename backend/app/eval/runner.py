@@ -79,7 +79,15 @@ def _case_metrics(final: dict, case: dict, visibility: dict[str, set[str]],
     expected_ids = set(expected or []) if not isinstance(expected, str) else set(
         json.loads(expected) or [])
 
-    first_hit = next((i for i, d in enumerate(doc_ids, start=1) if d in expected_ids), 0)
+    # ⚠️ **没有 `expected_doc_ids` 的题，排名类指标一律记 `None`，不是 0**（§7.6）。
+    #    界面上手工录入的用例都没有期望文档（弹窗里没这一项）。记 0 的话，
+    #    `_avg()` 照样把它算进均值 → **整轮的 Recall@5 / MRR 被这批题凭空拉低**，
+    #    而且逐题单看都"正常"，查不出原因。
+    #    `_avg()` 现有的 `isinstance(v, (int, float))` 过滤会自动跳过 `None`，
+    #    聚合逻辑一行都不用改。
+    #    ⚠️ 别和「有期望但没召回」混为一谈 —— 那种**就是 0 分**（下面 else 支）。
+    first_hit = (next((i for i, d in enumerate(doc_ids, start=1) if d in expected_ids), 0)
+                 if expected_ids else None)
 
     # 越权：返回的 chunk 里属于「该角色看不见的文档」的条数（§5.3 读它）
     unauthorized = sum(
@@ -94,8 +102,8 @@ def _case_metrics(final: dict, case: dict, visibility: dict[str, set[str]],
     invalid = len(report.get("invalid_markers") or [])
 
     return {
-        "recall_at_k": 1.0 if first_hit else 0.0,
-        "mrr": (1.0 / first_hit) if first_hit else 0.0,
+        "recall_at_k": None if first_hit is None else (1.0 if first_hit else 0.0),
+        "mrr": None if first_hit is None else ((1.0 / first_hit) if first_hit else 0.0),
         "rank": first_hit,
         "refused": bool(final.get("refused")),
         "refusal_reason": final.get("refusal_reason") or "",
@@ -108,6 +116,66 @@ def _case_metrics(final: dict, case: dict, visibility: dict[str, set[str]],
         "total_claims": total_claims,
         "uncited_ratio": (uncited / total_claims) if total_claims else None,
     }
+
+
+async def _select_cases(conn, *, set_id: str | None, config: dict) -> list:
+    """选题优先级（§5.5）。**分支顺序有意义，别调换。**
+
+        set_id 给了        → WHERE set_id = $1 AND in_eval = TRUE     ← 新页面（批量评测）
+        case_ids 给了      → WHERE id = ANY($1)                       ← 调试用
+        case_type 给了     → WHERE case_type = $1                     ← ACL 对照实验用
+        suite 给了         → 保持原 SQL，**不碰集合**                 ← 决策 22
+              'full'          → SELECT * FROM eval_cases               （全部 90 条）
+              'refusal_calib' → WHERE suite='refusal_calib'            （15 条）
+        都不给             → 全部                                     ← 兜底
+
+    ⚠️ **`suite` 路径一行 SQL 都不动**（决策 22）。现在 `suite='full'` 实际跑的是
+       **全部 90 条**（含那 15 条校准题）。按 `suite` 分组迁进两个集会让它变成 75 条，
+       而差的那 15 条多是**该拒答**的，混进来会拉低召回率 —— 一旦题量变了，
+       消融 8 行表的**历史行与新行题集不同**，表里的差值就不再只反映配置差异。
+
+    ⚠️ **`in_eval` 只对 `set_id` 路径生效。** `suite` 路径（CI 的 `eval-calibration`、
+       `run_ablation.py`）**不过滤** `in_eval`：那些入口的题集必须稳定 ——
+       有人在界面上随手关掉一条校准题，就把 CI 门禁的分母改了，
+       甚至可能直接空集导致 CI 变红。这种事不该由一次误点触发。
+
+       **代价如实写明**：同一道题，在批量评测页关掉后不再参与，但在消融/CI 里照样跑。
+       所以界面上那个开关的含义更接近「参与批量评测」。
+    """
+    if set_id:
+        return list(await conn.fetch(
+            "SELECT * FROM eval_cases WHERE set_id = $1 AND in_eval = TRUE ORDER BY id",
+            set_id))
+    case_ids = (config or {}).get("case_ids") or []
+    if case_ids:
+        return list(await conn.fetch(
+            "SELECT * FROM eval_cases WHERE id = ANY($1::text[]) ORDER BY id", case_ids))
+    case_type = (config or {}).get("case_type")
+    if case_type:
+        return list(await conn.fetch(
+            "SELECT * FROM eval_cases WHERE case_type=$1 ORDER BY id", case_type))
+    suite = (config or {}).get("suite") or "full"
+    if suite == "refusal_calib":
+        return list(await conn.fetch(
+            "SELECT * FROM eval_cases WHERE suite='refusal_calib' ORDER BY id"))
+    return list(await conn.fetch("SELECT * FROM eval_cases ORDER BY id"))
+
+
+async def _record_progress(run_id: str, done: int, total: int | None = None) -> None:
+    """推进度（§3.4）。
+
+    `done_cases` / `total_cases` 只有一个消费方，但那一个是**必须**的：
+    「看报告」按钮在 `pending`/`running` 时置灰，悬停提示要写「评测还在跑（3/5）」。
+    没有这两个数，那个提示就只能写「完成后才能看」，用户完全不知道要等多久（§6.3）。
+    """
+    async with db.tx() as conn:
+        if total is None:
+            await conn.execute("UPDATE eval_runs SET done_cases = $2 WHERE id = $1",
+                               run_id, done)
+        else:
+            await conn.execute(
+                "UPDATE eval_runs SET done_cases = $2, total_cases = $3 WHERE id = $1",
+                run_id, done, total)
 
 
 async def run_eval(run_id: str) -> None:
@@ -124,37 +192,31 @@ async def run_eval(run_id: str) -> None:
 
         role = run["role"] or "student"
         include_restricted = bool(run["include_restricted"])
+        # ⚠️ 集合归属只在**列**上，`config` 里绝不带 `set_id`（§3.4）：
+        #    进了 config 字典就非空 → `switches()` 返回非 None → 又跑成纯向量基线。
+        set_id = run["set_id"]
         config = run["config"] or {}
         if isinstance(config, str):
             config = json.loads(config)
-        suite = (config.get("suite") or "full") if isinstance(config, dict) else "full"
-        case_ids = (config.get("case_ids") if isinstance(config, dict) else None) or []
-
-        case_type = config.get("case_type") if isinstance(config, dict) else None
 
         async with db.tx() as conn:
-            if case_ids:
-                rows = await conn.fetch(
-                    "SELECT * FROM eval_cases WHERE id = ANY($1::text[]) ORDER BY id", case_ids)
-            elif case_type:
-                # ACL 对照实验用：只跑某一类题（如 case_type='restricted'）
-                rows = await conn.fetch(
-                    "SELECT * FROM eval_cases WHERE case_type=$1 ORDER BY id", case_type)
-            elif suite == "refusal_calib":
-                rows = await conn.fetch(
-                    "SELECT * FROM eval_cases WHERE suite='refusal_calib' ORDER BY id")
-            else:
-                rows = await conn.fetch("SELECT * FROM eval_cases ORDER BY id")
+            rows = await _select_cases(conn, set_id=set_id, config=config)
             visibility = await _load_visibility(conn)
 
         if not rows:
+            # 选到空集 → 直接标 failed，**不跑出一个空报告**（§5.5）
+            error = ("这个评测集没有参与评测的用例"
+                     if set_id else "no_cases")
             async with db.tx() as conn:
                 await conn.execute(
                     "UPDATE eval_runs SET status='failed', finished_at=now(), "
-                    "metrics=$2 WHERE id=$1",
-                    run_id, {"error": "no_cases"})
-            logger.warning("评测没有可跑的用例", extra={"event": "eval.no_cases"})
+                    "metrics=$2, error=$3, total_cases=0, done_cases=0 WHERE id=$1",
+                    run_id, {"error": error}, error)
+            logger.warning("评测没有可跑的用例",
+                           extra={"event": "eval.no_cases", "set_id": set_id})
             return
+
+        await _record_progress(run_id, 0, len(rows))
 
         results: list[dict] = []
         ragas_samples: list[dict] = []
@@ -176,7 +238,12 @@ async def run_eval(run_id: str) -> None:
             except Exception as e:  # noqa: BLE001 —— 单题失败不该拖垮整轮
                 logger.warning("评测用例执行失败：%s", e,
                                extra={"event": "eval.case_failed", "case_id": case["id"]})
-                results.append({"case_id": case["id"], "error": f"{type(e).__name__}: {e}"})
+                # ⚠️ 这里**必须带上 question / ground_truth 快照**：失败的那行不会有
+                #    `metrics`，历史报告里的「问题」列就只能靠快照列填（§3.5）。
+                results.append({"case_id": case["id"], "error": f"{type(e).__name__}: {e}",
+                                "question": case["question"],
+                                "ground_truth": case.get("ground_truth")})
+                await _record_progress(run_id, len(results))
                 continue
             elapsed = int((time.perf_counter() - t0) * 1000)
 
@@ -189,7 +256,12 @@ async def run_eval(run_id: str) -> None:
                 "case_id": case["id"], "metrics": metrics, "answer": answer,
                 "retrieved_ids": [c.chunk_id for c in _rank_chunks(final)[:TOP_K]],
                 "unauthorized_hits": metrics["unauthorized_hits"],
+                # 快照（§3.5）：跑的时候把该题的问题与标准答案抄一份进来，
+                # 历史报告从此**自给自足**，不再需要 join `eval_cases`
+                "question": case["question"],
+                "ground_truth": case.get("ground_truth"),
             })
+            await _record_progress(run_id, len(results))
 
             # 有答案、有标准答案才送 ragas（拒答题没有 ground_truth）
             if answer and case.get("ground_truth") and contexts:
@@ -211,19 +283,25 @@ async def run_eval(run_id: str) -> None:
             for r in results:
                 await conn.execute(
                     """INSERT INTO eval_case_results
-                         (id, run_id, case_id, retrieved_ids, answer, unauthorized_hits, metrics)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                         (id, run_id, case_id, retrieved_ids, answer, unauthorized_hits,
+                          metrics, question, ground_truth, error)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
                     uuid.uuid4().hex, run_id, r["case_id"],
                     r.get("retrieved_ids") or [],
                     r.get("answer") or "",
                     int(r.get("unauthorized_hits") or 0),
                     r.get("metrics") or {},
+                    # ⚠️ 这三列以前**被丢掉了**：原来只取 `r.get("metrics")`，
+                    #    而失败的那条记录根本没有 `metrics` 键 —— 于是库里所有失败题
+                    #    的「失败原因」都是空的，界面那一列永远是空白（§1.1③）。
+                    r.get("question"), r.get("ground_truth"), r.get("error"),
                 )
 
             summary = _aggregate(results, ragas)
             await conn.execute(
-                "UPDATE eval_runs SET status='done', finished_at=now(), metrics=$2 WHERE id=$1",
-                run_id, summary)
+                "UPDATE eval_runs SET status='done', finished_at=now(), metrics=$2, "
+                "done_cases=$3 WHERE id=$1",
+                run_id, summary, len(results))
 
         logger.info("评测完成", extra={"event": "eval.done", "run_id": run_id,
                                     "cases": len(results),
