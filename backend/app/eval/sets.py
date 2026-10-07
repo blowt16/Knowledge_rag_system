@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import asyncpg
+
 logger = logging.getLogger(__name__)
 
 #: 导出文件的格式版本。将来加字段时靠它区分「老文件」。
@@ -184,3 +186,270 @@ async def import_file(conn, path: Path) -> dict:
     """从磁盘上的 json 文件导入。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     return await import_payload(conn, payload)
+
+
+# ============================================================
+# 增删改查（§5.1 / §5.2）
+# ============================================================
+
+#: 全站分页上限（§4.3.1.1）
+MAX_PAGE_SIZE = 100
+
+#: `PATCH /cases/{id}` 允许改的列（§5.2）。
+#: ⚠️ `source` / `set_id` / `source_*` **不在内** —— 改了就没有「来源」可言了。
+EDITABLE_CASE_FIELDS = frozenset({"question", "ground_truth", "in_eval", "note"})
+
+
+class CaseNotFound(LookupError):
+    """用例不存在 —— 接口层译成 404。"""
+
+
+class SetBusy(RuntimeError):
+    """有 run 正在跑这个集 —— 接口层译成 409。"""
+
+
+async def list_sets(conn) -> list[dict]:
+    """评测集列表，每个带**全部**用例数。
+
+    ⚠️ 数的是**全部**用例，不是只数 `in_eval=true` 的（§11.3-4）：
+       它与界面上的行数对得上，用户才不会以为丢了数据。
+    """
+    rows = await conn.fetch(
+        """SELECT s.id, s.name, s.description, s.created_at, s.updated_at,
+                  (SELECT count(*) FROM eval_cases c WHERE c.set_id = s.id) AS case_count,
+                  (SELECT count(*) FROM eval_cases c
+                    WHERE c.set_id = s.id AND c.in_eval) AS in_eval_count
+             FROM eval_sets s ORDER BY s.created_at, s.name""")
+    return [dict(r) for r in rows]
+
+
+async def create_set(conn, name: str, description: str | None = None,
+                     created_by: str | None = None) -> dict:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("评测集名不能为空")
+    if await conn.fetchval("SELECT 1 FROM eval_sets WHERE name = $1", name):
+        raise SetNameTaken(name)
+    set_id = uuid.uuid4().hex
+    try:
+        row = await conn.fetchrow(
+            """INSERT INTO eval_sets (id, name, description, created_by)
+               VALUES ($1,$2,$3,$4) RETURNING *""",
+            set_id, name, description, created_by)
+    except asyncpg.UniqueViolationError:        # 并发下先查到没有、插入时撞上
+        raise SetNameTaken(name) from None
+    return dict(row)
+
+
+async def update_set(conn, set_id: str, *, name: str | None = None,
+                     description: str | None = None) -> dict:
+    row = await conn.fetchrow("SELECT * FROM eval_sets WHERE id = $1", set_id)
+    if row is None:
+        raise SetNotFound(set_id)
+    sets_ = []
+    params: list[Any] = [set_id]
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ValueError("评测集名不能为空")
+        if await conn.fetchval("SELECT 1 FROM eval_sets WHERE name = $1 AND id <> $2",
+                               name, set_id):
+            raise SetNameTaken(name)
+        params.append(name)
+        sets_.append(f"name = ${len(params)}")
+    if description is not None:
+        params.append(description)
+        sets_.append(f"description = ${len(params)}")
+    if not sets_:
+        return dict(row)
+    sets_.append("updated_at = now()")
+    try:
+        row = await conn.fetchrow(
+            f"UPDATE eval_sets SET {', '.join(sets_)} WHERE id = $1 RETURNING *", *params)
+    except asyncpg.UniqueViolationError:
+        raise SetNameTaken(name or "") from None
+    return dict(row)
+
+
+async def delete_set(conn, set_id: str) -> None:
+    """删评测集，**连带它的用例**（`set_id` 外键是 CASCADE）。
+
+    历史 run 不受影响 —— 它的 `set_name` 是快照，`set_id` 置空（决策 14）。
+    """
+    running = await running_run_id(conn, set_id)
+    if running:
+        raise SetBusy(f"该评测集正在被评测使用（run {running[:8]}）")
+    result = await conn.execute("DELETE FROM eval_sets WHERE id = $1", set_id)
+    if result.endswith(" 0"):
+        raise SetNotFound(set_id)
+
+
+async def running_run_id(conn, set_id: str) -> str | None:
+    """有没有 run 正在跑这个集（§5.5 的删除守卫）。
+
+    `runner.py` 开工时把题**一次性读进内存**再逐题跑。若跑到一半有人删了这个集
+    或其中一条用例，最后落库时 `case_id` 指向已不存在的行 → 外键报错 → **整轮 failed**。
+    系统本来就「一次只允许一轮」，所以检查很轻。
+    """
+    return await conn.fetchval(
+        "SELECT id FROM eval_runs WHERE set_id = $1 AND status IN ('pending','running')",
+        set_id)
+
+
+async def list_cases(conn, set_id: str, *, source: str | None = None,
+                     q: str | None = None, page: int = 1,
+                     page_size: int = 20) -> dict:
+    """用例列表：分页 + 按来源筛选 + 按问题搜索（**都走后端**，不前端过滤）。"""
+    page = max(1, int(page or 1))
+    page_size = max(1, min(MAX_PAGE_SIZE, int(page_size or 20)))
+
+    where = ["set_id = $1"]
+    params: list[Any] = [set_id]
+    if source:
+        params.append(source)
+        where.append(f"source = ${len(params)}")
+    if q:
+        params.append(f"%{q}%")
+        where.append(f"question ILIKE ${len(params)}")
+    clause = " AND ".join(where)
+
+    total = await conn.fetchval(f"SELECT count(*) FROM eval_cases WHERE {clause}", *params)
+    rows = await conn.fetch(
+        f"""SELECT * FROM eval_cases WHERE {clause}
+            ORDER BY created_at DESC, id LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+        *params, page_size, (page - 1) * page_size)
+
+    return {"items": [_case_out(dict(r)) for r in rows], "total": total,
+            "page": page, "page_size": page_size}
+
+
+def _case_out(row: dict) -> dict:
+    """把 JSONB 列解成 Python 对象再往外给。"""
+    for field in _JSONB_FIELDS:
+        row[field] = _loads(row.get(field))
+    return row
+
+
+async def create_case(conn, set_id: str, *, question: str,
+                      ground_truth: str | None = None, in_eval: bool = True,
+                      note: str | None = None) -> dict:
+    """手工录入一条用例（§5.2）。
+
+    ⚠️ **弹窗里没有的字段由服务端自己填**，不填就当场报错：
+       - `case_type` 是 `NOT NULL` 且**没有 DEFAULT**（`001_init.sql:222`），
+         而参考图的弹窗只有 问题/标准答案/参与评测/备注 四个字段。
+         手工录入的都是单轮事实题，所以填 `'factual'`。
+       - `expected_doc_ids` **留空** —— 弹窗没这一项。代价是这道题的
+         `recall_at_k` / `mrr` 恒为空（`None`，不是 0），**不参与均值**（§7.6）。
+    """
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("问题不能为空")
+    if not await conn.fetchval("SELECT 1 FROM eval_sets WHERE id = $1", set_id):
+        raise SetNotFound(set_id)
+
+    row = await conn.fetchrow(
+        """INSERT INTO eval_cases
+             (id, set_id, question, ground_truth, case_type, suite,
+              source, in_eval, note, expected_doc_ids)
+           VALUES ($1,$2,$3,$4,'factual','full','manual',$5,$6,NULL)
+           RETURNING *""",
+        uuid.uuid4().hex, set_id, question, ground_truth, in_eval, note)
+    return _case_out(dict(row))
+
+
+async def update_case(conn, case_id: str, **fields) -> dict:
+    """改一条用例。**只有 `EDITABLE_CASE_FIELDS` 里的列会被写**，其余静默忽略。"""
+    row = await conn.fetchrow("SELECT * FROM eval_cases WHERE id = $1", case_id)
+    if row is None:
+        raise CaseNotFound(case_id)
+
+    edits = {k: v for k, v in fields.items()
+             if k in EDITABLE_CASE_FIELDS and v is not None}
+    if "question" in edits:
+        edits["question"] = str(edits["question"]).strip()
+        if not edits["question"]:
+            raise ValueError("问题不能为空")
+    if not edits:
+        return _case_out(dict(row))
+
+    params: list[Any] = [case_id]
+    pieces = []
+    for key, value in edits.items():
+        params.append(value)
+        pieces.append(f"{key} = ${len(params)}")
+    row = await conn.fetchrow(
+        f"UPDATE eval_cases SET {', '.join(pieces)} WHERE id = $1 RETURNING *", *params)
+    return _case_out(dict(row))
+
+
+async def delete_case(conn, case_id: str) -> None:
+    """删用例。**历史结果保留**，只是 `case_id` 置空（外键 ON DELETE SET NULL）。"""
+    row = await conn.fetchrow("SELECT set_id FROM eval_cases WHERE id = $1", case_id)
+    if row is None:
+        raise CaseNotFound(case_id)
+    if row["set_id"]:
+        running = await running_run_id(conn, row["set_id"])
+        if running:
+            raise SetBusy(f"该用例所在评测集正在被评测使用（run {running[:8]}）")
+    await conn.execute("DELETE FROM eval_cases WHERE id = $1", case_id)
+
+
+# ---- 来源片段与高亮 --------------------------------------------------
+
+_WHITESPACE = re.compile(r"\s")
+
+
+def locate_highlight(snippet: str | None, answer: str | None) -> list[int] | None:
+    """标准答案在 `snippet` 里的字符区间 `[start, end)`（**end 不含**）。
+
+    ⚠️ **不能直接 `snippet.find(ground_truth)`。** 生成期的校验是
+       `make_eval_cases.py` 里的 `_squeeze()` —— **去掉所有空白之后**再比子串。
+       原因是规范化正文里有 PDF 提取留下的硬换行
+       （`…提出申请并经\\n\\n学院审核同意后送达；`），模型复述时自然写成一行。
+       所以标准答案在原文里**往往不是逐字连续子串**，`find()` 会经常返回 -1，
+       界面上就永远没有高亮。
+
+       正确做法：**按去空白口径定位，再把区间映射回原文偏移**
+       （记录每个非空白字符对应的原文下标，比对成功后取首尾映射回去）。
+
+    对不上返回 `None` —— 那往往是**文档更新过了**，正是这个功能要暴露的（§8.3）。
+    """
+    if not snippet or not answer:
+        return None
+    squeezed: list[str] = []
+    offsets: list[int] = []
+    for i, ch in enumerate(snippet):
+        if not _WHITESPACE.match(ch):
+            squeezed.append(ch)
+            offsets.append(i)
+    target = _WHITESPACE.sub("", answer)
+    if not target:
+        return None
+    pos = "".join(squeezed).find(target)
+    if pos < 0:
+        return None
+    return [offsets[pos], offsets[pos + len(target) - 1] + 1]
+
+
+async def case_source(conn, case_id: str) -> dict:
+    """「核对标准答案」弹窗吃的数据（§5.2 / §6.5）。"""
+    row = await conn.fetchrow(
+        """SELECT c.*, d.title AS source_document_title
+             FROM eval_cases c
+             LEFT JOIN documents d ON d.id = c.source_document_id
+            WHERE c.id = $1""", case_id)
+    if row is None:
+        raise CaseNotFound(case_id)
+    row = dict(row)
+    snippet = row.get("source_snippet")
+    return {
+        "question": row["question"],
+        "ground_truth": row.get("ground_truth"),
+        "source_document_id": row.get("source_document_id"),
+        "source_document_title": row.get("source_document_title"),
+        "source_chunk_id": row.get("source_chunk_id"),
+        "source_page": row.get("source_page"),
+        "source_snippet": snippet,
+        "highlight": locate_highlight(snippet, row.get("ground_truth")),
+    }
