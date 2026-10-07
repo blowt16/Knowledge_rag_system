@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(not CASES, reason="题库未生成")
 
 
 def _squeeze(s: str) -> str:
-    """去空白比对 —— 与生成器同一口径（见 make_eval_cases._squeeze）。"""
+    """去空白比对 —— 与生成器同一口径（见 app/eval/generate.squeeze）。"""
     return re.sub(r"\s+", "", s or "")
 
 

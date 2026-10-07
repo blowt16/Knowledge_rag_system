@@ -1,0 +1,1898 @@
+{
+ "version": 1,
+ "set": {
+  "name": "默认题库",
+  "description": "M5-1 生成的全量题库（suite=full 的 75 条）。评测集功能上线前就存在的老题都在这里。"
+ },
+ "exported_at": "2026-10-07T10:31:51Z",
+ "cases": [
+  {
+   "id": "f-01-04",
+   "question": "这份文件里说转专业一般什么时候集中办理、一年办几次？",
+   "ground_truth": "转专业工作在每学年春季学期集中受理，每学年\n办理一次。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "62c409d3a8f44910b109120e492045c9"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-01-05",
+   "question": "桂电教2021-6号这份文件里，转专业的学生学费按什么标准交？",
+   "ground_truth": "学生转专业后必须按照转入年级专业培养方案的\n要求，修完规定的课程和学分才能毕业，学费标准按转入专业执\n行。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "62c409d3a8f44910b109120e492045c9"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-02-01",
+   "question": "这份学士学位授予实施细则里，申请相应学位需要满足哪些前提条件？",
+   "ground_truth": "拥护中国共产党的领导，拥护社会主义制度，践行社会主义核心价值观，遵守国家法律和学校规章制度的普通高等教育本科生，达到相应学业要求、学术水平或者专业水平的，可申请相应学位。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ce65a6227fb241dbaddbce14acb070fd"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-02-02",
+   "question": "这份文件里，普通高等教育本科毕业生想拿学士学位，外语水平要满足哪些条件？",
+   "ground_truth": "1. 通过“桂林电子科技大学学士学位外语水平测试”；\n\n2. 非艺术类及非外语类专业且外语语种为英语的本科毕业\n\n生，全国大学生英语四级考试（CET4）成绩≧425 分；\n\n3. 非艺术类及非外语类专业且外语语种为非英语的本科毕\n\n业生，对应的全国大学生外语四级考试折算百分制成绩≧60 分\n\n（折算成绩时四舍五入取整），或在校期间外语课程平均成绩达\n\n到75 分；",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ce65a6227fb241dbaddbce14acb070fd"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-02-03",
+   "question": "这份文件里，竞赛获奖和发明专利的加分分值一共分几档，每档加多少分？",
+   "ground_truth": "1. 全国一等奖或发明专利加4 分；\n\n2. 全国二等奖加3 分；\n\n3. 全国三等奖或省部级一等奖加2 分；\n\n4. 省部级二等奖加1.5 分；\n\n5. 省部级三等奖加0.5 分。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ce65a6227fb241dbaddbce14acb070fd"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-02-04",
+   "question": "这份文件里，修读辅修学士学位的学生要达到什么条件才算达到辅修学士学位授予条件？",
+   "ground_truth": "修读辅修学士学位学生须取得主修专业毕业和学位\n资格后，完成辅修学士学位培养方案课程、获得规定学分，同时\n满足第四条规定，方达到辅修学士学位授予条件。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ce65a6227fb241dbaddbce14acb070fd"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-02-05",
+   "question": "这份文件里，学生要是对不授予学位或者撤销学位的决定不服，得在多少天之内提出复核申请？",
+   "ground_truth": "学位申请人或学位获得者在被告知不授予学位或撤销学位决定的5 个工作日内，可向学校学位评定委员会提出复核申请。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ce65a6227fb241dbaddbce14acb070fd"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-03-01",
+   "question": "这份文件里的学业预警是啥意思？",
+   "ground_truth": "学业预警是指学校根据学籍管理有关规定和各专业培养方案要求，统计每学期学生学习情况，对出现学习问题和学业困难的学生予以警示，并针对性地指导学生采取相应补救措施，",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-03-02",
+   "question": "桂电教2025-28号这份文件里，退学试读期是多长时间？",
+   "ground_truth": "退学试读期限为一学年，退学试读期内不进行其他学业预警。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-03-03",
+   "question": "这份文件里说，每学期开学多久之内要统计并确定进入学业预警范围的学生名单？",
+   "ground_truth": "每学期开学四周内，学院（部）指定专人依据培养方\n\n案对学生情况进行统计，确定进入各级学业预警范围的学生名单，\n\n报教务处备案，教务处汇总后发文公布。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-03-04",
+   "question": "这份文件里，累计不及格必修课程学分达到多少就要被退学？",
+   "ground_truth": "（二）累计不及格必修课程学分达到或超过35 学分的。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-04-01",
+   "question": "这份学籍管理规定里，新生因为身体原因想保留入学资格，一般能保留多长时间？",
+   "ground_truth": "经学校医院或学校指定的二级甲等以上医院诊断学生身心\n状况不适宜在校学习的，可以申请保留入学资格1 年，并离校治\n疗。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-04-02",
+   "question": "这份学籍管理规定里，学生每学期主修专业最多能修多少学分？",
+   "ground_truth": "学生每学期主修专业的修读学分应不高于35 学分。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-04-03",
+   "question": "这份学籍管理规定里，五级制成绩折成百分制算学分绩的时候，优、良、中、及格、不及格分别对应多少分？",
+   "ground_truth": "优-95，良-85，中-75，及格-65，不及格-40。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-04-04",
+   "question": "这份学籍管理规定里，因伤、病休学的学生想复学，得满足什么条件才能办手续？",
+   "ground_truth": "因伤、病休学的学生，申请复学时，必须由二级甲等\n\n以上医院诊断，证明已恢复健康，并经学校医院复查合格后，方\n\n可办理复学手续。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-04-05",
+   "question": "这份学籍管理规定里，学生本人申请退学之外，退学处理由谁研究决定？",
+   "ground_truth": "第三十六条除学生本人申请退学外，对学生的退学处理，由\n学校校长办公会研究决定。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-05-01",
+   "question": "这份文件里说考试命题要以什么为依据？",
+   "ground_truth": "考试命题应以教学大纲为依据，体现OBE 理念，命题内容应反映教学大纲的基本要求，命题权重合理；",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-05-02",
+   "question": "这份文件里说，必修课和限选课的A、B卷是怎么选用的？",
+   "ground_truth": "A、B 卷的选用，由考试中心随机抽取。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-05-03",
+   "question": "这份考试管理规定里，命题教师最晚要提前多久把东西交到教务处考试中心安排印刷？",
+   "ground_truth": "命题教师按考试日期提前\n\n两周以上交教务处考试中心安排印刷。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-05-04",
+   "question": "这份考试管理规定里，被取消考试资格的学生，成绩怎么算，还能不能补考？",
+   "ground_truth": "被取消考试资格者，该课程成绩\n\n以零分计且不能参加该课程的补考。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-05-05",
+   "question": "这份文件里，学生因为特殊原因不能及时参加课程考核，想申请缓考的话，最晚什么时候办？突发急病或遇突发事故又是什么时限？",
+   "ground_truth": "因特殊原因不能及时参加课程考核的，可在考试前提出申请，由\n\n学院主管领导审批。其中突发急病或遇突发事故的须在事发后两\n\n个工作日内办理；",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-06-01",
+   "question": "这份文件里，新生入学后复查都查哪些方面？",
+   "ground_truth": "（一）录取手续及程序等是否合乎国家招生规定；\n\n（二）所获得的录取资格是否真实、合乎相关规定；\n\n（三）本人及身份证明与录取通知、考生档案等是否一致；\n\n（四）身心健康状况是否符合报考专业或者专业类别体检要\n\n求，能否保证在校正常学习、生活；\n\n（五）艺术、体育等特殊类型录取学生的专业水平是否符合\n\n录取要求。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "7be0560db5f54384991cbc188e8acc7c"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-06-02",
+   "question": "这份文件里，学生一、二年级的体育课成绩是怎么算出来的？",
+   "ground_truth": "学生一、二年级的体育课成绩根据学生所选的专项成绩、身\n体素质、考勤的情况综合评定，三、四年级的体育成绩按照《国\n家学生体质健康标准》评定。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "7be0560db5f54384991cbc188e8acc7c"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-06-03",
+   "question": "按照这份本科生管理规定，学生要是严重违反考核纪律或者作弊了，那门课的成绩会怎么算？",
+   "ground_truth": "学生严重违反考核纪律或者作弊的，该课程考核成绩记为无效，并视其违纪或者作弊情节，给予相应的纪律处分。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "7be0560db5f54384991cbc188e8acc7c"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-06-04",
+   "question": "桂电这份本科生管理规定里，学生成立团体要办什么手续？",
+   "ground_truth": "学生成立团体，应当\n按学校有关规定提出书面申请，报学校批准并施行登记和年检制\n度。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "7be0560db5f54384991cbc188e8acc7c"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-06-05",
+   "question": "这份文件里，学生申诉处理委员会接到书面申诉后，一般要在多少天内给出复查结论？",
+   "ground_truth": "学生申诉处理委员会对学生提出的申诉进行复\n查，并在接到书面申诉之日起15 日内作出复查结论并告知申诉\n人。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "7be0560db5f54384991cbc188e8acc7c"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-07-01",
+   "question": "学生申诉处理办法里，学生提出申诉要抱着什么样的态度？",
+   "ground_truth": "学生应坚持严肃、认真、诚实的原则提出申诉；学校应坚持公平、公正、实事求是和有错必纠的原则处理学生的申诉。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-07-02",
+   "question": "学生申诉处理委员会的办公室设在哪个部门？",
+   "ground_truth": "学生申诉处理委员会下设办公室，办公室设在学生工作部（处），负责接收学生申诉申请书，处理学生校内申诉事务和学生校内申诉档案管理工作。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-07-03",
+   "question": "学生申诉处理委员会接到申诉申请书后，多少天之内要处理？",
+   "ground_truth": "学生申诉处理委员会应在接到书面申诉之日起15",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-07-04",
+   "question": "学生申诉处理委员会接到书面申诉后，最晚多久要给出复查结论？",
+   "ground_truth": "学生申诉处理委员会应在接到书面申诉之日起15\n日内作出复查结论并告知申诉人，并由其本人在送达回证上签收。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-07-05",
+   "question": "学生申诉的期限从什么时候开始算，最长能拖多久？",
+   "ground_truth": "申诉期限自学生知道或者应该知道处理或者处分之日起计算，最\n\n长不得超过6 个月。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-08-01",
+   "question": "《桂林电子科技大学本科生产教融合实习学生管理规定》里，学生校外实习实行什么样的管理体制？",
+   "ground_truth": "学生校外实习实行“学校统筹、部门协同、学院主体、责任到人”的管理体制。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ad19a33ae45d4464950d795dd7297155"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-08-02",
+   "question": "这份文件里说，学生工作部（处）要指导二级学院做好辅导员的哪些工作？",
+   "ground_truth": "指导二级学院做好辅导员的派驻安排、日常管理与考核工作。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ad19a33ae45d4464950d795dd7297155"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-08-03",
+   "question": "这份文件里说，辅导员派驻工作由谁统筹、谁来落实？",
+   "ground_truth": "由学生工作部（处）统筹辅导员派驻工作，各二级学院负责落实。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ad19a33ae45d4464950d795dd7297155"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-08-04",
+   "question": "这份文件里，实习期间负责学生实习小组组建与管理的是哪一项职责？",
+   "ground_truth": "（二）实习团队与临时党团组织建设。在企业实习期间负责\n学生实习小组的组建与管理，开展实习骨干的遴选和培养，加强\n对外出实习学生中入党积极分子的跟踪考察，协助学校做好学生\n党员在外实习期间的教育管理，指导临时党团组织开展活动。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ad19a33ae45d4464950d795dd7297155"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-08-05",
+   "question": "这份实习管理规定里，学生实习结束后要交什么、还要配合做什么？",
+   "ground_truth": "学生应按要求提交实习报告，并配合\n完成实习考核。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "ad19a33ae45d4464950d795dd7297155"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-09-01",
+   "question": "这份文件里，从广西区内应征入伍的应届毕业班学生能拿到多少入伍奖励金？",
+   "ground_truth": "从广西区内应征入伍的应届毕业班学生，给予其本人一次性奖励5000 元。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "1c46d9f880ba480d90d9c19c7829ef94"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-09-02",
+   "question": "这份文件里，应届毕业班学生假期从户籍所在地往返学校应征的差旅费用，算哪一项补助？",
+   "ground_truth": "第四条差旅补助：应届毕业班学生假期从户籍所在地往返\n学校应征的差旅费用。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "1c46d9f880ba480d90d9c19c7829ef94"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-09-03",
+   "question": "这份文件里，研究生报考优待具体是怎么规定的？",
+   "ground_truth": "对服役期间获得三等战功、二等\n\n功以上奖励或者二级以上表彰，符合全国硕士研究生招生考试报\n\n考条件的退役人员，可申请免初试攻读硕士研究生。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "1c46d9f880ba480d90d9c19c7829ef94"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-10-01",
+   "question": "这份文件里，退役复学后所修课程的最终成绩是怎么折算的？",
+   "ground_truth": "退役复学后所修课程的最终成绩按实际成绩的1.5 倍进行折算后记录，即最终成绩=1.5×（平时成绩+考核成绩），最高不超过85 分，实际成绩超过85 分的，按实际成绩记录。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "2b99b24c391549e7bf6634804f027e80"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-10-02",
+   "question": "退役大学生士兵专项计划报考桂电的话，复试分数线是怎么定的？",
+   "ground_truth": "退役大学生士兵专项计划报考我校的，各专业复试分数线由我校自主划定，一般均低于国家线。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "2b99b24c391549e7bf6634804f027e80"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "f-10-03",
+   "question": "这份文件里说，毕业生士兵退役以后多长时间内还能享受应届毕业生的就业服务？",
+   "ground_truth": "毕业生士兵退役后一年内可享受应届毕业生就业服务。",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "2b99b24c391549e7bf6634804f027e80"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-01",
+   "question": "转专业的申请条件是什么？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "62c409d3a8f44910b109120e492045c9"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "转专业的申请条件是什么？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "省略：原句无主题词，不消解必然检索不到",
+     "question": "那需要提交哪些材料？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号",
+     "resolved_must_contain_any": [
+      "转专业"
+     ]
+    },
+    {
+     "note": "连续省略：第二轮就没有主题词",
+     "question": "办理流程要多久？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "01_本科生专业分流及转专业管理办法_桂电教2021-6号",
+     "resolved_must_contain_any": [
+      "转专业"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-02",
+   "question": "学业预警是怎么规定的？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "学业预警是怎么规定的？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "「它」+「多久」都会命中触发条件",
+     "question": "它多久触发一次？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号",
+     "resolved_must_contain_any": [
+      "学业预警"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-03",
+   "question": "缓考的申请流程是怎样的？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "缓考的申请流程是怎样的？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "§7.2 M2-1 ① 的原题",
+     "question": "它需要什么条件？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": [
+      "缓考"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-04",
+   "question": "学生申诉处理办法里规定了什么？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "cd99e4869f11447a97b0004090c396d2"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "学生申诉处理办法里规定了什么？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "首跑实测抓到的缺口：省略特征三条都判不出来（「那」不在代词表、「多长时间」不在疑问词表、长度>8）→ 静默跳过消解。已把「多长时间」补进疑问词表，现为常规题",
+     "question": "那要在多长时间内提出？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "07_学生申诉处理办法_2025修订_桂电学2025-7号",
+     "resolved_must_contain_any": [
+      "申诉"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-05",
+   "question": "退役复学有什么优待政策？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "2b99b24c391549e7bf6634804f027e80"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "退役复学有什么优待政策？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "省略：含疑问词「需要/条件」且无制度名词 → 触发消解。实测对照：「那需要什么条件？」→ 10 号**在 Top5 之外**；「退役复学需要什么条件？」→ 10 号 **rank 3**。⚠️ 这一轮换过两次：原题「那要办哪些手续？」根本答不了（「手续」在 10 号里 0 次出现）；第二版「那成绩怎么算？」也不行 —— 「成绩」在制度名词表里，设计上判为**自足**、压根不触发消解。两次都是标注没核对到判据上，第三次才用探针把「触发」与「检索对照」两件事一起量过",
+     "question": "那需要什么条件？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "10_参军入伍和退役复学学生优待政策_桂电2021-2号",
+     "resolved_must_contain_any": [
+      "退役",
+      "复学"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-06",
+   "question": "应届毕业班学生参军入伍有什么优待？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "1c46d9f880ba480d90d9c19c7829ef94"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "自足问题，首轮",
+     "question": "应届毕业班学生参军入伍有什么优待？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "09_应届毕业班学生参军入伍优待政策_试行",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "自足问题，不要求消解 —— 这轮只验路由与检索",
+     "question": "入伍奖励金是多少？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "09_应届毕业班学生参军入伍优待政策_试行",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-07",
+   "question": "你好",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "闸门：不走 LLM，不走检索",
+     "question": "你好",
+     "expected_route": "chat",
+     "should_clarify": 0,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "上轮是 chat，**不得被粘成 chat**；「这个」无先行词 → resolve_unresolved → 澄清",
+     "question": "那这个要多久啊",
+     "expected_route": "clarify",
+     "should_clarify": 1,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "用户回答澄清；含制度名词 → 不再澄清",
+     "question": "学业预警的",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "chat",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-08",
+   "question": "怎么办？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "触发条件二：长度<8 且规则层未命中制度名词/文号",
+     "question": "怎么办？",
+     "expected_route": "clarify",
+     "should_clarify": 1,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "回答澄清后进检索",
+     "question": "学业预警方面的问题",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "clarify",
+   "should_clarify": 1,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-09",
+   "question": "挂科了怎么办",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "「挂科」在制度名词表里；语料里 0 次出现，故不判检索",
+     "question": "挂科了怎么办",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-10",
+   "question": "你好，我想问下缓考",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "命中闸门词表但**不是**「整条消息无诉求」",
+     "question": "你好，我想问下缓考",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "与 mt-04#2 同类的省略缺口：「几天」原不在疑问词表 → 静默跳过消解。已一并补进词表",
+     "question": "那要提前几天申请？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": [
+      "缓考"
+     ]
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-11",
+   "question": "缓考",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "长度 2 < 8，但含制度名词 → **不得澄清**（澄清误报率的分母）",
+     "question": "缓考",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": null
+    },
+    {
+     "note": "闸门",
+     "question": "谢谢",
+     "expected_route": "chat",
+     "should_clarify": 0,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-12",
+   "question": "我想问一下，本科生学业预警以及学业退学实施细则里面，对于一个学期内不及格课程达到一定学分的同学，学校具体是怎么处理的，会有什么措施？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "长度远超阈值",
+     "question": "我想问一下，本科生学业预警以及学业退学实施细则里面，对于一个学期内不及格课程达到一定学分的同学，学校具体是怎么处理的，会有什么措施？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "03_本科生学业预警及学业退学实施细则_桂电教2025-28号",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-13",
+   "question": "？？？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "首跑实测：原实现判成 clarify（短且无制度名词，正好踩中澄清触发条件二）—— 用户敲三个问号被反问「你想问的是哪一项？」，正是 §15 #6 禁止的「无意义澄清」。修法：把「没有实义字符」并入闸门判据（与 resolve 共用），于是 route=chat。口径判读已由负责人签字确认（2026-10-05）：纯符号↔不澄清、超长↔不误判闲聊",
+     "question": "？？？",
+     "expected_route": "chat",
+     "should_clarify": 0,
+     "expected_document": null,
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "chat",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-14",
+   "question": "作弊被发现了会有什么后果？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "「作弊」不在制度名词表里、也没有文号 → 规则层判 None。实测探针：闸门 False、澄清 False、检索命中 05（「作弊」在该文档出现 12 次）。本轮的看点是 `route_source=llm`",
+     "question": "作弊被发现了会有什么后果？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "mt-mt-15",
+   "question": "违规使用手机有什么后果？",
+   "ground_truth": null,
+   "case_type": "multi_turn",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": [
+    {
+     "note": "「违规」「手机」都不在制度名词表 → 规则层判 None。实测探针：检索 top1/top2 都是 05（「违规」在该文档出现 14 次）",
+     "question": "违规使用手机有什么后果？",
+     "expected_route": "knowledge",
+     "should_clarify": 0,
+     "expected_document": "05_考试管理规定_桂电教2020-15号",
+     "resolved_must_contain_any": null
+    }
+   ],
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "n-01",
+   "question": "桂电教〔2021〕6号这份文件是关于什么的？",
+   "ground_truth": "桂电教〔2021〕6 号\n\n关于印发《桂林电子科技大学本科生\n 专业分流及\n》的通知\n\n各单位、各部门：\n\n现将《桂林电子科技大学本科生专业分流及转专业管理办法\n\n（修订）》印发给你们，请遵照执行。\n\n 桂林电子科技大学\n\n 2021 年1 月22 日\n\n桂林电子科技大学文件\n\n— 2 — 桂林电子科技大学本科生\n\n ",
+   "case_type": "doc_number",
+   "suite": "full",
+   "expected_doc_ids": [
+    "62c409d3a8f44910b109120e492045c9"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "n-03",
+   "question": "桂电教〔2025〕28号这份文件是关于什么的？",
+   "ground_truth": "桂电教〔2025〕28 号\n\n关于印发《桂林电子科技大学本科生学业\n\n预警及学业退学实施细则》的通知\n\n各单位、各部门：\n\n现将《桂林电子科技大学本科生学业预警及学业退学实施细\n\n则》印发给你们，请遵照执行。\n\n桂林电子科技大学\n\n2025 年7 月24 日\n（此件公开发布）\n\n桂林电子科技大学文件\n\n桂林电子科技大学",
+   "case_type": "doc_number",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "n-04",
+   "question": "桂电教〔2025〕27号这份文件是关于什么的？",
+   "ground_truth": "桂电教〔2025〕27 号\n\n关于印发《桂林电子科技大学普通高等教育\n本科学生学籍管理规定（2025 年修订）》的通知\n\n各单位、各部门：\n\n现将《桂林电子科技大学普通高等教育本科学生学籍管理规\n\n定（2025 修订）》印发给你们，请遵照执行。\n\n桂林电子科技大学\n\n2025 年7 月24 日\n（此件公开发布）\n\n桂林",
+   "case_type": "doc_number",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "n-05",
+   "question": "桂电教〔2020〕15号这份文件是关于什么的？",
+   "ground_truth": "桂电教〔2020〕15 号\n\n关于印发《桂林电子科技大学\n\n考试管理规定》的通知\n\n各单位、各部门：\n\n现将《桂林电子科技大学考试管理规定》印发给你们，请遵\n\n照执行。\n\n 桂林电子科技大学\n\n 2020 年6 月28 日\n\n桂林电子科技大学文件\n\n桂林电子科技大学考试管理规定\n\n第一章 总 则\n\n第一条 本规定依据《",
+   "case_type": "doc_number",
+   "suite": "full",
+   "expected_doc_ids": [
+    "325949bfaf1c434b91c3b4590f6deca5"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-01",
+   "question": "这份实验室安全管理细则第一条说，制定细则是为了什么、依据什么？",
+   "ground_truth": "为加强实验室安全管理，保障师生人身安全与学校财产安全，根据国家有关法律法规，结合本校实际，制定本细则。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-02",
+   "question": "这份细则管的是哪些实验室？",
+   "ground_truth": "本细则适用于全校所有教学实验室、科研实验室及公共实验平台。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-03",
+   "question": "这份文件里，第一次进实验室的人要培训多少学时、考核通过后能拿到什么？",
+   "ground_truth": "首次进入实验室的人员，应当完成不少于 8 学时的安全培训，并通过安全知识考核，考核合格后方可获得准入资格。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-04",
+   "question": "《实验室安全内部管理细则》里，安全培训合格证到期后要重新拿到准入资格，得在多久之内去复训？",
+   "ground_truth": "有效期届满前三十日内，应当参加复训并重新考核；逾期未复训的，准入资格自动失效。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-05",
+   "question": "按照这份实验室管理细则，校外人员进实验室得提前几天报备？",
+   "ground_truth": "第五条 校外人员进入实验室，应当由校内合作教师全程陪同，并提前三个工作日向实验室与设备管理处报备。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-06",
+   "question": "这份实验室安全内部管理细则里，剧毒化学品领用要经过谁的审批？",
+   "ground_truth": "领用剧毒化学品应当经实验室主任与保卫处双重审批，领用量不得超过当日实验所需量。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-07",
+   "question": "这份文件里，危险化学品废弃物暂存超过多少天就得向实验室与设备管理处报告？",
+   "ground_truth": "暂存超过 90 天的，应当向实验室与设备管理处报告暂存情况。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-08",
+   "question": "实验室安全事故发生后，现场人员要在多长时间内报告给谁？",
+   "ground_truth": "发生实验室安全事故，现场人员应当立即采取应急措施，并在 30 分钟内报告实验室负责人与保卫处。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-09",
+   "question": "按这份实验室安全管理细则，一般事故要在几天内交书面调查报告？",
+   "ground_truth": "一般事故应当在 3 个工作日内提交书面调查报告；较大及以上事故应当在 24 小时内提交初步报告，10 个工作日内提交完整调查报告。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-10",
+   "question": "《实验室安全内部管理细则》里说，各学院每学期至少要搞几次实验室安全自查？自查记录得留多久？",
+   "ground_truth": "各学院应当每学期至少组织两次实验室安全自查，自查记录保存不少于四年。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-11",
+   "question": "这份实验室安全内部管理细则里，暂停使用资格的期限是多久？",
+   "ground_truth": "暂停使用资格的期限为 1 至 6 个月。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "res-12",
+   "question": "这份实验室安全内部管理细则是由哪个部门负责解释的？",
+   "ground_truth": "本细则由实验室与设备管理处负责解释，自发布之日起施行。",
+   "case_type": "restricted",
+   "suite": "full",
+   "expected_doc_ids": null,
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": [
+    "staff"
+   ],
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "x-03",
+   "question": "《本科生学业预警及学业退学实施细则》规定，每学期开学四周内哪个部门指定专人依据培养方案对学生情况进行统计，确定进入各级学业预警范围的学生名单，报哪个部门备案？",
+   "ground_truth": "每学期开学四周内，学院（部）指定专人依据培养方\n案对学生情况进行统计，确定进入各级学业预警范围的学生名单，\n报教务处备案，教务处汇总后发文公布。",
+   "case_type": "cross_paragraph",
+   "suite": "full",
+   "expected_doc_ids": [
+    "643d38c8a31443429d5bb32500397e2e"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "x-04",
+   "question": "《桂林电子科技大学普通高等教育本科学生学籍管理规定》中，哪些课程不安排缓考和补考，可以在下一开课学期重新选课学习？",
+   "ground_truth": "专业任选课、通识选修课及集中性实践环节（含各类实习、实训、考察、课程设计）不安排缓考和补考，可在下一开课学期重新选课学习。",
+   "case_type": "cross_paragraph",
+   "suite": "full",
+   "expected_doc_ids": [
+    "4523e31d128948c7b2bb331dda9dc080"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "generated",
+   "in_eval": true,
+   "note": null,
+   "source_document_id": null,
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  }
+ ]
+}

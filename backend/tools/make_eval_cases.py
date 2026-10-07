@@ -4,6 +4,10 @@
 
 产物：`backend/tests/fixtures/eval_cases_v1.json`
 
+⚠️ 出题 prompt 与两道硬校验（答案逐字来自原文 / 问句不带代词）在
+   `app/eval/generate.py` —— **与界面上的「从文档自动生成」是同一份**，
+   本文件不另抄一份。
+
 ## 为什么不是手写
 
 60–80 题手写要几小时，而且人写的"标准答案"很容易与原文有细微出入（多一个
@@ -40,6 +44,7 @@ sys.path.insert(0, str(REPO / "backend"))
 
 from app.core import llm  # noqa: E402
 from app.core.config import repo_path  # noqa: E402
+from app.eval import generate  # noqa: E402
 from app.ingestion.chunker import chunk_text  # noqa: E402
 
 OUT = REPO / "backend" / "tests" / "fixtures" / "eval_cases_v1.json"
@@ -64,91 +69,23 @@ REFUSAL_SEEDS = [
 ]
 
 
-def _pronoun_words() -> set[str]:
-    """代词表 —— **取自 app.yaml 的 `rules.pronoun_words`**，与 resolve 节点同源。
-
-    ⚠️ 不另抄一份：抄了就会漂移，而漂移之后「生成器认为没问题、图却判澄清」，
-       两边对着干还查不出原因。
-    """
-    import yaml
-    cfg_path = REPO / "backend" / "app" / "config" / "app.yaml"
-    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    return set(data["rules"]["pronoun_words"])
+# ⚠️ `squeeze` / `has_pronoun` / 出题 prompt 与两道硬校验**都从 `app.eval.generate` 引用**，
+#    这里不再各留一份。抄一份回去迟早会漂，而漂移之后「脚本能过、界面过不了」
+#    或者反过来，两边对着干还查不出原因 —— 本仓库已经为这类事踩过坑。
+_squeeze = generate.squeeze
+_has_pronoun = generate.has_pronoun
 
 
-def _has_pronoun(question: str, pronouns: set[str] | None = None) -> bool:
-    """单轮题里**不许出现代词**。
-
-    实测教训：首版没用这条，生成了一批「这个细则管的是哪些学生啊？」——
-    单轮评测没有上文，「这个」指不明白，**图判澄清是完全正确的行为**，
-    于是评测文件里凭空多出几条「路由错」的假失败。
-    代词的活儿是多轮题库（eval_multiturn）在干的。
-    """
-    import jieba
-    return bool(set(jieba.lcut(question)) & (pronouns if pronouns is not None
-                                             else _pronoun_words()))
+_INSTRUCTIONS = {
+    "factual": generate.FACTUAL_INSTRUCTION,
+    "cross_paragraph": ("出一道需要**把这一整段材料里的两处信息合起来**才能回答的题"
+                        "（例如把适用对象与时限结合）。"),
+}
 
 
-def _squeeze(s: str) -> str:
-    """去掉**所有空白**再比。用于「逐字」校验。
-
-    ⚠️ 必须这么做：规范化正文里有 PDF 提取留下的硬换行与空行
-    （实测：`…提出申请并经\\n\\n学院审核同意后送达；`），模型复述时自然写成
-    一行 —— 用带空白的原串去比会判成「不是原文」，而**它确实是原文**。
-    去空白比对仍是强保证：**非空白字符序列必须连续出现在原文里**，
-    改写、概括、跨段拼接都会当场露馅。
-    """
-    return re.sub(r"\s+", "", s)
-
-
-async def _ask(chunk: str, kind: str, title: str, retries: int = 2) -> dict | None:
-    """让模型围绕给定片段出一道题。答案必须是原文片段（逐字）。"""
-    if kind == "factual":
-        instruction = ("出一道路人式的事实题：问某项规定/条件/时限是**什么**。"
-                       "问法要像一个学生随口问的，不要照抄原文句式。")
-    elif kind == "cross_paragraph":
-        instruction = ("出一道需要**把这一整段材料里的两处信息合起来**才能回答的题"
-                       "（例如把适用对象与时限结合）。")
-    else:
-        raise ValueError(kind)
-
-    prompt = (
-        f"下面是《{title}》里的一段材料：\n\n\"\"\"\n{chunk}\n\"\"\"\n\n"
-        f"{instruction}\n\n"
-        "严格要求：\n"
-        "1. `ground_truth` 必须是上面材料里**连续的一段原文**，一字不改（含标点）。\n"
-        "2. 不许用自己的话概括，不许跨出这段材料。\n"
-        "3. **问句里不许出现代词**（这个 / 那个 / 该 / 其 / 上述 …）—— "
-        "这是**单轮**提问，没有上文，代词会让问题指代不明。"
-        "请用「本办法」「这份文件」这类自足的说法，或直接点出文种。\n"
-        "4. 只输出 JSON：{\"question\": \"...\", \"ground_truth\": \"...\"}\n\n"
-        # ★ few-shot 是决定性的：不给例子时模型爱改写（首轮实测 50 段里只通过 19），
-        #   给了例子之后通过率大幅上升 —— 这类「照抄」任务上，一个例子顶十条规则。
-        "示例（假设材料里写着「学生应当在考试前向所在学院提出申请，经批准后方可缓考。」）：\n"
-        "{\"question\": \"缓考要提前跟谁说、什么时候说？\", "
-        "\"ground_truth\": \"学生应当在考试前向所在学院提出申请，经批准后方可缓考。\"}\n"
-        "注意答案**逐字**就是材料里的那句话，一个字都没改。"
-    )
-    for _ in range(retries + 2):
-        try:
-            data = await llm.complete_json(
-                [{"role": "user", "content": prompt}], timeout=45, max_tokens=800)
-        except Exception:  # noqa: BLE001
-            continue
-        if not isinstance(data, dict):
-            continue
-        q = str(data.get("question", "")).strip()
-        gt = str(data.get("ground_truth", "")).strip()
-        # ★ 硬校验一：答案必须是这段材料的逐字子串（忽略空白，见 `_squeeze`）
-        if not (q and gt and _squeeze(gt) in _squeeze(chunk) and len(_squeeze(gt)) >= 10):
-            continue
-        # ★ 硬校验二：单轮题**不许带代词**（见 `_has_pronoun` 的实测教训）。
-        #   带代词会被图的 resolve 判成「指代不明」→ 走 clarify，那是**正确行为**，
-        #   但会让评测里凭空多出「路由错」的假失败。
-        if _has_pronoun(q):
-            continue        # 外层循环重试（prompt 里已明令不许用代词）
-        return {"question": q, "ground_truth": gt}
-    return None
+async def _ask(chunk: str, kind: str, title: str) -> dict | None:
+    """围绕给定片段出一道题。prompt 与两道硬校验在 `app.eval.generate` 里。"""
+    return await generate.ask_model_for_case(chunk, title, _INSTRUCTIONS[kind])
 
 
 async def main() -> int:

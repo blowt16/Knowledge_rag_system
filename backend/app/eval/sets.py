@@ -404,7 +404,7 @@ def locate_highlight(snippet: str | None, answer: str | None) -> list[int] | Non
     """标准答案在 `snippet` 里的字符区间 `[start, end)`（**end 不含**）。
 
     ⚠️ **不能直接 `snippet.find(ground_truth)`。** 生成期的校验是
-       `make_eval_cases.py` 里的 `_squeeze()` —— **去掉所有空白之后**再比子串。
+       `app/eval/generate.py::squeeze()` —— **去掉所有空白之后**再比子串。
        原因是规范化正文里有 PDF 提取留下的硬换行
        （`…提出申请并经\\n\\n学院审核同意后送达；`），模型复述时自然写成一行。
        所以标准答案在原文里**往往不是逐字连续子串**，`find()` 会经常返回 -1，
