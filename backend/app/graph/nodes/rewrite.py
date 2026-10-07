@@ -28,7 +28,7 @@ from app.core import llm
 from app.core.prompts import render
 from app.core.config import cfg
 from app.graph.state import RAGState, RetrievalQuery, NodeTrace
-from app.retrieval import eval_config
+from app.eval import config as eval_config
 
 logger = logging.getLogger(__name__)
 

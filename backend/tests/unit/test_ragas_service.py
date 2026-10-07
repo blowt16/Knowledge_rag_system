@@ -2,7 +2,7 @@
 
 真跑 ragas 要调 LLM 判官（一条样本约 20 秒），不适合放进快速测试套件 ——
 **真链路的手工验证方式见 `docs/评测与ragas.md`**：
-    cd backend && uv run python -m app.services.ragas_service
+    cd backend && uv run python -m app.eval.ragas
 
 这里锁的是三件事：
 1. 隔离环境不在时**不抛异常**，而是返回 `available: False`（与 stats/retrieval 同口径）
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services import ragas_service
+from app.eval import ragas as ragas_service
 
 
 def test_venv_python_honours_override(monkeypatch, tmp_path):

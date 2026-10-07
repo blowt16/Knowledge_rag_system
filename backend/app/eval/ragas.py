@@ -115,7 +115,7 @@ async def score_samples(
     return data
 
 
-if __name__ == "__main__":  # 手工冒烟：python -m app.services.ragas_service
+if __name__ == "__main__":  # 手工冒烟：python -m app.eval.ragas
     async def _demo() -> None:
         r = await score_samples([{
             "user_input": "缓考申请需要什么条件？",

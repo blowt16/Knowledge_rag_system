@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 
 from app.graph.state import Chunk, NodeTrace, RAGState
-from app.retrieval import eval_config
+from app.eval import config as eval_config
 from app.retrieval.reranker import rerank
 
 

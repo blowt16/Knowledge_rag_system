@@ -72,7 +72,7 @@ async def run_factory():
 
 
 def _metrics(*, available: bool = True, errors: list[str] | None = None) -> dict:
-    """一轮跑完的整轮 metrics —— 形状照 `eval_service._aggregate`。"""
+    """一轮跑完的整轮 metrics —— 形状照 `app.eval.runner._aggregate`。"""
     return {
         "recall_at_k": 0.5,
         "mrr": 0.3,

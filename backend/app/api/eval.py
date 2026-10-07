@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import db
 from app.core.deps import require_role
-from app.retrieval import eval_config
+from app.eval import config as eval_config
 from app.schemas.eval import (
     EvalCompareResponse,
     EvalRunCreated,
@@ -24,7 +24,7 @@ from app.schemas.eval import (
     EvalRunList,
     EvalRunRequest,
 )
-from app.services import eval_service
+from app.eval import runner as eval_service
 
 logger = logging.getLogger(__name__)
 

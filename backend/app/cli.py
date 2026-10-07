@@ -816,14 +816,14 @@ async def cmd_seed_eval_cases(args: argparse.Namespace) -> int:
 async def cmd_eval_calibration(args: argparse.Namespace) -> int:
     """跑校准小集并对着**基线**判回归（CI 的 eval-regression job 用）。
 
-    为什么走 CLI 而不是 API：CI 里没有常驻服务。这里直接调 `eval_service`，
+    为什么走 CLI 而不是 API：CI 里没有常驻服务。这里直接调 `eval.runner`，
     结果照样落 `eval_runs`（§6.1：CI 跑的与手动跑的**必须在同一张表**，
     否则对比表里看不到 CI 那几轮）。
     """
     import json
 
     from app import db
-    from app.services import eval_service
+    from app.eval import runner as eval_service
 
     run_id = uuid.uuid4().hex
     await db.init_pool()

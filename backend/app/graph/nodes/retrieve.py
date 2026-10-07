@@ -24,7 +24,8 @@ from app import db
 from app.core.config import cfg
 from app.core.deps import UserContext
 from app.graph.state import Chunk, NodeTrace, RAGState, RetrievalQuery
-from app.retrieval import bm25, eval_config, vector
+from app.eval import config as eval_config
+from app.retrieval import bm25, vector
 from app.retrieval.fusion import weighted_rrf
 from app.retrieval.search import bm25_retrieve, vector_retrieve
 
@@ -120,7 +121,7 @@ async def retrieve_node(state: RAGState) -> dict:
         return _result([], started, degraded_kinds, session_id, recalled=0)
 
     # 消融第 2 行（+BM25 但 RRF 未开）：文档没定怎么合，这里用 min-max 归一化相加。
-    # ⚠️ 这是**消融脚手架**，不是产品语义（见 retrieval/eval_config.py 的说明）。
+    # ⚠️ 这是**消融脚手架**，不是产品语义（见 app/eval/config.py 的说明）。
     candidates = (weighted_rrf(ranked) if eval_config.on(state, "rrf")
                   else _normalized_union(ranked))
     return _result(candidates, started, degraded_kinds, session_id,

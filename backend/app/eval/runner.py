@@ -25,7 +25,7 @@ from typing import Any
 from app import db
 from app.graph.builder import get_graph
 from app.graph.state import UserContextLite, new_state
-from app.services import ragas_service
+from app.eval import ragas as ragas_service
 
 logger = logging.getLogger(__name__)
 
