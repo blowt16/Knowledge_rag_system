@@ -220,8 +220,8 @@ export default function EvalAblationPage() {
           {msg && <p className="text-sm text-muted-foreground">{msg}</p>}
           <p className="text-xs text-muted-foreground">
             评测在后台跑，进度看下面列表的状态；同一时刻只允许一轮（要占 GPU）。
-            这两条入口走的是 `suite` 路径 —— 与批量评测页不同，它们**不看**用例的
-            「参与评测」开关，题集与 CI 用的一致。
+            这两条入口走的是 <code>suite</code> 路径 —— 与批量评测页不同，它们
+            <b>不看</b>用例的「参与评测」开关，题集与 CI 用的一致。
           </p>
         </CardContent>
       </Card>

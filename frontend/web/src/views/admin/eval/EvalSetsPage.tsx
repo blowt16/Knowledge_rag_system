@@ -12,6 +12,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -62,6 +66,11 @@ export default function EvalSetsPage() {
   const [caseDialog, setCaseDialog] = useState<{ mode: 'create' | 'edit'; item?: EvalCaseItem } | null>(null)
   const [genOpen, setGenOpen] = useState(false)
   const [sourceOf, setSourceOf] = useState<EvalCaseSource | null>(null)
+  //: 删除确认。⚠️ **不用 `confirm()`** —— 管理端别处（DocumentsPage 的停用）一律是
+  //: `AlertDialog`：原生弹窗样式不可控、在嵌入式/无头环境里还会被直接拦掉，
+  //: 而且「删了哪些东西、能不能撤销」这种话原生框里根本写不下。
+  const [pendingDelete, setPendingDelete] =
+    useState<{ kind: 'set' | 'case'; item: EvalSetItem | EvalCaseItem } | null>(null)
 
   const current = useMemo(() => sets.find(s => s.id === setId) ?? null, [sets, setId])
 
@@ -137,13 +146,7 @@ export default function EvalSetsPage() {
           </select>
           <Button disabled={busy} onClick={() => setNewSetOpen(true)}>新建评测集</Button>
           <Button variant="destructive" disabled={busy || !current}
-                  onClick={() => run(async () => {
-                    if (!current || !confirm(`删除「${current.name}」？它下面的用例会一起删掉，历史评测记录不受影响。`)) return
-                    await deleteEvalSet(current.id)
-                    setSetId(''); setPage(1)
-                    setMsg(`已删除「${current.name}」`)
-                    await loadSets()
-                  })}>
+                  onClick={() => current && setPendingDelete({ kind: 'set', item: current })}>
             删除评测集
           </Button>
           {/* 未选中任何评测集时置灰（决策 21）；**最右边** */}
@@ -215,11 +218,9 @@ export default function EvalSetsPage() {
                         <Button variant="link" disabled={busy}
                                 onClick={() => setCaseDialog({ mode: 'edit', item: c })}>编辑</Button>
                         <Button variant="link" disabled={busy}
-                                onClick={() => run(async () => {
-                                  await deleteEvalCase(c.id)
-                                  setMsg('已删除该用例（历史评测记录保留）')
-                                  await reload()
-                                })}>删除</Button>
+                                onClick={() => setPendingDelete({ kind: 'case', item: c })}>
+                          删除
+                        </Button>
                       </td>
                     </tr>
                   ))}
@@ -247,6 +248,44 @@ export default function EvalSetsPage() {
                       await loadSets()
                       setSetId(created.id); setPage(1)
                     }} />
+
+      <AlertDialog open={!!pendingDelete} onOpenChange={o => !o && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingDelete?.kind === 'set'
+                ? `删除「${(pendingDelete.item as EvalSetItem).name}」？`
+                : '删除这条用例？'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.kind === 'set'
+                ? '它下面的用例会一起删掉。历史评测记录不受影响 —— 那些记录存的是评测集名字的快照。'
+                : '跑过的历史评测结果会保留（只是不再指向这条用例），但用例本身删了就没了。'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => run(async () => {
+              const target = pendingDelete
+              setPendingDelete(null)
+              if (!target) return
+              if (target.kind === 'set') {
+                const s = target.item as EvalSetItem
+                await deleteEvalSet(s.id)
+                setSetId(''); setPage(1)
+                setMsg(`已删除「${s.name}」`)
+                await loadSets()
+              } else {
+                await deleteEvalCase(target.item.id)
+                setMsg('已删除该用例（历史评测记录保留）')
+                await reload()
+              }
+            })}>
+              确认删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {caseDialog && current && (
         <CaseDialog state={caseDialog} setId={current.id}
@@ -467,7 +506,7 @@ function GenerateDialog({ setId, setName, onClose, onDone }: {
         <DialogHeader><DialogTitle>从文档自动生成用例</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
-            生成到「{setName}」。模型照着文档片段出题，**标准答案必须是原文逐字子串**、
+            生成到「{setName}」。模型照着文档片段出题，<b>标准答案必须是原文逐字子串</b>、
             问句不带代词 —— 过不了校验的那条就不生成。
           </p>
           <div className="space-y-1">

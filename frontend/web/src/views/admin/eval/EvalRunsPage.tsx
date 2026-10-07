@@ -164,7 +164,7 @@ export default function EvalRunsPage() {
             评测会逐条调用模型和重排，一轮下来是分钟级。建议先用 5~10 条验证方向。
           </p>
           <p className="text-xs text-muted-foreground">
-            跑的是**线上完整链路**；要跑提权对照或开消融开关，去「消融对比」页。
+            跑的是<b>线上完整链路</b>；要跑提权对照或开消融开关，去「消融对比」页。
           </p>
           {selected && selected.in_eval_count === 0 && (
             <p className="text-sm text-amber-700 dark:text-amber-500">
@@ -243,7 +243,7 @@ export default function EvalRunsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>删除这一轮评测？</AlertDialogTitle>
             <AlertDialogDescription>
-              逐题结果会一起删掉，之后**也不能再出现在消融对比表里**。删就是删，没法撤销。
+              逐题结果会一起删掉，之后<b>也不能再出现在消融对比表里</b>。删就是删，没法撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
