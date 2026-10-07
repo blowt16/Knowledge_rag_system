@@ -12,7 +12,11 @@ const DocumentsPage = lazy(() => import('./views/admin/DocumentsPage'))
 const VersionsPage = lazy(() => import('./views/admin/VersionsPage'))
 const RefusalsPage = lazy(() => import('./views/admin/RefusalsPage'))
 const UsersPage = lazy(() => import('./views/admin/UsersPage'))
-const EvalPage = lazy(() => import('./views/admin/EvalPage'))
+// 效果评测拆成三个子页（§6.1）—— 评价指标、题库、消融实验是三件事，
+// 混在一页里点进去先得找。三个都懒加载。
+const EvalSetsPage = lazy(() => import('./views/admin/eval/EvalSetsPage'))
+const EvalRunsPage = lazy(() => import('./views/admin/eval/EvalRunsPage'))
+const EvalAblationPage = lazy(() => import('./views/admin/eval/EvalAblationPage'))
 
 const Loading = () => <div className="p-8 text-sm text-muted-foreground">加载中…</div>
 
@@ -88,8 +92,15 @@ export default function App() {
                element={<Suspense fallback={<Loading />}><RefusalsPage /></Suspense>} />
         <Route path="users"
                element={<Suspense fallback={<Loading />}><UsersPage /></Suspense>} />
-        <Route path="eval"
-               element={<Suspense fallback={<Loading />}><EvalPage /></Suspense>} />
+        {/* `/admin/eval` 直接重定向到评测集管理（§6.1）——
+            老的平铺页已拆成三个子页，直接落到第一个，别给一个空壳。 */}
+        <Route path="eval" element={<Navigate to="/admin/eval/sets" replace />} />
+        <Route path="eval/sets"
+               element={<Suspense fallback={<Loading />}><EvalSetsPage /></Suspense>} />
+        <Route path="eval/runs"
+               element={<Suspense fallback={<Loading />}><EvalRunsPage /></Suspense>} />
+        <Route path="eval/ablation"
+               element={<Suspense fallback={<Loading />}><EvalAblationPage /></Suspense>} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/chat' : '/login'} replace />} />
     </Routes>

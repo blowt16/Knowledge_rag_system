@@ -1,14 +1,17 @@
 /**
- * 评测页（§4.3.1.4 消融对比表 + §3.7.3 评测接口）—— **M5 交付**。
+ * 消融对比（§6.4）—— 原评测页的「起一轮 / 历史轮次 / 对比矩阵」，加六个消融开关。
  *
- * 三块：
- *   1. 起一轮评测（全量 / 校准小集；角色；是否提权）
- *   2. 历史轮次（轮询到 `done`）
- *   3. 消融对比表：勾几轮 → 服务端给对齐后的矩阵
+ * **分两部分，别混为一谈**（§6.4）：
+ *   ① 原样搬：角色 / 提权 / 跑全量 / 跑校准小集 / 历史轮次表 / 消融对比矩阵。
+ *   ② **新增：六个消融开关**（决策 23）—— 本仓库原本**没有**这个界面。
  *
- * ⚠️ **对比表不由前端拼**：行是配置变体、列是指标全集，而指标全集由服务端掌握
- *    （不同 run 可能缺指标、指标名会演进）。`config_label` 也由服务端派生，
- *    前端自己从 config 拼标签会因开关命名演进导致同一次运行换个名字（§4.3.1.4）。
+ * ⚠️ 为什么必须补这个 UI（§1.1④）：前端**从来就产不出非基线的 run** ——
+ *    老的 `EvalPage.tsx` 里没有开关、`startEvalRun` 也不传 `config`，
+ *    所有消融行都是 `run_ablation.py` 脚本打出来的。光把页面搬过去，
+ *    它仍然只能产出纯向量基线。
+ *
+ * ⚠️ 这个页面的 run **仍然走 `suite` 路径**（不是 `set_id`），所以 config 里照旧带
+ *    `suite` 键 —— 这正是它被判成消融运行的原因，**也是它该有的行为**（§5.4）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -47,6 +50,19 @@ const METRIC_LABEL: Record<string, string> = {
 /** 四项 ragas 的 key —— 与 `METRIC_LABEL` 里的保持一致（服务端定的名字）。 */
 const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
 
+/**
+ * 六个消融开关。**键名必须与 `eval_config.SWITCH_KEYS` 一致**（§6.4）——
+ * 拼错一个，服务端 `switches()` 就当它没开，跑出来的行与标签对不上。
+ */
+const SWITCHES: { key: string; label: string }[] = [
+  { key: 'bm25', label: 'BM25' },
+  { key: 'rrf', label: 'RRF' },
+  { key: 'rerank', label: '精排' },
+  { key: 'expand_verbatim', label: 'verbatim 查询' },
+  { key: 'expand_keywords', label: 'keywords 查询' },
+  { key: 'expand_hyde', label: 'hyde 查询' },
+]
+
 /** 这一轮 ragas 为什么是空的 —— 诊断是行字段，不占矩阵列（见后端 EvalCompareRow）。 */
 function ragasIssue(row: EvalCompareRow): string | null {
   const errs = row.ragas_errors?.join('；')
@@ -54,9 +70,9 @@ function ragasIssue(row: EvalCompareRow): string | null {
     return errs ? `ragas 没跑起来：${errs}` : 'ragas 没跑起来'
   }
   if (errs) return `部分指标没算出来：${errs}`
-  // ⚠️ 还有第三种「空」：ragas 环境没问题、也没报错，四项却全是「—」——
+  // ⚠️ 还有第三种「空」：环境没问题、也没报错，四项却全是「—」——
   //    通常是没有可评分样本（缺参考答案/上下文）。不说明的话，
-  //    看表的人只能看到四个「—」，照样得去查库（M5 实测有这种轮次）。
+  //    看表的人只能看到四个「—」，照样得去查库。
   if (RAGAS_KEYS.every(k => row.values[k] === null || row.values[k] === undefined)) {
     return 'ragas 没产出分数（这一轮没有可评分的样本）'
   }
@@ -75,7 +91,7 @@ function ragasValue(metrics: Record<string, unknown> | null | undefined, key: st
   return ragas?.[key]
 }
 
-export default function EvalPage() {
+export default function EvalAblationPage() {
   const [runs, setRuns] = useState<EvalRunSummary[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [compare, setCompare] = useState<EvalCompareResponse | null>(null)
@@ -83,12 +99,13 @@ export default function EvalPage() {
   const [msg, setMsg] = useState('')
   const [role, setRole] = useState<'student' | 'staff' | 'admin'>('student')
   const [restricted, setRestricted] = useState(false)
+  const [switches, setSwitches] = useState<Record<string, boolean>>({})
   const pollRef = useRef<number | null>(null)
 
   const refresh = useCallback(async () => {
-    const data = await evalRuns(30)
-    setRuns(data.items)
-    return data.items
+    const data = await evalRuns({ page: 1, page_size: 30 })
+    setRuns(data.items ?? [])
+    return data.items ?? []
   }, [])
 
   useEffect(() => {
@@ -107,18 +124,24 @@ export default function EvalPage() {
         window.clearInterval(pollRef.current!)
         pollRef.current = null
       }
-    }, 5000)
+    }, 1500)
   }, [refresh])
+
+  /** 勾了的开关组装成 config；**全不勾就是纯向量检索**（现在的「跑全量」行为）。 */
+  const config = () =>
+    Object.fromEntries(SWITCHES.filter(s => switches[s.key]).map(s => [s.key, true]))
 
   const start = async (suite: 'full' | 'refusal_calib') => {
     setBusy(true)
     setMsg('')
     try {
+      const cfg = config()
       const r = await startEvalRun({
-        name: suite === 'refusal_calib' ? `校准小集（${role}）` : `全量（${role}）`,
+        name: suite === 'refusal_calib' ? `校准小集（${role}）` : `消融（${role}）`,
         suite,
         role,
         include_restricted: restricted,
+        config: cfg,
       })
       setMsg(`已起：${r.config_label}（${r.run_id.slice(0, 8)}）`)
       await refresh()
@@ -152,10 +175,12 @@ export default function EvalPage() {
     return why ? [{ row, why }] : []
   })
 
+  const anyOn = Object.values(switches).some(Boolean)
+
   return (
     <div className="space-y-6">
       <Card>
-        <CardHeader><CardTitle className="text-base">起一轮评测</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-base">起一轮消融评测</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <label className="flex items-center gap-1">
@@ -172,13 +197,31 @@ export default function EvalPage() {
                      onChange={e => setRestricted(e.target.checked)} />
               提权（admin 才有效）
             </label>
-            <Button disabled={busy} onClick={() => start('full')}>跑全量</Button>
             <Button disabled={busy} variant="outline"
                     onClick={() => start('refusal_calib')}>跑校准小集</Button>
+            <Button disabled={busy} onClick={() => start('full')}>跑全量</Button>
           </div>
+
+          {/* 六个开关（决策 23）。全不勾 = 纯向量检索，就是原来的「跑全量」（§6.4） */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border px-3 py-2 text-sm">
+            <span className="text-muted-foreground">检索链路开关</span>
+            {SWITCHES.map(s => (
+              <label key={s.key} className="flex items-center gap-1">
+                <input type="checkbox" checked={Boolean(switches[s.key])}
+                       onChange={e => setSwitches(v => ({ ...v, [s.key]: e.target.checked }))} />
+                {s.label}
+              </label>
+            ))}
+            <span className="text-xs text-muted-foreground">
+              {anyOn ? '这一轮是按开关跑的消融' : '全不勾 = 纯向量检索（基线）'}
+            </span>
+          </div>
+
           {msg && <p className="text-sm text-muted-foreground">{msg}</p>}
           <p className="text-xs text-muted-foreground">
             评测在后台跑，进度看下面列表的状态；同一时刻只允许一轮（要占 GPU）。
+            这两条入口走的是 `suite` 路径 —— 与批量评测页不同，它们**不看**用例的
+            「参与评测」开关，题集与 CI 用的一致。
           </p>
         </CardContent>
       </Card>
@@ -216,7 +259,7 @@ export default function EvalPage() {
                       </td>
                       <td className="py-2">{fmt(r.metrics?.recall_at_k)}</td>
                       <td className="py-2">{fmt(r.metrics?.mrr)}</td>
-                      <td className="py-2">{fmt(ragasValue(r.metrics, "faithfulness"))}</td>
+                      <td className="py-2">{fmt(ragasValue(r.metrics, 'faithfulness'))}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -259,6 +302,10 @@ export default function EvalPage() {
             </table>
             <p className="mt-2 text-xs text-muted-foreground">
               值全部来自服务端；缺指标的格子显示「—」。
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              ⚠️ ragas 有跑间随机性：同一样本两次跑实测能差到 <b>0.18</b>。
+              比这还小的差值，不要当成结论。
             </p>
             {ragasIssues.length > 0 && (
               <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">

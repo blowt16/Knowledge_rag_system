@@ -16,6 +16,13 @@ const buttonVariants = cva(
           "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
+        //: 实心红 —— 现有的 `destructive` 是**浅红底**，不是「删除」这种不可逆动作
+        //: 想要的观感（参考图的删除按钮是实心的）。放在变体里而不是每处就地写
+        //: className，否则同一种红迟早出现三四个色号（§11.3-1）。
+        "destructive-solid":
+          "bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/20",
+        //: 实心绿 —— 评测报告的「达标」配色，与卡片里的绿是同一个 token
+        success: "bg-success text-success-foreground hover:bg-success/80",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
