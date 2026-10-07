@@ -76,6 +76,27 @@ export default function EvalRunsPage() {
     return r.items ?? []
   }, [page])
 
+  // ⚠️ 定时器要取**最新**的 refresh，不能抱住启动那一刻的闭包 ——
+  //    它绑着当时的 `page`，用户在评测期间翻页会被每 1.5 秒打回上一页。
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
+  /**
+   * 有跑着的轮次就轮询。
+   * ⚠️ 用 **1.5 秒**而不是老的 5 秒：进度条要逐题动起来才看得出「没卡住」，
+   *    5 秒一跳会让人以为死了（§6.3 定的 1~2 秒）。
+   */
+  const ensurePolling = useCallback(() => {
+    if (pollRef.current) return
+    pollRef.current = window.setInterval(async () => {
+      const items = await refreshRef.current().catch(() => null)
+      if (items && !items.some(r => r.status === 'pending' || r.status === 'running')) {
+        window.clearInterval(pollRef.current!)
+        pollRef.current = null
+      }
+    }, 1500)
+  }, [])
+
   useEffect(() => {
     listEvalSets()
       .then(r => {
@@ -87,23 +108,18 @@ export default function EvalRunsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => { refresh().catch(() => setMsg('加载任务失败')) }, [refresh])
-
-  /**
-   * 有跑着的轮次就轮询。
-   * ⚠️ 用 **1.5 秒**而不是老的 5 秒：进度条要逐题动起来才看得出「没卡住」，
-   *    5 秒一跳会让人以为死了（§6.3 定的 1~2 秒）。
-   */
-  const ensurePolling = useCallback(() => {
-    if (pollRef.current) return
-    pollRef.current = window.setInterval(async () => {
-      const items = await refresh().catch(() => null)
-      if (items && !items.some(r => r.status === 'pending' || r.status === 'running')) {
-        window.clearInterval(pollRef.current!)
-        pollRef.current = null
-      }
-    }, 1500)
-  }, [refresh])
+  useEffect(() => {
+    refresh()
+      .then(items => {
+        // ⚠️ 一进页面就发现有跑着的轮次 → 也得开始轮询。
+        //    只在「本页点过开始评测」时才起定时器的话，**刷一下浏览器**
+        //    进度条就冻在那一刻 —— 而这正是「看进度」最常见的用法。
+        if (items.some(r => r.status === 'pending' || r.status === 'running')) {
+          ensurePolling()
+        }
+      })
+      .catch(() => setMsg('加载任务失败'))
+  }, [refresh, ensurePolling])
 
   useEffect(() => () => {
     if (pollRef.current) window.clearInterval(pollRef.current)
@@ -216,7 +232,12 @@ export default function EvalRunsPage() {
                             <Button variant="link" disabled={Boolean(hint)}
                                     onClick={() => openReport(r.run_id)}>看报告</Button>
                           </span>
-                          <Button variant="link" onClick={() => setPendingDelete(r)}>删除</Button>
+                          {/* 运行中不给删：删行不会停掉后台任务，它还在占 GPU ——
+                              服务端也会 409，这里先挡住，别让用户白点一次 */}
+                          <span title={hint ?? '删除这一轮（逐题结果会一起删）'}>
+                            <Button variant="link" disabled={Boolean(hint)}
+                                    onClick={() => setPendingDelete(r)}>删除</Button>
+                          </span>
                         </td>
                       </tr>
                     )

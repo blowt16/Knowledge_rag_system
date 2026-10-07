@@ -156,7 +156,12 @@ async def import_payload(conn, payload: dict) -> dict:
         cols = [f for f in CASE_FIELDS if f in case]
         if "id" not in cols:
             raise ValueError("用例缺 `id`，无法 upsert")
-        values = [json.dumps(case[f]) if f in _JSONB_FIELDS else case[f] for f in cols]
+        # ⚠️ **不要自己 `json.dumps`**：`db.py` 给每条连接注册了 jsonb 编解码器
+        #    （`encoder=json.dumps`），传 Python 的 list/dict 就对了。再 dumps 一次
+        #    是**双重编码** —— 落库的是 JSON 字符串 `"[\"x\"]"` 而不是数组 `["x"]`，
+        #    `jsonb_typeof` 是 `string`。读方每处都写了 `json.loads` 兜底，
+        #    所以界面看着正常，坏的是**库里的数据本身**与任何直接读库的人。
+        values = [case[f] for f in cols]
         exists = await conn.fetchval("SELECT 1 FROM eval_cases WHERE id = $1", case["id"])
         # `set_id` 总是跟着文件走：用例在导出后可能被搬到了别的集
         insert_cols = cols + ["set_id"]
@@ -271,26 +276,47 @@ async def update_set(conn, set_id: str, *, name: str | None = None,
     return dict(row)
 
 
+async def _running_runs(conn) -> list[dict]:
+    """所有跑着的轮次。系统本来就「一次只允许一轮」，最多一行，检查很轻。"""
+    rows = await conn.fetch(
+        "SELECT id, set_id FROM eval_runs WHERE status IN ('pending','running')")
+    return [dict(r) for r in rows]
+
+
+async def guard_delete(conn, set_id: str | None) -> None:
+    """跑测期间的删除守卫（§5.5）。
+
+    `runner.py` 开工时把题**一次性读进内存**再逐题跑。若跑到一半有人删了它要用的
+    用例，最后落库时 `case_id` 指向已不存在的行 → 外键报错 → **整轮 failed、GPU 白烧**。
+
+    ⚠️ **两种轮次都要挡，不能只按 `set_id` 查：**
+      - 跑**某个集**的轮次（批量评测页）→ 只挡那个集，删别的集不受影响；
+      - **`suite` 路径**的轮次（消融对比页 / CI / `run_ablation.py`）`set_id` 是空的，
+        而 `suite='full'` 选的是**全表**用例 —— 它不认评测集，所以
+        **删任何一个集、任何一条用例都可能把它搞挂**，这些轮次必须挡住全部删除。
+    """
+    for run in await _running_runs(conn):
+        if run["set_id"] is None:
+            raise SetBusy(
+                f"有评测正在跑（run {run['id'][:8]}，走的是全量/校准题集），"
+                "它可能用到任何一条用例 —— 等它结束再删")
+        if set_id is not None and run["set_id"] == set_id:
+            raise SetBusy(f"该评测集正在被评测使用（run {run['id'][:8]}）")
+
+
 async def delete_set(conn, set_id: str) -> None:
     """删评测集，**连带它的用例**（`set_id` 外键是 CASCADE）。
 
     历史 run 不受影响 —— 它的 `set_name` 是快照，`set_id` 置空（决策 14）。
     """
-    running = await running_run_id(conn, set_id)
-    if running:
-        raise SetBusy(f"该评测集正在被评测使用（run {running[:8]}）")
+    await guard_delete(conn, set_id)
     result = await conn.execute("DELETE FROM eval_sets WHERE id = $1", set_id)
     if result.endswith(" 0"):
         raise SetNotFound(set_id)
 
 
 async def running_run_id(conn, set_id: str) -> str | None:
-    """有没有 run 正在跑这个集（§5.5 的删除守卫）。
-
-    `runner.py` 开工时把题**一次性读进内存**再逐题跑。若跑到一半有人删了这个集
-    或其中一条用例，最后落库时 `case_id` 指向已不存在的行 → 外键报错 → **整轮 failed**。
-    系统本来就「一次只允许一轮」，所以检查很轻。
-    """
+    """有没有 run 正在跑这个集 —— 界面拿它给按钮加提示语用。"""
     return await conn.fetchval(
         "SELECT id FROM eval_runs WHERE set_id = $1 AND status IN ('pending','running')",
         set_id)
@@ -364,9 +390,15 @@ async def update_case(conn, case_id: str, **fields) -> dict:
     if row is None:
         raise CaseNotFound(case_id)
 
-    edits = {k: v for k, v in fields.items()
-             if k in EDITABLE_CASE_FIELDS and v is not None}
+    # ⚠️ **不用 `v is not None` 过滤。** 调用方（`PATCH /cases/{id}`）走的是
+    #    `model_dump(exclude_unset=True)`：键在就代表「要写这个值」，显式的
+    #    `null` 是**清空**的意思。原来把 `None` 当「没传」丢掉，结果是用户在界面上
+    #    删光「标准答案」再保存 → 200 + 「已保存」，而库里一个字都没变。
+    edits = {k: v for k, v in fields.items() if k in EDITABLE_CASE_FIELDS}
     if "question" in edits:
+        # `question` 是 NOT NULL，也是这道题唯一不能空的东西
+        if edits["question"] is None:
+            raise ValueError("问题不能为空")
         edits["question"] = str(edits["question"]).strip()
         if not edits["question"]:
             raise ValueError("问题不能为空")
@@ -388,10 +420,9 @@ async def delete_case(conn, case_id: str) -> None:
     row = await conn.fetchrow("SELECT set_id FROM eval_cases WHERE id = $1", case_id)
     if row is None:
         raise CaseNotFound(case_id)
-    if row["set_id"]:
-        running = await running_run_id(conn, row["set_id"])
-        if running:
-            raise SetBusy(f"该用例所在评测集正在被评测使用（run {running[:8]}）")
+    # ⚠️ 守卫不能只看「这条用例所属的集有没有在跑」—— `suite` 路径的轮次
+    #    `set_id` 是空的，却会选中全表用例（见 `guard_delete`）。
+    await guard_delete(conn, row["set_id"])
     await conn.execute("DELETE FROM eval_cases WHERE id = $1", case_id)
 
 

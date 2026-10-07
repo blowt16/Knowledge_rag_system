@@ -14,6 +14,22 @@ import {
 } from '@/components/ui/dialog'
 import type { EvalReport, EvalReportCase, EvalRunDetail } from '@/api/eval'
 
+/**
+ * 四张卡全「—」时**为什么**空 —— 三种要分开说（§7.1），否则就是哑谜：
+ *   ① 环境不在 → 指向文档；② 跑了但有指标没算出来 → 说错在哪；
+ *   ③ 环境好、没报错、四项却都空 → 这一轮没有可评分的样本。
+ * 三种都写成同一句「没有可评分的样本」的话，会和下面结论条里那句
+ * 「ragas 环境不可用」自相矛盾。
+ */
+function whyMissing(report: EvalReport | undefined): string {
+  const errs = report?.ragas_errors?.join('；')
+  if (report?.ragas_available === false) {
+    return errs ? `ragas 没跑起来（${errs}）` : 'ragas 没跑起来'
+  }
+  if (errs) return `部分指标没算出来：${errs}`
+  return '没有可评分的样本'
+}
+
 /** 卡片的中文名与**逐字**照抄参考图的提示语（§6.6 的表）。 */
 const CARD: Record<string, { label: string; en: string; badge: string; hint: string }> = {
   context_recall: {
@@ -56,6 +72,7 @@ export function ReportDialog({ detail, onClose }: {
   const report: EvalReport | undefined = detail.report ?? undefined
   const cards = report?.metrics ?? []
   const composite = report?.composite_score ?? null
+  const missingWhy = whyMissing(report)
 
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
@@ -118,7 +135,7 @@ export function ReportDialog({ detail, onClose }: {
                     : c.passed ? 'text-success' : 'text-destructive'
                 }`}>
                   {missing
-                    ? '没有可评分的样本'
+                    ? missingWhy
                     : `${c.passed ? '达标' : '未达标'}（≥ ${c.threshold}）`}
                 </p>
               </div>

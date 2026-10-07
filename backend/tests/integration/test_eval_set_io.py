@@ -63,9 +63,10 @@ async def _insert_case(conn, set_id: str, **overrides) -> dict:
               source_page, source_snippet, set_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)""",
         row["id"], row["question"], row["ground_truth"], row["case_type"], row["suite"],
-        json.dumps(row["expected_doc_ids"]), json.dumps(row["expected_chunk_ids"]),
-        json.dumps(row["turns"]) if row["turns"] is not None else None,
-        json.dumps(row["visible_roles"]) if row["visible_roles"] is not None else None,
+        # ⚠️ 传原值，**不要 `json.dumps`** —— 夹具跟生产走同一条路，
+        #    否则夹具与生产存成两种物理类型，往返测试就永远看不见差别。
+        row["expected_doc_ids"], row["expected_chunk_ids"],
+        row["turns"], row["visible_roles"],
         row["expected_route"], row["should_clarify"], row["source"], row["in_eval"],
         row["note"], row["source_document_id"], row["source_chunk_id"],
         row["source_page"], row["source_snippet"], set_id)
@@ -227,3 +228,43 @@ async def test_import_export_roundtrip_covers_the_real_fixture_field_set():
         # 多轮题的 turns 必须真的在（不是 null）
         with_turns = [c for c in payload["cases"] if c["turns"]]
         assert with_turns, "多轮题的 turns 全丢了 —— 导出的字段没列全"
+
+
+# ============================================================
+# JSONB 列的物理类型
+# ============================================================
+# ⚠️ `db.py` 给每条连接注册了 JSONB 编解码器（encoder=json.dumps），
+#    所以**传 Python 的 list/dict 就对了**。再自己 `json.dumps` 一次 = **双重编码**：
+#    落库的是 JSON **字符串** `"[\"x\"]"` 而不是数组 `["x"]`，`jsonb_typeof` 是 `string`。
+#
+#    这一条能溜过前面的往返测试，是因为**测试夹具也用了同样的双重编码** ——
+#    写入与读出都当字符串处理，比出来自然一样。所以这里直接查物理类型，
+#    不经过任何应用层的 `json.loads` 兜底。
+
+async def test_import_writes_real_jsonb_arrays_not_strings(scratch_set):
+    """导入后四个 JSONB 列必须是**数组/对象**，不能是字符串。"""
+    async with db.tx() as conn:
+        await _insert_case(conn, scratch_set, expected_doc_ids=["d1", "d2"],
+                           expected_chunk_ids=["c1"])
+        payload = await sets.export_payload(conn, SET_NAME)
+        await sets.import_payload(conn, payload)
+        row = await conn.fetchrow(
+            """SELECT jsonb_typeof(expected_doc_ids)   AS a,
+                      jsonb_typeof(expected_chunk_ids) AS b
+                 FROM eval_cases WHERE id = $1""",
+            payload["cases"][0]["id"])
+    assert row["a"] == "array", f"expected_doc_ids 存成了 {row['a']}（双重编码）"
+    assert row["b"] == "array", f"expected_chunk_ids 存成了 {row['b']}（双重编码）"
+
+
+async def test_import_writes_turns_as_an_array(scratch_set):
+    """多轮题的 `turns` 同样必须是数组 —— 它是 15 条老题的唯一载体。"""
+    async with db.tx() as conn:
+        await _insert_case(conn, scratch_set, case_type="multi_turn",
+                           turns=[{"question": "第一轮"}, {"question": "第二轮"}])
+        payload = await sets.export_payload(conn, SET_NAME)
+        await sets.import_payload(conn, payload)
+        kind = await conn.fetchval(
+            "SELECT jsonb_typeof(turns) FROM eval_cases WHERE id = $1",
+            payload["cases"][0]["id"])
+    assert kind == "array", f"turns 存成了 {kind}（双重编码）"

@@ -359,16 +359,25 @@ async def get_run(run_id: str, user=AdminUser) -> EvalRunDetail:
     )
 
 
-@router.delete("/runs/{run_id}", status_code=204)
-async def delete_run(run_id: str, user=AdminUser) -> Response:
+@router.delete("/runs/{id}", status_code=204)
+async def delete_run(id: str, user=AdminUser) -> Response:
     """删一轮 = 连它的逐题结果一起删（靠外键 ON DELETE CASCADE）。
 
     **删掉的 run 不再出现在 `/compare` 里** —— 这是有意的，删就是删。
+
+    ⚠️ **正在跑的轮次不许删**：删行**不会停掉后台那条任务**，它还在占 GPU。
+       行没了之后「已有评测在跑」的检查就查不到任何东西，用户可以立刻再起一轮 ——
+       两轮同时跑，正是上面写的「两轮并跑既慢又会把显存挤爆」；
+       而上一轮最后会静默失败（更新 0 行、批量 INSERT 外键违约），用户什么都看不到。
+       真要中止得先有 abort 语义，本轮不做（见方案 §5.3）。
     """
     async with db.tx() as conn:
-        result = await conn.execute("DELETE FROM eval_runs WHERE id = $1", run_id)
-    if result.endswith(" 0"):
-        raise NotFound("评测不存在")
+        status = await conn.fetchval("SELECT status FROM eval_runs WHERE id = $1", id)
+        if status is None:
+            raise NotFound("评测不存在")
+        if status in ("pending", "running"):
+            raise Conflict("这一轮还在跑，删掉它不会真的停下（还在占 GPU）—— 等它结束再删")
+        await conn.execute("DELETE FROM eval_runs WHERE id = $1", id)
     return Response(status_code=204)
 
 

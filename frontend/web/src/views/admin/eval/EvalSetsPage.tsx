@@ -214,7 +214,9 @@ export default function EvalSetsPage() {
                       <td className="py-2 pr-3">{c.in_eval ? '是' : '否'}</td>
                       <td className="max-w-xs py-2 pr-3 text-muted-foreground">{c.note || ''}</td>
                       <td className="whitespace-nowrap py-2">
-                        <SourceButton item={c} busy={busy} onOpen={setSourceOf} />
+                        <SourceButton item={c} busy={busy}
+                                      onOpen={setSourceOf}
+                                      onError={m => setMsg(m)} />
                         <Button variant="link" disabled={busy}
                                 onClick={() => setCaseDialog({ mode: 'edit', item: c })}>编辑</Button>
                         <Button variant="link" disabled={busy}
@@ -309,10 +311,11 @@ export default function EvalSetsPage() {
 }
 
 /** 「看原文」—— 判据是 `source_snippet`，不是 `source`（见文件头）。 */
-function SourceButton({ item, busy, onOpen }: {
+function SourceButton({ item, busy, onOpen, onError }: {
   item: EvalCaseItem
   busy: boolean
   onOpen: (p: EvalCaseSource) => void
+  onError: (msg: string) => void
 }) {
   const hasSnippet = Boolean(item.source_chunk_id || item.source_page)
   // 老 90 条迁移后 source='generated' 却没有来源片段 —— 提示语要分清这两种，
@@ -323,7 +326,10 @@ function SourceButton({ item, busy, onOpen }: {
   return (
     <Button variant="link" disabled={busy || !hasSnippet} title={hasSnippet ? undefined : hint}
             onClick={async () => {
-              try { onOpen(await evalCaseSource(item.id)) } catch { /* 由外层提示 */ }
+              // ⚠️ 必须自己报错：全局没有任何错误提示，沉默的按钮
+              //    在用户眼里就是「点了没反应」= 坏了
+              try { onOpen(await evalCaseSource(item.id)) }
+              catch (e) { onError(`打开原文失败：${(e as Error).message}`) }
             }}>
       看原文
     </Button>

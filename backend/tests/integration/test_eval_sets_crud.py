@@ -292,3 +292,89 @@ async def test_delete_is_allowed_once_the_run_is_finished(scratch_set):
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id = $1", run_id)
+
+
+async def test_suite_run_blocks_deletes_anywhere(scratch_set):
+    """⚠️ **`suite` 路径的 run 也必须在守卫里**（评审发现）。
+
+    `suite='full'` 选的是**全表**用例 —— 它不认评测集，所以「跑到一半删了
+    另一条用例」照样会让它落库时外键违约、**整轮 failed、GPU 白烧**。
+    只按 `set_id` 查守卫的话，这类轮次（消融对比页 / CI / `run_ablation.py`）
+    完全在守卫之外 —— 而它们的 `set_id` 列本来就是空的。
+    """
+    run_id = uuid.uuid4().hex
+    other_set = uuid.uuid4().hex
+    async with db.tx() as conn:
+        case = await sets.create_case(conn, scratch_set["id"], question="q", ground_truth="a")
+        await conn.execute("INSERT INTO eval_sets (id, name) VALUES ($1,$2)",
+                           other_set, f"另一个集-{other_set[:8]}")
+        # `suite` 路径的形状：没有 set_id
+        await conn.execute(
+            """INSERT INTO eval_runs (id, name, config, status, set_id)
+               VALUES ($1,'全量跑着','{"suite": "full"}'::jsonb,'running',NULL)""", run_id)
+    try:
+        async with db.tx() as conn:
+            with pytest.raises(sets.SetBusy):
+                await sets.delete_case(conn, case["id"])
+            with pytest.raises(sets.SetBusy):
+                await sets.delete_set(conn, scratch_set["id"])
+            with pytest.raises(sets.SetBusy):
+                await sets.delete_set(conn, other_set)
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id = $1", run_id)
+            await conn.execute("DELETE FROM eval_sets WHERE id = $1", other_set)
+
+
+async def test_set_run_still_leaves_other_sets_alone(scratch_set):
+    """一轮只跑**某个集**时，删别的集不受影响（§5.5）—— 别把守卫做成一刀切。"""
+    run_id = uuid.uuid4().hex
+    other_set = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute("INSERT INTO eval_sets (id, name) VALUES ($1,$2)",
+                           other_set, f"无关的集-{other_set[:8]}")
+        await conn.execute(
+            """INSERT INTO eval_runs (id, name, config, status, set_id, set_name)
+               VALUES ($1,'跑着','{}'::jsonb,'running',$2,$3)""",
+            run_id, scratch_set["id"], scratch_set["name"])
+    try:
+        async with db.tx() as conn:
+            with pytest.raises(sets.SetBusy):
+                await sets.delete_set(conn, scratch_set["id"])
+            await sets.delete_set(conn, other_set)        # 不抛
+            assert await conn.fetchval(
+                "SELECT count(*) FROM eval_sets WHERE id=$1", other_set) == 0
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id = $1", run_id)
+            await conn.execute("DELETE FROM eval_sets WHERE id = $1", other_set)
+
+
+async def test_patch_can_clear_ground_truth_and_note(scratch_set):
+    """⚠️ **显式传 `None` 是「清空」，不是「没传」**（评审发现）。
+
+    界面上把「标准答案」删光再保存，发过来的就是 `ground_truth: null`
+    （`exclude_unset=True` 让它出现在 payload 里）。原来 `update_case` 用
+    `v is not None` 过滤，把 `None` 当成「没传」丢掉 —— 接口返回 200、
+    界面弹「已保存」，而库里的标准答案**一个字都没变**。
+    用户以为已经改成无答案题，跑评测时它照样带着标准答案参与 ragas。
+    """
+    async with db.tx() as conn:
+        case = await sets.create_case(conn, scratch_set["id"],
+                                      question="q", ground_truth="原文答案", note="原备注")
+        cleared = await sets.update_case(conn, case["id"], ground_truth=None, note=None)
+        assert cleared["ground_truth"] is None, "标准答案没被清掉"
+        assert cleared["note"] is None, "备注没被清掉"
+        row = await conn.fetchrow(
+            "SELECT ground_truth, note FROM eval_cases WHERE id = $1", case["id"])
+        assert row["ground_truth"] is None and row["note"] is None
+
+
+async def test_patch_still_cannot_blank_the_question(scratch_set):
+    """问题不能清空 —— 它是 NOT NULL，也是这道题唯一不能空的东西。"""
+    async with db.tx() as conn:
+        case = await sets.create_case(conn, scratch_set["id"], question="q", ground_truth="a")
+        with pytest.raises(ValueError):
+            await sets.update_case(conn, case["id"], question=None)
+        with pytest.raises(ValueError):
+            await sets.update_case(conn, case["id"], question="   ")

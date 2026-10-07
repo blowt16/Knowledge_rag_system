@@ -453,3 +453,34 @@ async def test_deleting_a_set_under_a_running_run_is_409(client, admin):
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
         await _cleanup_set(s["id"])
+
+
+async def test_deleting_a_running_run_is_refused(client, admin):
+    """⚠️ **不许删正在跑的轮次**（评审发现）。
+
+    删行**不会停掉后台那条 LangGraph 任务** —— 它还在占 GPU。行没了之后
+    「已有评测在跑」的检查就查不到任何东西，用户可以立刻再起一轮，
+    两轮同时跑，正是注释里写的「两轮并跑既慢又会把显存挤爆」。
+    上一轮最后会静默失败（更新 0 行、批量 INSERT 外键违约），用户什么都看不到。
+    """
+    run_id = uuid.uuid4().hex
+    try:
+        async with db.tx() as conn:
+            await conn.execute(
+                """INSERT INTO eval_runs (id, name, config, role, include_restricted, status)
+                   VALUES ($1,'跑着的','{}'::jsonb,'student',0,'running')""", run_id)
+        r = await client.delete(f"/api/admin/eval/runs/{run_id}", headers=admin["headers"])
+        assert r.status_code == 409, r.text
+        assert "等它结束" in r.json()["message"]
+        async with db.tx() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM eval_runs WHERE id=$1", run_id) == 1, "行没被删"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_deleting_a_finished_run_is_still_allowed(client, admin):
+    run_id = await _make_finished_run({"ragas_available": True})
+    r = await client.delete(f"/api/admin/eval/runs/{run_id}", headers=admin["headers"])
+    assert r.status_code == 204, r.text

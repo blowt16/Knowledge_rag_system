@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import uuid
@@ -250,7 +249,9 @@ async def _insert_case(conn, set_id: str, document_id: str, document: dict,
         # ⚠️ `expected_doc_ids` **必须写**：不写这道题在轮次汇总里的
         #    `recall_at_k` / `mrr` 恒为空（§7.6）。出题就是从这份文档出的，
         #    期望文档就是它。
-        json.dumps([document_id]),
+        #    ⚠️ 传 list 原样，**不要 `json.dumps`** —— 连接上已注册 jsonb 编解码器，
+        #       再 dumps 一次会把数组存成 JSON 字符串（与 seed 那条路径不一致）。
+        [document_id],
         document_id, chunk.get("chunk_id"), page, chunk.get("text"))
     return {"id": case_id, "question": case["question"],
             "ground_truth": case["ground_truth"],

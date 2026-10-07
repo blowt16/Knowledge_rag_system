@@ -136,7 +136,8 @@ async def test_verbatim_answer_passes_and_lands_in_the_db(scratch_set, fake_corp
     assert row["source_chunk_id"] == "chunk-0"
     assert row["source_snippet"] == chunk
     # ⚠️ 必须写 expected_doc_ids，否则这道题在轮次汇总里的 recall/mrr 恒为空（§8.1）
-    assert json.loads(row["expected_doc_ids"]) == [fake_corpus]
+    # 连接上注册了 jsonb 编解码器，取出来**已经是 list**（不是待 json.loads 的字符串）
+    assert row["expected_doc_ids"] == [fake_corpus]
     # 单轮、非受限题：这三个保持 NULL
     assert row["turns"] is None and row["visible_roles"] is None
     assert row["expected_chunk_ids"] is None

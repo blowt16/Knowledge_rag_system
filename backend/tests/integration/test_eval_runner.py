@@ -108,7 +108,7 @@ async def _add_case(conn, set_id, question, *, in_eval=True, expected=None,
                                    source, in_eval, expected_doc_ids)
            VALUES ($1,$2,$3,'标准答案','factual',$4,'manual',$5,$6)""",
         case_id, set_id, question, suite, in_eval,
-        json.dumps(expected) if expected else None)
+        expected)          # 原值 —— 连接上已注册 jsonb 编解码器，别再 dumps
     return case_id
 
 
