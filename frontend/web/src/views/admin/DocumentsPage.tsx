@@ -280,9 +280,6 @@ export default function DocumentsPage() {
                         原始文件名放进悬停提示：现在的数据里 title 就是文件名去掉后缀，
                         但 title 是**可改的**，改过之后文件名在列表里就没别处能看了。 */}
                     <div className="font-medium" title={d.filename}>{d.title}</div>
-                    {d.is_current && (
-                      <div className="text-xs text-primary">当前生效</div>
-                    )}
                   </TableCell>
                   <TableCell className="text-sm">
                     {TYPE_LABEL[d.file_type] ?? d.file_type.toUpperCase()}
@@ -295,10 +292,21 @@ export default function DocumentsPage() {
                     </span>
                   </TableCell>
                   <TableCell className="text-sm tabular-nums">{d.chunk_count}</TableCell>
+                  {/* 可见也做成分色标签（与「状态」列一个样式）。
+                      ⚠️ 配色按**该不该引起注意**来，不是按「好不好」：
+                        公开是默认情况、扫一眼就该忽略 → 灰色；
+                        受限是要留意的（配置错了会挡住该看的人）→ 琥珀色。
+                        给公开也上绿色的话，整列全是彩色的，反而什么都看不出来。*/}
                   <TableCell className="text-sm">
-                    {d.visibility === 'public'
-                      ? '公开'
-                      : `受限：${(d.visible_roles ?? []).join('、') || '（无）'}`}
+                    {d.visibility === 'public' ? (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                        公开
+                      </span>
+                    ) : (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                        受限：{(d.visible_roles ?? []).join('、') || '（无）'}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>v{d.version}</TableCell>
                   <TableCell className="text-sm">{d.effective_date ?? '—'}</TableCell>
