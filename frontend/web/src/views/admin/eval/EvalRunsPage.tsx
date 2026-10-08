@@ -36,6 +36,57 @@ const STATUS_LABEL: Record<string, string> = {
   pending: '排队中', running: '评测中', done: '已完成', failed: '失败',
 }
 
+const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
+
+/**
+ * 这一轮 ragas 出没出问题 —— 没问题返回 `null`。
+ *
+ * ⚠️ **状态是「已完成」不等于报告是完整的。** 一轮评测分两段：
+ *    ① 逐题跑链路（检索 + 生成）→ 有成有败，这部分决定 `status`；
+ *    ② 整批算 ragas 四项 → 它挂了**不会**让整轮变 `failed`，四项只是空着。
+ *    这是有意的：这轮确实跑完了、逐题明细是能用的，把整轮标成「失败」是撒谎。
+ *    但**界面上必须看得出来** —— 原来任务表完全不看 ragas 状态，
+ *    于是一轮四项指标全空、综合得分是「—」的评测，在列表里和正常的一模一样，
+ *    点进报告才知道。这就是 §7.1 说的「做哑谜」。
+ */
+type RagasFlag = { kind: 'warn' | 'info'; text: string; why: string }
+
+function ragasIssue(metrics: Record<string, unknown> | null | undefined): RagasFlag | null {
+  if (!metrics || metrics.cases === undefined) return null   // 老轮次没这些字段
+  const errs = (metrics.ragas_errors as string[] | undefined) ?? []
+  const ragas = (metrics.ragas as Record<string, unknown> | undefined) ?? {}
+  const scored = RAGAS_KEYS.some(k => typeof ragas[k] === 'number')
+  if (scored && errs.length === 0) return null               // 四项有数 → 不打扰
+
+  // ① 环境不在 / ② 跑了但有指标没算出来 —— 这两种是**出问题了**
+  if (metrics.ragas_available === false) {
+    return { kind: 'warn', text: '指标未算出',
+             why: errs.length ? `ragas 隔离环境不可用：${errs[0]}` : 'ragas 隔离环境不可用' }
+  }
+  if (errs.length) return { kind: 'warn', text: '指标未算出', why: errs[0] }
+
+  // ③ 环境好、没报错、四项却都空 —— 这一轮**本来就没有可评分的样本**。
+  //    ⚠️ 这不是故障（比如校准小集里 12 条拒答题都没有标准答案），
+  //       标成和上面一样的黄色告警就是「狼来了」，看两天就没人当回事了。
+  return { kind: 'info', text: '无可评分样本',
+           why: '这一轮没有可评分的样本（缺标准答案或检索上下文），所以四项指标都是空的' }
+}
+
+/** 「已完成」旁边的小标记。**不改状态**，只是把「报告不完整」摆到台面上。 */
+function RagasMark({ metrics }: { metrics: Record<string, unknown> | null | undefined }) {
+  const flag = ragasIssue(metrics)
+  if (!flag) return null
+  const tone = flag.kind === 'warn'
+    ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+    : 'bg-muted text-muted-foreground'
+  return (
+    <span className={`ml-2 whitespace-nowrap rounded px-1.5 py-0.5 text-xs ${tone}`}
+          title={`四项 ragas 指标是空的：${flag.why}`}>
+      {flag.text}
+    </span>
+  )
+}
+
 /** 进度栏文案：跑满但还没 done，说明 ragas 整批算指标的那一段还在跑（§6.3）。 */
 function progressText(r: EvalRunSummary): string {
   const total = r.total_cases ?? 0
@@ -218,7 +269,10 @@ export default function EvalRunsPage() {
                         <td className="py-2 pr-3 font-mono text-xs">{r.run_id.slice(0, 8)}</td>
                         {/* 老 `suite` 路径的 run 没有评测集，退回配置标签 */}
                         <td className="py-2 pr-3">{r.set_name ?? r.config_label}</td>
-                        <td className="py-2 pr-3">{STATUS_LABEL[r.status] ?? r.status}</td>
+                        <td className="py-2 pr-3">
+                          {STATUS_LABEL[r.status] ?? r.status}
+                          <RagasMark metrics={r.metrics} />
+                        </td>
                         <td className="py-2 pr-3">{progressText(r)}</td>
                         <td className="max-w-xs py-2 pr-3 text-muted-foreground">{r.error || ''}</td>
                         <td className="py-2 pr-3">{r.duration_ms ?? '—'}</td>

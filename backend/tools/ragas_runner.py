@@ -54,9 +54,21 @@ def _load_env() -> dict[str, str]:
     return env
 
 
+#: **真正的** stdout。
+#:
+#: ⚠️ 运行时它会被换成「开局抢下来的那个 stdout」，而 `sys.stdout` 会被改成 stderr ——
+#:    见 `__main__` 里的说明。所有**结果**都必须走 `_emit()`，不要直接写 `sys.stdout`。
+_real_stdout = sys.stdout
+
+
+def _emit(payload: dict) -> None:
+    """把结果写到真 stdout。**只有它和 `_fail()` 能碰真 stdout。**"""
+    json.dump(payload, _real_stdout, ensure_ascii=False)
+    _real_stdout.flush()
+
+
 def _fail(msg: str) -> None:
-    json.dump({"ok": False, "error": msg}, sys.stdout, ensure_ascii=False)
-    sys.stdout.flush()
+    _emit({"ok": False, "error": msg})
 
 
 def main() -> int:
@@ -73,8 +85,7 @@ def main() -> int:
         _fail(f"未知指标 {unknown}，可选 {list(METRIC_NAMES)}")
         return 2
     if not samples:
-        json.dump({"ok": True, "ms": 0, "rows": [], "means": {}, "errors": []},
-                  sys.stdout, ensure_ascii=False)
+        _emit({"ok": True, "ms": 0, "rows": [], "means": {}, "errors": []})
         return 0
 
     env = _load_env()
@@ -166,15 +177,26 @@ def main() -> int:
         if not vals:
             errors.append(f"{m}: 全部为 None（该指标本次没有算出来）")
 
-    json.dump({"ok": True, "ms": ms, "rows": rows, "means": means, "errors": errors},
-              sys.stdout, ensure_ascii=False)
-    sys.stdout.flush()
+    _emit({"ok": True, "ms": ms, "rows": rows, "means": means, "errors": errors})
     return 0
 
 
 if __name__ == "__main__":
+    # ⚠️ 模块头写着「stdout 只允许出现结果 JSON，其它一律 stderr」——
+    #    但在这次改动之前**没有任何东西保证它**：ragas / tqdm / langchain / torch
+    #    任何一个往 stdout 写点东西（进度条、告警、调试输出），都会并进结果里，
+    #    整段就解析不出来了。线上真出过两次「退出码 0、输出不是 JSON」，
+    #    而输出开头明明是合法的（分数其实算出来了），排查时无从下手。
+    #
+    #    做法：把真 stdout 抢到 `_real_stdout`，然后把 `sys.stdout` **换成 stderr**。
+    #    之后第三方库爱往 stdout 写什么都行 —— 它们写的东西会落到 stderr，
+    #    而结果 JSON 走 `_emit()` 直接写真 stdout，两者再也不会打架。
+    # （这里在模块层，直接赋值就是改模块全局 —— 加了 `global` 反而会因为
+    #   「先赋值后声明 global」直接 SyntaxError，整个 runner 都跑不起来）
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        _real_stdout.reconfigure(encoding="utf-8")
         sys.stdin.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001 —— 老解释器没有 reconfigure
         pass

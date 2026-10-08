@@ -106,9 +106,17 @@ async def score_samples(
     text = out.decode("utf-8", "replace").strip()
     try:
         data = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        # ⚠️ **诊断必须给「解析器报的错」和「输出的末尾」**，不能只给开头。
+        #    实测踩过：线上两次报「输出不是 JSON: {"ok": true, …」——存的是 `text[:300]`，
+        #    而开头**明明是合法 JSON**（结果其实算出来了），真正出问题的地方在
+        #    300 字符之后。按这条信息查了两天，同样的调用与输入一次都复现不出来。
+        #    报错文本会进 `ragas_errors` → 报告页，所以两头都截断，别失控。
+        head = text[:120]
+        tail = text[-260:] if len(text) > 380 else ""
+        detail = f"头部 {head!r}" + (f"；末尾 {tail!r}" if tail else "")
         return {"available": True, "ok": False, "rows": [], "means": {},
-                "errors": [f"ragas 退出码 {proc.returncode}，输出不是 JSON: {text[:300]}"],
+                "errors": [f"ragas 输出不是 JSON：{e}（stdout 共 {len(out)} 字节；{detail}）"],
                 "ms": 0}
 
     data["available"] = True
