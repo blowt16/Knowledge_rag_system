@@ -302,7 +302,10 @@ export default function EvalSetsPage() {
       {genOpen && current && (
         <GenerateDialog setId={current.id} setName={current.name}
                         onClose={() => setGenOpen(false)}
-                        onDone={async (text) => { setMsg(text); await reload() }} />
+                        onFinished={async () => {
+                          setMsg('生成完成，列表已刷新')
+                          await reload()
+                        }} />
       )}
 
       <SourceDialog payload={sourceOf} onClose={() => setSourceOf(null)} />
@@ -464,19 +467,38 @@ function CaseDialog({ state, setId, onClose, onDone }: {
 // 弹窗三：从文档自动生成用例（§8）
 // ============================================================
 
-function GenerateDialog({ setId, setName, onClose, onDone }: {
+/**
+ * 从文档自动生成用例（§8）—— **三段式**：配置 → 进度 → 结果。
+ *
+ * ⚠️ 为什么拆成两个弹窗而不是在同一个里显示「生成中…」：
+ *    一轮最长 120 秒（决策 18 的服务端硬超时），而弹窗里点完按钮之后
+ *    整块界面是**纹丝不动**的 —— 那和按钮坏了看不出区别。分成独立进度弹窗之后，
+ *    至少时间在动、界面明确在「等」，而不是卡在配置表单上。
+ *
+ * ⚠️ **进度弹窗不给关**（没有 ×、Esc 也拦掉），**也不给「取消」**：
+ *    后端 `POST /generate` 是同步接口，取消前端请求**不会停掉服务端**，
+ *    题照样入库。给一个按了没用的取消键是骗人。等它出结果就行（最长 120 秒）。
+ *
+ * ⚠️ 失败也走**结果弹窗**，不静默关掉 —— 关掉了用户不知道刚才发生了什么。
+ */
+type GenPhase =
+  | { step: 'config' }
+  | { step: 'running'; requested: number; startedAt: number }
+  | { step: 'result'; result: EvalGenerateResponse | null; error: string }
+
+function GenerateDialog({ setId, setName, onClose, onFinished }: {
   setId: string
   setName: string
   onClose: () => void
-  onDone: (msg: string) => void
+  onFinished: () => Promise<void>
 }) {
   // ⚠️ 弹窗里**没有「知识库」这一级**（决策 5）—— 项目没有知识库概念，直接选文档
   const [docs, setDocs] = useState<DocumentItem[]>([])
   const [docId, setDocId] = useState('')
   const [count, setCount] = useState(5)
-  const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [result, setResult] = useState<EvalGenerateResponse | null>(null)
+  const [phase, setPhase] = useState<GenPhase>({ step: 'config' })
+  const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
     listDocuments({ status: 'active', page: 1, page_size: 100 })
@@ -488,66 +510,143 @@ function GenerateDialog({ setId, setName, onClose, onDone }: {
       .catch((e: Error) => setErr(`加载文档失败：${e.message}`))
   }, [])
 
+  // 跑秒。一个不动的「正在生成中」分不出「在跑」和「卡死」，时间在跳才看得出在等。
+  useEffect(() => {
+    if (phase.step !== 'running') return
+    setElapsed(0)
+    const timer = window.setInterval(
+      () => setElapsed(Math.floor((Date.now() - phase.startedAt) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [phase])
+
   const submit = async () => {
     if (!docId) { setErr('先选一份文档'); return }
-    setBusy(true); setErr(''); setResult(null)
+    const requested = Math.min(MAX_GENERATE, Math.max(1, count))
+    // 配置弹窗立刻关掉、换成进度弹窗
+    setPhase({ step: 'running', requested, startedAt: Date.now() })
     try {
-      const r = await generateEvalCases(setId, {
-        document_id: docId,
-        count: Math.min(MAX_GENERATE, Math.max(1, count)),
-      })
-      setResult(r)
-      // 条数是**目标不是保证**（决策 18）：如实说，不硬凑
-      const parts = [`要了 ${r.requested} 条，实际生成 ${r.created} 条`]
-      if (r.failed > 0) parts.push(`（${r.failed} 条没通过校验）`)
-      if (r.timeout) parts.push('｜超时了，已先生成的保留在库里，剩下的可以再点一次')
-      if (r.reason && r.created === 0) parts.push(`｜${r.reason}`)
-      onDone(parts.join(''))
-    } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
+      const result = await generateEvalCases(setId, { document_id: docId, count: requested })
+      setPhase({ step: 'result', result, error: '' })
+    } catch (e) {
+      setPhase({ step: 'result', result: null, error: (e as Error).message })
+    }
+  }
+
+  const finish = async () => {
+    onClose()
+    await onFinished()
+  }
+
+  // ---- ① 配置 ----
+  if (phase.step === 'config') {
+    return (
+      <Dialog open onOpenChange={v => { if (!v) onClose() }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>从文档自动生成用例</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              生成到「{setName}」。模型照着文档片段出题，<b>标准答案必须是原文逐字子串</b>、
+              问句不带代词 —— 过不了校验的那条就不生成。
+            </p>
+            <div className="space-y-1">
+              <Label htmlFor="gen-doc">文档</Label>
+              <select id="gen-doc"
+                      className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
+                      value={docId} onChange={e => setDocId(e.target.value)}>
+                {docs.length === 0 && <option value="">（没有可用的文档）</option>}
+                {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="gen-count">生成条数（最多 {MAX_GENERATE}）</Label>
+              <Input id="gen-count" type="number" min={1} max={MAX_GENERATE} value={count}
+                     onChange={e => setCount(Number(e.target.value))} />
+            </div>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose}>取消</Button>
+            <Button disabled={!docId} onClick={submit}>开始生成</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  // ---- ② 进度（不可关闭、无取消）----
+  if (phase.step === 'running') {
+    return (
+      <Dialog open onOpenChange={() => { /* 生成中不给关：见组件头 */ }}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader><DialogTitle>正在生成</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm">
+              正在为「{setName}」生成 {phase.requested} 条用例…
+            </p>
+            <p className="text-2xl font-semibold tabular-nums">已用 {elapsed} 秒</p>
+            <p className="text-xs text-muted-foreground">
+              要逐条问模型并校验，5 条约 20~30 秒，最多等 2 分钟。
+              <b>这一步不能取消</b> —— 请求发出后题就已经在生成了，
+              中途关掉页面它们照样会入库。
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  // ---- ③ 结果 ----
+  const r = phase.result
+  const short = r ? r.created < r.requested : false
+  const title = phase.error
+    ? '生成失败'
+    : short ? `生成完成（${r!.created}/${r!.requested}）` : '生成完成'
+  const notes: string[] = []
+  if (r) {
+    if (r.failed > 0) {
+      notes.push(`${r.failed} 条没通过校验（标准答案不是原文逐字子串，或问句里带了代词）`)
+    }
+    if (r.timeout) notes.push('等超时了，已先生成的都留着；剩下的可以再点一次「开始生成」')
+    if (r.reason && r.created === 0) notes.push(r.reason)
   }
 
   return (
-    <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>从文档自动生成用例</DialogTitle></DialogHeader>
+    <Dialog open onOpenChange={v => { if (!v) void finish() }}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <p className="text-xs text-muted-foreground">
-            生成到「{setName}」。模型照着文档片段出题，<b>标准答案必须是原文逐字子串</b>、
-            问句不带代词 —— 过不了校验的那条就不生成。
-          </p>
-          <div className="space-y-1">
-            <Label htmlFor="gen-doc">文档</Label>
-            <select id="gen-doc"
-                    className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
-                    value={docId} onChange={e => setDocId(e.target.value)}>
-              {docs.length === 0 && <option value="">（没有可用的文档）</option>}
-              {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="gen-count">生成条数（最多 {MAX_GENERATE}）</Label>
-            <Input id="gen-count" type="number" min={1} max={MAX_GENERATE} value={count}
-                   onChange={e => setCount(Number(e.target.value))} />
-          </div>
-          {busy && (
-            <p className="text-sm text-muted-foreground">
-              生成中…（要逐条问模型，5 条约 20~30 秒，最多等 2 分钟）
+          {phase.error && <p className="text-sm text-destructive">{phase.error}</p>}
+          {r && (
+            <p className="text-sm">
+              要了 {r.requested} 条，实际生成 <b>{r.created}</b> 条。
             </p>
           )}
-          {result && !busy && (
-            <div className="space-y-1 text-sm">
-              {result.cases.map(c => (
-                <p key={c.id} className="text-muted-foreground">· {c.question}</p>
+          {notes.map((n, i) => (
+            <p key={i} className="text-xs text-amber-700 dark:text-amber-500">{n}</p>
+          ))}
+          {r && r.cases.length > 0 && (
+            <div className="max-h-72 space-y-3 overflow-y-auto rounded-md border border-border p-3">
+              {r.cases.map((c, i) => (
+                <div key={c.id} className="text-sm">
+                  <p className="font-medium">{i + 1}. {c.question}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    标准答案：{c.ground_truth || '—'}
+                  </p>
+                </div>
               ))}
             </div>
           )}
-          {err && <p className="text-sm text-destructive">{err}</p>}
+          {/* ⚠️ 只有**真的生成了**才说「已入库」——
+              失败时（比如文档不存在）一条都没建，写上去就是骗人。
+              「没生成够」也照样适用这句：已经生成的那几条确实入库了。 */}
+          {r && r.created > 0 && (
+            <p className="text-xs text-muted-foreground">
+              这些用例已经入库。质量参差，可以逐条点「看原文」核验，不满意的删掉。
+            </p>
+          )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>{result ? '关闭' : '取消'}</Button>
-          <Button disabled={busy || !docId} onClick={submit}>
-            {busy ? '生成中…' : '开始生成'}
-          </Button>
+          <Button onClick={() => void finish()}>确定</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
