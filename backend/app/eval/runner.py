@@ -310,10 +310,13 @@ async def run_eval(run_id: str) -> None:
         logger.exception("评测整轮失败", extra={"event": "eval.failed", "run_id": run_id})
         try:
             async with db.tx() as conn:
+                why = f"{type(e).__name__}: {e}"
+                # ⚠️ `error` **列**才是界面上「失败原因」列读的东西（§3.4）。
+                #    只塞 `metrics.error` 的话，界面显示「失败」但原因那格是空的 ——
+                #    实测库里 4 个 failed 轮次全是这样。两处都写。
                 await conn.execute(
-                    "UPDATE eval_runs SET status='failed', finished_at=now(), metrics=$2 "
-                    "WHERE id=$1", run_id,
-                    {"error": f"{type(e).__name__}: {e}"})
+                    "UPDATE eval_runs SET status='failed', finished_at=now(), metrics=$2, "
+                    "error=$3 WHERE id=$1", run_id, {"error": why}, why)
         except Exception:  # noqa: BLE001
             pass
 

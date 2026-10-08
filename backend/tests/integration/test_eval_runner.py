@@ -192,19 +192,25 @@ async def test_empty_set_fails_with_an_explanation(scratch_set, monkeypatch):
 
 async def test_done_cases_counts_up_to_total(scratch_set, monkeypatch):
     """进度：`done_cases` 从 0 递增到 `total_cases`（界面上的 `0/5`）。"""
-    seen: list[int] = []
-    original = runner._record_progress
-
-    async def spy(run_id, done, total=None):
-        seen.append(done)          # 记**每一次**推进，包括设定 total 的那一次
-        return await original(run_id, done, total)
-
-    monkeypatch.setattr(runner, "_record_progress", spy)
     _graph_returning(monkeypatch, {f"问题{i}": _final(["d1"]) for i in range(3)})
     async with db.tx() as conn:
         for i in range(3):
             await _add_case(conn, scratch_set, f"问题{i}")
     run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+
+    # ⚠️ 先建好 run 再装探针，**并且只记这一轮**：
+    #    `POST /run` 是 `asyncio.create_task` 起的后台任务，接口测试跑完就删了行，
+    #    但那条任务还在继续推进度 —— 探针装在模块上，会把它的一起记进来
+    #    （实测见过 `[11, 12, 13, 0, 14, 1, …]` 这种两轮交错的序列）。
+    seen: list[int] = []
+    original = runner._record_progress
+
+    async def spy(rid, done, total=None):
+        if rid == run_id:
+            seen.append(done)      # 记**每一次**推进，包括设定 total 的那一次
+        return await original(rid, done, total)
+
+    monkeypatch.setattr(runner, "_record_progress", spy)
     try:
         await runner.run_eval(run_id)
         row = await _run_row(run_id)
@@ -305,6 +311,54 @@ async def test_expected_but_missed_still_scores_zero(scratch_set, monkeypatch):
         metrics = json.loads(metrics) if isinstance(metrics, str) else metrics
         assert metrics["recall_at_k"] == 0.0
         assert metrics["scored_with_ground_truth"] == 1
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+# ============================================================
+# 失败原因必须写进「失败原因」列（不是只塞进 metrics）
+# ============================================================
+# ⚠️ `eval_runs` 有**两个**装原因的地方：`error` 列（界面的「失败原因」列读它）
+#    和 `metrics.error`。实测踩到：库里 4 个 failed 轮次，`metrics.error` 里
+#    写着「stale: 上次进程退出时未结束」，而 `error` 列是空的 ——
+#    于是界面上显示「失败」，右边的失败原因却是空白，等于没给原因。
+
+async def test_whole_run_crash_writes_the_error_column(scratch_set, monkeypatch):
+    """整轮抛异常时，原因要落到 `error` 列（界面读的那一列）。"""
+    async def boom(*a, **kw):
+        raise RuntimeError("检索炸了")
+    monkeypatch.setattr(runner, "_select_cases", boom)
+
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+    try:
+        await runner.run_eval(run_id)
+        row = await _run_row(run_id)
+        assert row["status"] == "failed"
+        assert row["error"] and "检索炸了" in row["error"], \
+            f"「失败原因」列是空的（只有 metrics.error）：{row['error']!r}"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_stale_cleanup_writes_the_error_column():
+    """服务重启时清理僵死轮次，原因同样要落到 `error` 列。"""
+    from app.main import _fail_stale_evals
+
+    run_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO eval_runs (id, name, config, role, include_restricted, status)
+               VALUES ($1,'僵死的','{}'::jsonb,'student',0,'running')""", run_id)
+    try:
+        await _fail_stale_evals()
+        async with db.tx() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, error, metrics FROM eval_runs WHERE id=$1", run_id)
+        assert row["status"] == "failed"
+        assert row["error"] and "stale" in row["error"], \
+            f"「失败原因」列是空的（只有 metrics.error）：{row['error']!r}"
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)

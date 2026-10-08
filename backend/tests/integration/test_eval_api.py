@@ -31,6 +31,25 @@ from app.main import app
 PASSWORD = "Test@12345"
 
 
+@pytest_asyncio.fixture(autouse=True)
+def no_real_graph(monkeypatch):
+    """⚠️ **接口测试不许真的跑图。**
+
+    `POST /run` 是 `asyncio.create_task(runner.run_eval(...))` 起后台任务、立刻返回，
+    测试拿到 202 就把行删了 —— 但**那条任务还在跑**。不挡住的话它会一路跑完整条
+    链路（调 LLM、调重排模型），表现为：测试变慢、花钱，而且后台那条任务会继续
+    推进度 / 写库，**干扰别的测试**（实测让 test_eval_runner 的进度断言收到两轮交错的序列）。
+
+    这里要验的只是接口的**建 run 行为**（config 落库、set_name 快照、409 守卫），
+    与图跑得怎么样无关。
+    """
+    from app.eval import runner
+
+    async def instant(state):
+        return {}
+    monkeypatch.setattr(runner, "_drive_to_end", instant)
+
+
 @pytest_asyncio.fixture
 async def client():
     transport = httpx.ASGITransport(app=app)

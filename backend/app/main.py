@@ -78,8 +78,11 @@ async def _fail_stale_evals() -> None:
             n = await conn.fetchval(
                 "SELECT count(*) FROM eval_runs WHERE status IN ('pending','running')")
             if n:
+                # ⚠️ 原因要同时写进 `error` **列** —— 那才是界面「失败原因」列读的
+                #    （§3.4）。只写 `metrics.error` 的话，界面上是「失败」+ 空白原因。
                 await conn.execute(
                     "UPDATE eval_runs SET status='failed', finished_at=now(), "
+                    "error='stale: 上次进程退出时未结束', "
                     "metrics = COALESCE(metrics,'{}'::jsonb) || "
                     "'{\"error\":\"stale: 上次进程退出时未结束\"}'::jsonb "
                     "WHERE status IN ('pending','running')")
