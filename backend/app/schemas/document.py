@@ -27,6 +27,10 @@ class DocumentItem(BaseModel):
     effective_date: str | None = None
     chunk_count: int = 0
     created_at: str | None = None
+    #: 原始文件大小（字节）。**由 `source_path` 现算**，不存库列 ——
+    #: 磁盘上的原文件就是事实来源，存量行不用迁移、也不会出现「库里的数与磁盘不一致」。
+    #: 文件不在了给 `None`（界面显示「—」），不报错。
+    size_bytes: int | None = None
     # 「这一版是不是它所在组的当前生效版本」—— 版本管理页要高亮它（§4.3.1）
     is_current: bool = False
 

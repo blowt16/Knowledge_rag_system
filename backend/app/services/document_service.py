@@ -235,6 +235,24 @@ _CURRENT_VERSION_SQL = """
 REINDEX_FIELDS = ("visibility", "visible_roles", "effective_date", "status")
 
 
+def _file_size(path: str | None) -> int | None:
+    """原始文件大小（字节）。取不到就 `None` —— 界面显示「—」，不报错。
+
+    ⚠️ **现算，不存库列**：磁盘上的原文件就是事实来源。
+       存列的话要么加一次迁移、要么迟早出现「库里的数与磁盘不一致」，
+       而列表每页最多 100 行、本地磁盘 stat 一次的开销可以忽略。
+
+    ⚠️ 文件可能不在了（换机器、清临时目录）—— 那是**正常情况不是异常**：
+       一个字段算不出来不该让整个列表 500，只是那一格空着。
+    """
+    if not path:
+        return None
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
 def _doc_item(row) -> dict:
     roles = row["visible_roles"] or []
     if isinstance(roles, str):        # 防御：jsonb 编解码器缺失时会是字符串
@@ -256,6 +274,7 @@ def _doc_item(row) -> dict:
                            if row["effective_date"] else None),
         "chunk_count": row["chunk_count"],
         "created_at": (row["created_at"].isoformat() if row["created_at"] else None),
+        "size_bytes": _file_size(row["source_path"]),
         "is_current": bool(row.get("is_current")),
     }
 

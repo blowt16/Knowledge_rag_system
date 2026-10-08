@@ -819,13 +819,35 @@ export interface paths {
         get: operations["get_run_api_admin_eval_runs__run_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/eval/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
         /**
          * Delete Run
          * @description 删一轮 = 连它的逐题结果一起删（靠外键 ON DELETE CASCADE）。
          *
          *     **删掉的 run 不再出现在 `/compare` 里** —— 这是有意的，删就是删。
+         *
+         *     ⚠️ **正在跑的轮次不许删**：删行**不会停掉后台那条任务**，它还在占 GPU。
+         *        行没了之后「已有评测在跑」的检查就查不到任何东西，用户可以立刻再起一轮 ——
+         *        两轮同时跑，正是上面写的「两轮并跑既慢又会把显存挤爆」；
+         *        而上一轮最后会静默失败（更新 0 行、批量 INSERT 外键违约），用户什么都看不到。
+         *        真要中止得先有 abort 语义，本轮不做（见方案 §5.3）。
          */
-        delete: operations["delete_run_api_admin_eval_runs__run_id__delete"];
+        delete: operations["delete_run_api_admin_eval_runs__id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1057,6 +1079,8 @@ export interface components {
             chunk_count: number;
             /** Created At */
             created_at?: string | null;
+            /** Size Bytes */
+            size_bytes?: number | null;
             /**
              * Is Current
              * @default false
@@ -3343,12 +3367,12 @@ export interface operations {
             };
         };
     };
-    delete_run_api_admin_eval_runs__run_id__delete: {
+    delete_run_api_admin_eval_runs__id__delete: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                run_id: string;
+                id: string;
             };
             cookie?: never;
         };

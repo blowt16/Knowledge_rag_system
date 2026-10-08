@@ -601,3 +601,46 @@ async def test_reindex_write_order_follows_direction(raw_client, admin, doc,
         "放宽方向必须先写 PG：这样 Chroma 失败时最坏是「还收紧着」，"
         "而不是「界面说受限、学生搜得到」"
     )
+
+
+# ============================================================
+# 原始文件大小（界面的「大小」列）
+# ============================================================
+
+async def test_list_reports_file_size(client, admin, doc):
+    """列表要带原始文件大小 —— 用 `source_path` 现算，不存库列。"""
+    import os
+    async with db.tx() as conn:
+        path = await conn.fetchval("SELECT source_path FROM documents WHERE id=$1", doc["id"])
+    expected = os.stat(path).st_size
+    assert expected > 0, "这个夹具应该写出了一个非空的临时文件"
+
+    r = await client.get("/api/admin/documents", headers=_h(admin))
+    row = next(x for x in r.json()["items"] if x["id"] == doc["id"])
+    assert row["size_bytes"] == expected
+
+
+async def test_list_survives_a_missing_file(client, admin, doc):
+    """⚠️ 原文件不在了 → 大小给 `null`，**不是 500**。
+
+    磁盘上的文件可能被挪走或清掉（换机器、清临时目录）。那时列表不该整体挂掉，
+    只是那一格显示「—」—— 「一个字段算不出来」不该拖垮整页。
+    """
+    async with db.tx() as conn:
+        await conn.execute(
+            "UPDATE documents SET source_path = 'D:/__definitely_not_here__/x.pdf' "
+            "WHERE id = $1", doc["id"])
+    r = await client.get("/api/admin/documents", headers=_h(admin))
+    assert r.status_code == 200, r.text
+    row = next(x for x in r.json()["items"] if x["id"] == doc["id"])
+    assert row["size_bytes"] is None
+
+
+async def test_list_survives_a_null_source_path(client, admin, doc):
+    """没有 `source_path` 的行同样给 `null`，不炸。"""
+    async with db.tx() as conn:
+        await conn.execute("UPDATE documents SET source_path = NULL WHERE id = $1", doc["id"])
+    r = await client.get("/api/admin/documents", headers=_h(admin))
+    assert r.status_code == 200, r.text
+    row = next(x for x in r.json()["items"] if x["id"] == doc["id"])
+    assert row["size_bytes"] is None

@@ -12,7 +12,6 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -44,6 +43,35 @@ const STATUS_LABEL: Record<string, string> = {
 // ⚠️ 下拉**触发器**默认显示的是原始枚举值（实测：`public`、`all`）——
 //    只有展开后的选项才带中文。所以每个 SelectValue 都要给出显示文案。
 const STATUS_TEXT: Record<string, string> = { all: '全部', ...STATUS_LABEL }
+/** 文件类型展示名 —— 库里存的是小写后缀（pdf/docx/pptx/md/txt）。 */
+const TYPE_LABEL: Record<string, string> = {
+  pdf: 'PDF', docx: 'DOCX', pptx: 'PPTX', md: 'MARKDOWN', txt: 'TXT',
+}
+
+/** 状态标签的配色。参考图里「解析完成」是绿色标签 —— 现在项目只有这一个 status，
+ *  按语义分色：生效中绿、索引中琥珀、失败红、已停用灰。 */
+const STATUS_TONE: Record<string, string> = {
+  active: 'bg-success/10 text-success',
+  indexing: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  failed: 'bg-destructive/10 text-destructive',
+  disabled: 'bg-muted text-muted-foreground',
+}
+
+/** 字节数 → 人读的大小。取不到（原文件不在）显示「—」。 */
+function fmtSize(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 上传时间：`2026-09-04T02:10:33+00:00` → `2026-09-04 02:10`。
+ *  ⚠️ 不 `new Date()` 转本地时区 —— 与「生效日」列一样直接截字符串，
+ *     否则同一份数据在列表和版本页会显示成两个时间。 */
+function fmtUploaded(iso: string | null | undefined): string {
+  return iso ? iso.slice(0, 16).replace('T', ' ') : '—'
+}
+
 const VISIBILITY_TEXT: Record<string, string> = {
   all: '全部', public: '公开', restricted: '受限',
 }
@@ -227,11 +255,18 @@ export default function DocumentsPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>标题</TableHead>
+                {/* 列序照参考图：名称 → 类型 → 大小 → 状态 → 数量 → 上传时间，
+                    项目特有的（可见/版本/生效日/操作）排在后面。
+                    参考图里的「所属知识库」「解析特征」本项目没有这两层，不做。 */}
+                <TableHead>文档名称</TableHead>
+                <TableHead className="w-24">类型</TableHead>
+                <TableHead className="w-24">大小</TableHead>
                 <TableHead className="w-24">状态</TableHead>
+                <TableHead className="w-24">chunk 数量</TableHead>
                 <TableHead className="w-28">可见</TableHead>
                 <TableHead className="w-16">版本</TableHead>
                 <TableHead className="w-32">生效日</TableHead>
+                <TableHead className="w-40">上传时间</TableHead>
                 <TableHead className="w-64">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -239,17 +274,27 @@ export default function DocumentsPage() {
               {items.map((d) => (
                 <TableRow key={d.id}>
                   <TableCell>
-                    <div className="font-medium">{d.title}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {d.filename} · {d.chunk_count} 块
-                      {d.is_current && <span className="ml-2 text-primary">当前生效</span>}
-                    </div>
+                    {/* ⚠️ **只有标题一行**（按负责人要求）。原来下面还有一行
+                        `文件名 · 13 块` —— 那行里两样东西现在都有别处去了：
+                        chunk 数成了独立一列，扩展名由「类型」列表达。
+                        原始文件名放进悬停提示：现在的数据里 title 就是文件名去掉后缀，
+                        但 title 是**可改的**，改过之后文件名在列表里就没别处能看了。 */}
+                    <div className="font-medium" title={d.filename}>{d.title}</div>
+                    {d.is_current && (
+                      <div className="text-xs text-primary">当前生效</div>
+                    )}
                   </TableCell>
+                  <TableCell className="text-sm">
+                    {TYPE_LABEL[d.file_type] ?? d.file_type.toUpperCase()}
+                  </TableCell>
+                  <TableCell className="text-sm tabular-nums">{fmtSize(d.size_bytes)}</TableCell>
                   <TableCell>
-                    <Badge variant={d.status === 'active' ? 'default' : 'secondary'}>
+                    <span className={`rounded px-1.5 py-0.5 text-xs ${
+                      STATUS_TONE[d.status] ?? 'bg-muted text-muted-foreground'}`}>
                       {STATUS_LABEL[d.status] ?? d.status}
-                    </Badge>
+                    </span>
                   </TableCell>
+                  <TableCell className="text-sm tabular-nums">{d.chunk_count}</TableCell>
                   <TableCell className="text-sm">
                     {d.visibility === 'public'
                       ? '公开'
@@ -257,6 +302,9 @@ export default function DocumentsPage() {
                   </TableCell>
                   <TableCell>v{d.version}</TableCell>
                   <TableCell className="text-sm">{d.effective_date ?? '—'}</TableCell>
+                  <TableCell className="text-sm tabular-nums">
+                    {fmtUploaded(d.created_at)}
+                  </TableCell>
                   <TableCell className="space-x-1">
                     <Button variant="ghost" size="sm"
                             onClick={() => setChunksOf(d)}>分块</Button>
