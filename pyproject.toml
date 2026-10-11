@@ -42,6 +42,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "bm25s>=0.3.12",
     "pyjwt>=2.15.1",
+    "langfuse>=4.17.0",
 ]
 
 [[tool.uv.index]]
