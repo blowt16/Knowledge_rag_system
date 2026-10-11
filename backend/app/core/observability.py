@@ -35,6 +35,12 @@ _ALL_ZERO_SPAN = "0" * 16
 #: 名字只藏在私有属性 `obs._otel_span.name` 里（【方案 §12.1 修正 1】）。
 _current_node: ContextVar[str] = ContextVar("rag_node", default="unknown")
 
+#: 重入护栏。⚠️ 见 `current_trace_id()` 的说明，别删。
+#: **trace_id 与 span_id 共用同一个**：SDK 两条取 id 的路径各自都会 warning，
+#: 用两个独立的 ContextVar 就等于留了两条递归支路（实测扇出翻倍，39 次）。
+#: 共用还保证与 formatter 里取字段的先后顺序无关。
+_in_trace_id: ContextVar[bool] = ContextVar("in_trace_id", default=False)
+
 _client: Any = None
 _enabled = False
 _service_name = "campus-rag"
@@ -116,22 +122,39 @@ def get_client():
 
 
 def current_trace_id() -> str:
-    """32 位十六进制。**无有效 trace 时返回全 0 串，永不为 None。**"""
-    if _client is None:
+    """32 位十六进制。**无有效 trace 时返回全 0 串，永不为 None。**
+
+    ⚠️⚠️ **重入护栏不能删**（Task 2 实施时实测发现，方案原稿未覆盖）：
+        启用客户端 + 无 active span 时，SDK 内部会 warning；
+        而 `logging.py` 的 `JsonFormatter.format()` **正好会调本函数** ——
+        若 warning 又走到 root handler，就形成
+            format() → current_trace_id() → SDK warning → root handler → format() → …
+        实测：一行应用日志引发 8 层嵌套重入，峰值 51；
+        若同时取 span_id 则扇出翻倍（实测 39 次调用）。
+        护栏在第二层直接返回全 0，递归当场切断。
+    """
+    if _client is None or _in_trace_id.get():
         return _ALL_ZERO_TRACE
+    token = _in_trace_id.set(True)
     try:
         return _client.get_current_trace_id() or _ALL_ZERO_TRACE
     except Exception:  # noqa: BLE001 —— 日志不能因为埋点故障而挂掉（logging.py:73 同款）
         return _ALL_ZERO_TRACE
+    finally:
+        _in_trace_id.reset(token)
 
 
 def current_span_id() -> str:
-    if _client is None:
+    """与 `current_trace_id()` 同构，共用同一个重入护栏（理由见上）。"""
+    if _client is None or _in_trace_id.get():
         return _ALL_ZERO_SPAN
+    token = _in_trace_id.set(True)
     try:
         return _client.get_current_observation_id() or _ALL_ZERO_SPAN
     except Exception:  # noqa: BLE001
         return _ALL_ZERO_SPAN
+    finally:
+        _in_trace_id.reset(token)
 
 
 @contextmanager

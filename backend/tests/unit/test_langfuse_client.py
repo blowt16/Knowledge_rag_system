@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -67,3 +68,59 @@ def test_base_url_from_env(monkeypatch):
 def test_span_id_is_all_zero_without_credentials():
     observability.setup("campus-rag")
     assert observability.current_span_id() == "0" * 16
+
+
+def test_enabling_client_does_not_recurse_through_logging(monkeypatch):
+    """★ 回归：启用客户端后打一行日志，formatter 只能被调用有限次。
+
+    实测过的失败形态：SDK 在「无 active span」时 warning，
+    而 formatter 会在 format() 里调 current_trace_id() → warning 又走回
+    root handler → format() → 递归。护栏没生效时这里会看到几十次调用
+    （实测峰值 51，不含护栏则直到 RecursionError）。
+
+    ⚠️ 两点与「直接挂 JsonFormatter」不同，都是为了让用例真的能失败：
+      1. handler 必须**真的走 format()**。覆写 `emit` 成 `seen.append(record)`
+         会让 formatter 一次都不被调用，用例永远绿 —— 那是假凭据。
+      2. `JsonFormatter` 目前（Task 4 之前）是从 opentelemetry 直接取 id 的，
+         还没走 observability；故这里用等价 formatter 模拟 Task 4 之后的形态
+         （format() 里问 observability 要 trace/span id）。
+    """
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-dummy")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-dummy")
+    # 指向一个必然连不上的地址，逼出 SDK 的失败路径（正是递归的触发源）
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://127.0.0.1:1")
+    observability._reset_for_test()
+    observability.setup("campus-rag")
+
+    seen: list[logging.LogRecord] = []
+
+    class _ObservabilityFormatter(logging.Formatter):
+        """Task 4 之后 JsonFormatter 的样子：format() 里问 observability 要 id。"""
+
+        def format(self, record: logging.LogRecord) -> str:
+            observability.current_trace_id()
+            observability.current_span_id()
+            return record.getMessage()
+
+    handler = logging.Handler()
+
+    def _emit(record: logging.LogRecord) -> None:
+        seen.append(record)
+        # 给测量封顶：护栏失效时递归会一路跑到 RecursionError（几万行 traceback），
+        # 封顶后停在 20 次，断言照样红，但输出可读。
+        if len(seen) < 20:
+            handler.format(record)
+
+    handler.emit = _emit  # type: ignore[method-assign]
+    handler.setFormatter(_ObservabilityFormatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        root.warning("一行应用日志")
+    finally:
+        root.removeHandler(handler)
+        observability.shutdown()
+
+    assert len(seen) < 5, (
+        f"日志 formatter 被调用 {len(seen)} 次 —— 递归护栏没生效"
+    )
