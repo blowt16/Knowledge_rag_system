@@ -45,6 +45,21 @@ def _reset_sdk_singletons() -> None:
     重试 → `flush()` 里 `queue.join()` 永不返回）。现象极具误导性 ——
     看着像「用例 3 卡死」，实际是「根本就没有数据发给这次起的服务器」。
 
+    ⚠️⚠️ **不能直接用 `LangfuseResourceManager.reset()`**（实测，2026-10-11）：
+        SDK 的 `shutdown()` **不幂等** —— 它无条件 `flush()` +
+        `_stop_and_join_consumer_threads()`，而后者会 `pause()`，
+        `pause()` 又往 score ingestion 队列里 `put(_SHUTDOWN_SENTINEL)`。
+        第一次 `pause()` 时消费者线程还活着、会把哨兵取走并 `task_done()`；
+        但线程随即因 `running=False` 退出，**第二次 `shutdown()` 塞进去的哨兵
+        再也没人消费**，`unfinished_tasks` 永久停在 1 —— 之后任何 `flush()`
+        的 `self._score_ingestion_queue.join()` **永不返回**。
+        （`reset()` 恰恰会对**每个**实例无条件再 `shutdown()` 一次，
+        而我们的 teardown 已经关过它了 —— 于是 3 个 langfuse 文件同进程跑必挂：
+        挂点栈实测为 `reset → shutdown → flush → queue.join`。）
+
+        故这里自己遍历：**只关还活着的**，然后清账本。「清」的语义一点没少 ——
+        下一个客户端仍是全新实例，照样拿得到新 base_url 与新 mask 钩子。
+
     放在 `__enter__` 里跑：调用方按「先起服务器、再 setup 客户端」的顺序写，
     就自动是对的，不必记得手动清（漏掉就会静默变成空断言）。
     """
@@ -52,7 +67,11 @@ def _reset_sdk_singletons() -> None:
     from opentelemetry import trace as _otel_trace
     from opentelemetry.util._once import Once
 
-    LangfuseResourceManager.reset()
+    for instance in list(LangfuseResourceManager._instances.values()):
+        if not instance._shutdown:
+            instance.shutdown()
+    LangfuseResourceManager._instances.clear()
+
     _otel_trace._TRACER_PROVIDER = None            # type: ignore[attr-defined]
     _otel_trace._TRACER_PROVIDER_SET_ONCE = Once()  # type: ignore[attr-defined]
 
