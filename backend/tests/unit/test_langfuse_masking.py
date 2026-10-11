@@ -16,6 +16,14 @@ from tests.lf_capture import CapturingLangfuse
 STUDENT_ID = "2023123456"
 #: 手机号
 PHONE = "13800138000"
+#: 手机号的三种常见写法都要被打码（分隔符不能绕过脱敏）
+PHONE_FORMS = [PHONE, "138-0013-8000", "138 0013 8000"]
+#: 邮箱
+EMAIL = "zhangsan@example.edu.cn"
+#: 身份证：18 位（含校验位 X）与 15 位遗留格式都要被打码
+ID_CARD_FORMS = ["11010519491231002X", "110105491231002"]
+#: 8 位数字：**不在任何规则内**，用来钉住 `\d{10}` 的长度边界
+SHORT_NUMBER = "87654321"
 
 
 @pytest.fixture()
@@ -51,22 +59,56 @@ def test_student_id_is_masked_before_export(capture):
     assert "[REDACTED:student_id]" in body, "打码标记没出现"
 
 
-def test_phone_is_masked(capture):
+@pytest.mark.parametrize("form", PHONE_FORMS)
+def test_phone_is_masked(capture, form):
+    """带分隔符的写法也要挡住 —— 加个 `-` 就能绕过脱敏是最典型的漏网方式。"""
     client = observability.get_client()
     with client.start_as_current_observation(as_type="span", name="q") as s:
-        s.update(input=f"联系方式 {PHONE}")
+        s.update(input=f"联系方式 {form}")
     client.flush()
 
     body = capture.body()
-    assert PHONE not in body, "手机号原样发出去了"
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert form not in body, f"手机号原样发出去了：{form}"
     assert "[REDACTED:phone]" in body
+
+
+@pytest.mark.parametrize("form", ID_CARD_FORMS)
+def test_id_card_is_masked(capture, form):
+    """18 位与 15 位遗留格式都要挡住 —— 只挡 18 位等于把老证件漏出去。"""
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=f"证件号 {form}")
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert form not in body, f"身份证原样发出去了：{form}"
+    assert "[REDACTED:id_card]" in body
+
+
+def test_email_is_masked(capture):
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=f"联系邮箱 {EMAIL}")
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert EMAIL not in body, "邮箱原样发出去了"
+    assert "[REDACTED:email]" in body
 
 
 def test_non_sensitive_text_survives(capture):
     """正控：脱敏不能把正常正文也抹掉（否则上面两条断言可能只是因为什么都没发）。"""
     client = observability.get_client()
     with client.start_as_current_observation(as_type="span", name="q") as s:
-        s.update(input="图书馆开放时间是什么时候")
+        s.update(input=f"图书馆开放时间是什么时候，通知编号 {SHORT_NUMBER}")
     client.flush()
 
-    assert "图书馆开放时间" in capture.body(), "正常正文被误删了"
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert "图书馆开放时间" in body, "正常正文被误删了"
+    # 钉住学号规则的长度边界：8 位数不在任何规则内。
+    # 放宽 `\d{10}` 必须是一个**显式决定**，不能悄悄发生（也防规则被误改宽）。
+    assert SHORT_NUMBER in body, "8 位数字被误伤 —— 学号规则的边界被动过了"
