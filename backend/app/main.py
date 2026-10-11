@@ -33,8 +33,7 @@ from app.api import documents as documents_api
 from app.api import eval as eval_api
 from app.api import stats as stats_api
 from app.api import users as users_api
-from app.core import metrics
-from app.core import telemetry
+from app.core import observability
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
 from app.core.logging import install as install_logging
@@ -96,12 +95,8 @@ async def _fail_stale_evals() -> None:
 async def lifespan(_app: FastAPI):
     install_logging()
     # ⚠️ service.name 用**固定 ASCII 名**，不用 `cfg("app.name")`（那是中文显示名）。
-    #    实测：中文 service.name 经 collector 的 prometheus exporter 出来是
-    #    `exported_job="校园 RAG 检索问答系统"` 的**乱码**（编码坏掉），
-    #    而它会出现在每一条指标的标签上。
-    telemetry.setup_tracing(service_name="campus-rag")
-    # 指标（§3.2.3.3）—— 与 tracing 同一开关：没配 OTEL_EXPORTER_OTLP_ENDPOINT 就不导出
-    metrics.setup_metrics(service_name="campus-rag")
+    #    实测：中文 service.name 会以乱码出现在每一条标签上。
+    observability.setup(service_name="campus-rag")
     await db.init_pool()
     await _fail_stale_evals()
     # 握住引用，避免任务被 GC 掉
@@ -113,6 +108,7 @@ async def lifespan(_app: FastAPI):
         warmup.cancel()
         await db.close_pool()
         logger.info("服务停止", extra={"event": "app.shutdown"})
+        observability.shutdown()
 
 
 app = FastAPI(
@@ -126,27 +122,64 @@ install_handlers(app)
 
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
-    """trace_id 生成与传播（§3.2.3.1）。
+    """trace_id 生成与传播（【方案 §5.3】）。
 
     请求头无 traceparent 则新建，有则沿用（便于将来接网关或前端串联）。
     """
-    carrier = {k.lower(): v for k, v in request.headers.items()}
-    ctx = telemetry.extract_context(carrier)
+    client = observability.get_client()
 
-    tracer = telemetry.get_tracer("http")
-    with tracer.start_as_current_span(
-        f"{request.method} {request.url.path}", context=ctx
-    ) as span:
-        span.set_attribute("http.method", request.method)
-        span.set_attribute("http.route", request.url.path)
+    if client is None:
+        # 未启用：照常处理请求，只回一个合法占位 id
         response = await call_next(request)
-        span.set_attribute("http.status_code", response.status_code)
-        # 响应头回传 traceparent —— 用户报障时可直接定位
-        traceparent = telemetry.current_traceparent()
-        if traceparent:
-            response.headers["traceparent"] = traceparent
-        response.headers["x-trace-id"] = telemetry.current_trace_id()
+        response.headers["x-trace-id"] = observability.current_trace_id()
         return response
+
+    carrier = {k.lower(): v for k, v in request.headers.items()}
+    trace_id = carrier.get("traceparent", "").split("-")[1] if "traceparent" in carrier else None
+    trace_ctx = {"trace_id": trace_id} if trace_id else None
+
+    with client.start_as_current_observation(
+        as_type="span",
+        name=f"{request.method} {request.url.path}",
+        trace_context=trace_ctx,
+        input=None, output=None,
+    ) as span:
+        # ⚠️⚠️ **异常必须在这里吞掉、到 with 外面再重抛**（Task 5 实测发现）：
+        #     Langfuse 内部用的是 OTel 的 `start_as_current_span`，其 `use_span`
+        #     默认 `record_exception=True`，而 SDK **不暴露关闭它的参数**
+        #     （实测 `start_as_current_observation` 的签名里没有 record_exception）。
+        #     异常一旦穿过 with，`exception.message`（= `str(e)`，可能回显 prompt）
+        #     与整个栈就会发到云端。
+        pending: BaseException | None = None
+        response = None
+        try:
+            response = await call_next(request)
+        except BaseException as e:  # noqa: BLE001
+            span.update(level="ERROR", status_message=type(e).__name__)
+            pending = e
+
+        if response is not None:
+            span.update(metadata={
+                "http.method": request.method,
+                "http.route": request.url.path,
+                "http.status_code": response.status_code,
+            })
+            # ★ 5xx 标 ERROR —— Metrics API **没有 HTTP 状态码维度**（实测 29 个
+            #    合法维度里没有它），错误率面板靠 level 分组读（【方案 §8.3】）。
+            #    ⚠️ 不标的话错误率恒为 0，且不报错。
+            if response.status_code >= 500:
+                span.update(level="ERROR",
+                            status_message=f"HTTP {response.status_code}")
+
+        # ⚠️⚠️ 必须在 with **内**取 id（实测）：出了 with 观测已结束，
+        #     `get_current_trace_id()` 返回 None → 响应头变成全 0 占位。
+        trace_id = observability.current_trace_id()
+
+    if pending is not None:
+        raise pending          # 出了 with 才重抛 —— 见上面那条警告
+
+    response.headers["x-trace-id"] = trace_id
+    return response
 
 
 @app.get("/health", tags=["meta"])
@@ -161,7 +194,7 @@ async def health():
             content={"status": "degraded", "database": f"unavailable: {type(e).__name__}"},
         )
     return {"status": "ok", "database": "ok",
-            "trace_id": telemetry.current_trace_id()}
+            "trace_id": observability.current_trace_id()}
 
 
 app.include_router(auth_api.router)
