@@ -795,6 +795,7 @@ GET /api/public/traces/{id}  →  410
 
 全部**实跑**（真实 DeepSeek 调用、真实 Langfuse 云项目 `Knowledge_rag_system`），证据在 `logs/acceptance/`（未入库），完整报告 `task-14-report.md`。
 **方法**：Langfuse 网页界面不可见，凡「去官网核对」一律用**公开 API v2 反查**（`/api/public/v2/observations|metrics|projects`）代替；仪表盘 UI 项用浏览器实看 + 截图（`B-dashboard.png` / `B8deg-ui.png`）。
+**失败项处置**：A4 / A7 / C3 三处验收时判 ❌，随后已修复（commit 见各行）。下表与计数保留**验收当时**的结果，缺陷本身不删；`qa_logs.token_usage` 恒 null 与该 bug 无关（该列全库无写入方，本分支之前即如此）。
 
 **验收 A（8 项）：6 通过 / 2 未通过**
 
@@ -803,10 +804,10 @@ GET /api/public/traces/{id}  →  410
 | A1 | ✅ | trace `c85ad731…` 反查到，12 个 observation |
 | A2 | ✅ | 单根成树：`POST /api/chat/stream` → `resumed` → `node.*` → `llm.*`（generation 为孙），父子正确 |
 | A3 | ✅ | 8 个 `node.*` span 各一次（resolve/route/rewrite/retrieve/rerank/build_context/generate/cite） |
-| A4 | ❌ | **`llm.generate` 的 `usageDetails={}`**；同 trace 非流式 `llm.rewrite` 有 220/157/377 —— 流式 usage 丢失（根因见 C3） |
+| A4 | ❌→✅ | **验收时为 ❌**：**`llm.generate` 的 `usageDetails={}`**；同 trace 非流式 `llm.rewrite` 有 220/157/377 —— 流式 usage 丢失（根因见 C3）。**已修复**（`c03af7f`）：消费方见到答案收尾 `}` 不再 `break`，继续读完尾部那个带 usage 的 chunk |
 | A5 | ✅ | 按 `traceId` 维度聚合：提问窗口内**只有 1 条 trace**，未分裂 |
 | A6 | ✅（日志一路以 A8 代证） | 响应头 == `qa_logs.trace_id` == Langfuse 反查，三处同为 `c85ad731…`；问答成功路径**不写 app.jsonl**（设计如此），日志机制改由 A8 上传路径证明（日志行 `trace_id` == 响应头 `44a1b9aa…`） |
-| A7 | ❌ | 「**我的学号是**2024001234…」→ 已打码 ✅；「**学号**2024001234**的学生**…」→ **原文未打码** ❌。根因：脱敏正则跑在 JSON 转义文本上，`(?<!\d)` 被前字转义末位十六进制字符误判（`是` 的转义码末位是字母 `f` → 能打码；`号` 的转义码末位是数字 `7` → `(?<!\d)` 卡住），样本复现 **16/22 前导字会静默卡掉打码**（`A7-prefix-demo.txt`）——**隐私风险** |
+| A7 | ❌→✅ | **验收时为 ❌（隐私风险）**：「**我的学号是**2024001234…」→ 已打码 ✅；「**学号**2024001234**的学生**…」→ **原文未打码** ❌。根因：脱敏正则跑在 JSON 转义文本上，`(?<!\d)` 被前字转义末位十六进制字符误判（`是` 的转义码末位是字母 `f` → 能打码；`号` 的转义码末位是数字 `7` → `(?<!\d)` 卡住），样本复现 **16/22 前导字会静默卡掉打码**（`A7-prefix-demo.txt`）。**已修复**（`af7ad58`）：打码前先把 SDK 的容器序列化形态解码、打完再按同款参数编码回去 |
 | A8 | ✅ | 上传 trace `44a1b9aa…` 下挂 `resumed`（span_id `d26f88125d44f2de`），与 `app.jsonl` `ingest.done` 行完全一致 |
 
 **验收 B（8 项）：7 通过 + 1 记「有值但恒 0」；降级路径 4/4 通过**
@@ -829,12 +830,12 @@ GET /api/public/traces/{id}  →  410
 |---|---|---|
 | C1 | ✅ | 响应头与日志全部 `00000000000000000000000000000000`（32 位字符串）；`app.jsonl` 无一处 `trace_id: null` |
 | C2 | ✅ | `/api/public/projects` 唯一条目即 `Knowledge_rag_system`；恢复后新 trace 落库 |
-| C3 | ❌ | 流式 `generate` 的 generation **存在但 usage 无值**。最小实验定性：全量消费 `stream_raw` → 66 tokens；见 `}` 即 break（`generate.py:402` 的行为）→ **0 tokens**。SDK/云端无责，是应用侧早退没读到尾部 usage chunk（并连带 `qa_logs.token_usage` 恒 null） |
+| C3 | ❌→✅ | **验收时为 ❌**：流式 `generate` 的 generation **存在但 usage 无值**。最小实验定性：全量消费 `stream_raw` → 66 tokens；见 `}` 即 break（`generate.py:402` 的行为）→ **0 tokens**。SDK/云端无责，是应用侧早退没读到尾部 usage chunk。**已修复**（`c03af7f`，与 A4 是同一个 bug） |
 
 **全量测试**：`627 passed, 1 warning in 168.76s`（Task 1 基线 563 passed）——只有 1 条第三方 `StarletteDeprecationWarning`（`fastapi/testclient.py`，与改造无关）。
 **前端残留扫描**：`Jaeger|16686|Prometheus` 在 `frontend/web/src` **0 命中**。
 **配置恢复**：`.env` 与备份逐字节一致；恢复后 `available=true`、新 trace 落库；三个孤儿容器未动（仍在 Up）。
-**遗留（下一轮修）**：① 流式 usage 丢失（`generate.py:402` 早退 → 尾部 usage chunk 未读）；② 脱敏正则跑在转义文本上导致约 3/4 中文前导字静默失效（需先解码或改 lookbehind）；③ B5 价格表在 Langfuse 后台补配。
+**遗留（验收当时的下一轮清单）**：① 流式 usage 丢失（`generate.py:402` 早退 → 尾部 usage chunk 未读）—— **已修，`c03af7f`**；② 脱敏正则跑在转义文本上导致约 3/4 中文前导字静默失效（需先解码或改 lookbehind）—— **已修，`af7ad58`**；③ B5 价格表在 Langfuse 后台补配（非代码）—— **仍未做**。
 
 ---
 
