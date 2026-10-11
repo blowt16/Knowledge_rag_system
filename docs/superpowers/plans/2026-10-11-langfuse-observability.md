@@ -2410,11 +2410,24 @@ Expected: FAIL — `_evaluate_alerts` 不存在
 > 阈值配置与专项测试）。之所以这样切分：Task 10 的 `retrieval_metrics()` 会调用它，
 > 若定义留到本任务，Task 10 交付的就是个「测试全绿但一调用就 NameError」的函数。
 
+⚠️ **判据要用代码级 grep，不要用宽 grep**（Task 10 踩过）：`_evaluate_alerts()` 的注释里
+**有意保留了**解释历史的 `prometheus-rules.yml` / `Prometheus` 字样（说明这条规则为什么与
+原来那条不同）。宽 grep 会把它们算进去、看起来像还有残留 —— 那是**注释，不是代码**。
+
 ```bash
-grep -n "_prom_rules\|prometheus\|Prometheus" backend/app/services/stats_service.py
+grep -nE "_prom_rules|prometheus_url|PROMETHEUS_URL|/api/v1/rules" backend/app/services/stats_service.py
 ```
 
-Expected: **无输出**。有残留就删掉 —— `_prom_rules()` 读 `/api/v1/rules` 的整段都不再需要。
+Expected: **无输出**。有残留就删掉 —— 读 `/api/v1/rules` 与 Prometheus 基址的那几段都不再需要。
+
+再跑一遍宽 grep 只为了**看清有哪些是注释**：
+
+```bash
+grep -n "prometheus\|Prometheus" backend/app/services/stats_service.py
+```
+
+Expected: 只剩注释里的历史说明（有意保留）。**不要删它们** —— 它们解释了
+「为什么 5xx 用 level 而不是状态码维度」这类实测得来的决定。
 
 - [ ] **Step 5: 跑测试确认通过**
 
