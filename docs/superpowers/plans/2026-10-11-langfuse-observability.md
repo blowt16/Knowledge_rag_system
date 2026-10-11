@@ -753,12 +753,27 @@ git commit -m "[feat] 脱敏钩子：学号/手机号/身份证在导出前打�
 
 ## Task 4: 日志 trace_id 换源
 
+> ⚠️ **本任务与 Task 2 之间有一条已实测的暗礁**（Task 2 实施时发现）：
+> 启用客户端 + 无 active span 时，Langfuse SDK 内部会 warning；
+> 而本任务让 `JsonFormatter.format()` 调 `current_trace_id()` ——
+> 若那条 warning 又走回 root handler，就形成
+> `format() → current_trace_id() → SDK warning → root handler → format() → …`
+> 实测一行应用日志引发 **8 层嵌套重入，峰值 51**。
+>
+> **Task 2 已在 `observability.current_trace_id()` / `current_span_id()` 里加了重入护栏**
+> （**两个 getter 共用同一个 ContextVar** —— 各自独立会留下第二条递归支路，扇出翻倍）。
+> 实测：护栏前 39 次调用，护栏后 3 次（1 条应用日志 + 2 条 SDK warning，
+> 两个 getter 各触发一条）—— **warning 仍然照常打出来，诊断信息没丢**。
+> **本任务不要再自己加 `propagate = False` 之类的补丁** —— 那会把 warning 一起吞掉。
+> 换源完成后，跑一次 `test_langfuse_client.py::test_enabling_client_does_not_recurse_through_logging`
+> 确认护栏仍然生效。
+
 **Files:**
 - Modify: `backend/app/core/logging.py:62-74`
 - Create: `backend/tests/unit/test_logging_trace_id.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `observability.current_trace_id()` / `current_span_id()`
+- Consumes: Task 2 的 `observability.current_trace_id()` / `current_span_id()`（**已带重入护栏**）
 - Produces: 日志 JSON 的 `trace_id` 字段恒为 32 位十六进制
 
 - [ ] **Step 1: 写失败测试**
