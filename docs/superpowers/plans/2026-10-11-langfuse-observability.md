@@ -1765,7 +1765,69 @@ grep -rn "current_trace_id\|current_span_id" backend/app/ --include="*.py"
 
 Expected: 只剩 `core/observability.py` 里的定义，以及各调用点的 `observability.xxx` 形式。
 
-- [ ] **Step 5: 跑相关回归**
+- [ ] **Step 5: 补 `attach_trace` 的单元测试**
+
+> ⚠️ Task 2 审查时发现：`attach_trace` 是**取代 `reattach` 的机制**，却只被 T14 的人工验收
+> A8 覆盖，没有任何自动化测试。机制本身已在方案实测中验过（`trace_context` 能把新观测
+> 挂回原 trace，【方案 §12.1】#2），但**我们自己的包装层**没测。
+
+新建 `backend/tests/unit/test_langfuse_attach_trace.py`：
+
+```python
+"""后台任务续接（【方案 §5.4】）—— 取代 `telemetry.reattach()`。
+
+⚠️ 「后台任务不能靠 contextvars 隐式继承」这条教训不变（§3.2.3.1）；
+   换的是实现手段（Langfuse 的 `trace_context`），不是要不要显式传递。
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.core import observability
+from tests.lf_capture import CapturingLangfuse
+
+
+@pytest.fixture()
+def capture(monkeypatch):
+    with CapturingLangfuse() as cap:
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-dummy")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-dummy")
+        monkeypatch.setenv("LANGFUSE_BASE_URL", cap.base_url)
+        observability._reset_for_test()
+        observability.setup("campus-rag")
+        yield cap
+        observability.shutdown()
+
+
+def test_attach_trace_joins_existing_trace(capture):
+    """★ 挂在别的任务里的观测，trace_id 必须与原 trace 相同。"""
+    client = observability.get_client()
+
+    with client.start_as_current_observation(as_type="span", name="root-req"):
+        root_trace = observability.current_trace_id()
+        assert root_trace != "0" * 32
+
+        # 模拟后台任务：脱离当前上下文后，用 attach_trace 挂回去
+        with observability.attach_trace(root_trace, observability.current_span_id()):
+            inner = observability.current_trace_id()
+
+    assert inner == root_trace, (
+        f"后台观测没挂回原 trace：{inner} != {root_trace}"
+    )
+
+
+def test_attach_trace_is_noop_when_disabled(monkeypatch):
+    """未启用时必须是安全的空操作，不能抛。"""
+    for k in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    observability._reset_for_test()
+    observability.setup("campus-rag")
+
+    with observability.attach_trace("a" * 32, "b" * 16):
+        pass          # 不抛即通过
+```
+
+- [ ] **Step 6: 跑相关回归**
 
 ```bash
 .venv/Scripts/python.exe -m pytest backend/tests/integration/test_stage_events.py backend/tests/integration/test_session_lock.py backend/tests/integration/test_pipeline.py backend/tests/integration/test_document_access_acl.py -v
@@ -1773,10 +1835,10 @@ Expected: 只剩 `core/observability.py` 里的定义，以及各调用点的 `o
 
 Expected: 全 passed
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add backend/app/api/chat.py backend/app/services/document_service.py backend/app/api/documents.py backend/app/api/document_access.py backend/app/core/exceptions.py backend/app/services/chat_service.py
+git add backend/app/api/chat.py backend/app/services/document_service.py backend/app/api/documents.py backend/app/api/document_access.py backend/app/core/exceptions.py backend/app/services/chat_service.py backend/tests/unit/test_langfuse_attach_trace.py
 git commit -m "[refactor] 全部 telemetry 引用换源（6 文件）：SSE/后台任务走 trace_context，其余走 observability"
 ```
 
