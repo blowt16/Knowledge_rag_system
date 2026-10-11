@@ -297,35 +297,31 @@ def _v2_payload(request: httpx.Request) -> dict:
                       "p95_latency": _V2_LATENCY_P95}]}
 
 
+def _langfuse_configured(monkeypatch) -> None:
+    """配上假密钥（**环境变量**）—— `stats_service` 是调用时读的，与 conftest
+    的 `_never_talk_to_langfuse` 那道闸配套：忘了配的用例真的走不到云端。"""
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "http://langfuse.test")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+
 def _langfuse_answering(monkeypatch, payload=_v2_payload) -> None:
     """配上假密钥 + MockTransport，让「答得上」这条分支走**真实的 HTTP 代码路径**
-    （而不是把内部函数打桩 —— 打桩只能证明自己调了自己）。
-
-    ⚠️ 三个常量必须**显式设**：`stats_service` 是 **import 时**从 `.env` 读进
-       常量的，而 conftest 的 `_never_talk_to_langfuse` 只删环境变量、管不到常量
-       —— 不设的话这条用例会**真的打到 Langfuse 云上**（结果随本机 `.env` 变）。
-    """
-    monkeypatch.setattr("app.services.stats_service.LANGFUSE_BASE_URL",
-                        "http://langfuse.test")
-    monkeypatch.setattr("app.services.stats_service.LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setattr("app.services.stats_service.LANGFUSE_SECRET_KEY", "sk-test")
+    （而不是把内部函数打桩 —— 打桩只能证明自己调了自己）。"""
+    _langfuse_configured(monkeypatch)
     monkeypatch.setattr(
         "app.services.stats_service._lf_transport",
         httpx.MockTransport(lambda request: httpx.Response(200, json=payload(request))))
 
 
-async def test_retrieval_is_200_and_unavailable_without_langfuse(client, admin,
-                                                                 monkeypatch):
+async def test_retrieval_is_200_and_unavailable_without_langfuse(client, admin):
     """★ Langfuse 未配时必须 `available:false` + **HTTP 200**（M4-D5）。
 
     返 500 的话前端整个仪表盘会白屏，而 §4.4 要求**业务指标区块照常渲染**。
 
-    ⚠️ **必须显式打桩成空**：常量是 import 时从 `.env` 读的（真密钥），
-       不清空的话这条用例会真的去查云端，结果取决于本机 `.env` 与网络。
+    ⚠️ 这里**不用**自己清密钥：conftest 的 `_never_talk_to_langfuse` 已经删了
+       `LANGFUSE_*`，而 `stats_service` 是调用时读环境变量的 —— 闸真的生效。
     """
-    for name in ("LANGFUSE_BASE_URL", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
-        monkeypatch.setattr(f"app.services.stats_service.{name}", "")
-
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     assert r.status_code == 200, "不可用不是错误，不能 500"
@@ -389,14 +385,17 @@ async def test_retrieval_service_exposes_cost_and_node_latency(monkeypatch):
                                     {"node": "retrieve", "p95": 120.0}]
 
 
-async def test_retrieval_200_when_langfuse_answers_empty(client, admin, monkeypatch):
-    """★ Langfuse 答得上、但窗口内**一条数据都没有**（两种空结果形态都在）时，
-    仍必须 **HTTP 200**（M4-D5）—— 业务指标区块不能被这一块拖白。
+async def test_retrieval_available_even_before_any_span(client, admin, monkeypatch):
+    """★ Langfuse 答得上、但窗口内**一条数据都没有**（刚起服务、还没人来提问）时，
+    必须是 `available: true` —— **接好了、只是还没流量**。
 
-    ⚠️ 这条用例锁的是**行为变了**的那一半：自建栈时代读 `/api/v1/rules` 能证明
-       「服务活着」，所以「没流量」判 `available: true`；Metrics API 没有等价的
-       存活探针，全空与「不可达」分不开，一律按不可用报（前端显示「暂不可用」），
-       而 `langfuse_unavailable` 就是 T14 验收 B8 要看到的那个 status。
+    报 false 的话，仪表盘会把「已接好、只是还没流量」显示成「暂不可用」，
+    让人以为接错了、跑去查配置 —— 改造前的代码专门写过注释避免这件事。
+
+    ⚠️ 判据是**「有没有一个查询真的答上了」**，不是「有没有非空值」：
+       `_lf_query` 只在**失败**时返回 None；答上了但窗口是空的会回一个 payload
+       （两种空结果形态这里都造了：字段是 `null` / 空数组）。两者必须分开，
+       否则「全空当不可用」与「全失败当可用」两种错法各能骗过一条用例。
     """
     def payload(request: httpx.Request) -> dict:
         query = json.loads(request.url.params["query"])
@@ -409,19 +408,49 @@ async def test_retrieval_200_when_langfuse_answers_empty(client, admin, monkeypa
 
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
-    assert r.status_code == 200, "不可用不是错误，不能 500"
+    assert r.status_code == 200, r.text
     body = r.json()
-    assert body["available"] is False
-    assert body.get("status") == "langfuse_unavailable"
+    assert body["available"] is True, "答上了就算可用，与窗口里有没有数据无关"
+    assert body["latency_p50"] is None
+    assert body["latency_p95"] is None
+    assert body["token_usage"] is None
+    assert body["alerts"] == {"firing": 0, "pending": 0,
+                              "rules": [{"name": "RAGHttp5xxRate",
+                                         "state": "inactive"}]}
+
+
+async def test_retrieval_unavailable_when_langfuse_errors(client, admin, monkeypatch):
+    """★ 反方向：四个查询**全部失败**时才是 `available: false`，且**仍是 HTTP 200**。
+
+    两种失败都造：连不上（T14 验收 B8 那条：`LANGFUSE_BASE_URL` 指向不存在的地址）
+    与云上回错（5xx），两者走的都是 `_lf_query` 的 except 分支。
+    """
+    _langfuse_configured(monkeypatch)
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    def http_500(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    for label, handler in (("连不上", unreachable), ("5xx", http_500)):
+        monkeypatch.setattr("app.services.stats_service._lf_transport",
+                            httpx.MockTransport(handler))
+
+        r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
+
+        assert r.status_code == 200, "不可用不是错误，不能 500"
+        body = r.json()
+        assert body["available"] is False, f"{label} 时该报不可用"
+        assert body.get("status") == "langfuse_unavailable", f"{label} 时 status 不对"
 
 
 async def test_retrieval_available_when_only_some_metrics_present(client, admin,
                                                                   monkeypatch):
-    """正控：答得上、且**只要有任意一个指标有值**就算可用。
+    """正控：答得上时，**只要 `level` 有行**，`error_rate` 就该是 `0.0` 而不是 `None`。
 
-    窗口里还没产生 LLM 延迟（刚起服务 / 这一小时没人提问）不代表接错了 ——
-    判成不可用会让人跑去查配置。注意 `error_rate` 算出来是 **0.0**，
-    而 `0.0` 是**有值**：不能跟「没数据」混为一谈。
+    ⚠️ `0.0` 是**有值**：它决定「一次错都没有」与「这窗口没数据」在告警上的区别
+       （前者正常、后者不误报）。可用性本身看的是**有没有查询答上**，与值无关。
     """
     def payload(request: httpx.Request) -> dict:
         query = json.loads(request.url.params["query"])

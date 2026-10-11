@@ -32,11 +32,11 @@ from app.core.config import cfg
 
 logger = logging.getLogger(__name__)
 
-# Langfuse 配置。⚠️ 实测 v1 接口对本组织全部 410，一切走 v2（【方案 §12.4】）。
-LANGFUSE_BASE_URL: str = (os.environ.get("LANGFUSE_BASE_URL", "").strip()
-                          or cfg("observability.langfuse_base_url", "") or "")
-LANGFUSE_PUBLIC_KEY: str = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
-LANGFUSE_SECRET_KEY: str = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
+# ⚠️ Langfuse 配置**在调用时读**（见 `_lf_config`），不在 import 时快照 ——
+#    模块级常量会把 `.env` 里的真 key 钉死，conftest 的 `_never_talk_to_langfuse`
+#    只删环境变量、够不着常量，于是**忘了打桩的测试会真的打到云上**。
+#    `core/observability.py` 也是调用时读，口径一致。
+# ⚠️ 实测 v1 接口对本组织全部 410，一切走 v2（【方案 §12.4】）。
 
 # 测试注入用（httpx.MockTransport）—— 让「答得上」这条分支走**真实 HTTP 代码路径**
 _lf_transport: httpx.BaseTransport | None = None
@@ -209,14 +209,31 @@ def _extract_scalar(payload: dict | None, key: str) -> float | None:
         return None
 
 
+def _lf_config() -> tuple[str, str, str] | None:
+    """取 Langfuse 配置；三项缺任一返回 None（→ 走不可用分支）。
+
+    ⚠️ **调用时读环境变量，不在 import 时快照**：否则测试里 conftest 那道
+       「绝不往 Langfuse 发数据」的闸（只删环境变量）对忘了打桩的用例失效。
+    """
+    base_url = (os.environ.get("LANGFUSE_BASE_URL", "").strip()
+                or cfg("observability.langfuse_base_url", "") or "")
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
+    if not (base_url and public_key and secret_key):
+        return None
+    return base_url, public_key, secret_key
+
+
 async def _lf_query(query_json: str) -> dict | None:
     """查一次 Metrics API v2。任何失败返回 None（由调用方决定怎么降级）。"""
-    if not (LANGFUSE_BASE_URL and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+    conf = _lf_config()
+    if conf is None:
         return None
+    base_url, public_key, secret_key = conf
     try:
         async with httpx.AsyncClient(
-            base_url=LANGFUSE_BASE_URL,
-            auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
+            base_url=base_url,
+            auth=(public_key, secret_key),
             timeout=_LF_TIMEOUT, transport=_lf_transport,
         ) as client:
             resp = await client.get("/api/public/v2/metrics",
@@ -306,7 +323,7 @@ async def retrieval_metrics() -> dict:
     ⚠️ token 用**累计值**不用 rate：问答是稀疏事件，窗口两端数值常常相同，
        rate 会算成 0（实测踩过 —— 指标明明有 331，rate 报 0）。
     """
-    if not (LANGFUSE_BASE_URL and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+    if _lf_config() is None:
         return {"available": False, "status": "langfuse_unavailable"}
 
     hours = int(cfg("observability.metrics_window_hours", 24))
@@ -332,9 +349,14 @@ async def retrieval_metrics() -> dict:
         "node_latency": _node_latency_rows(nodes),
     }
 
-    alerts = _evaluate_alerts(values)
+    payloads = {"lat": lat, "err": err, "tok": tok, "nodes": nodes}
 
-    if all(v is None for k, v in values.items() if k != "node_latency") and not values["node_latency"]:
+    # ⚠️ 判据是「有没有一个查询真的答上了」，**不是**「有没有非空值」。
+    #    刚起服务、还没人来提问时，窗口是空的：`_lf_query` 仍然返回了
+    #    payload（`{"data":[...]}` 或 `{"data":[]}`），那说明**接好了、只是还没流量** ——
+    #    这种情形必须是 available:true。把它显示成「暂不可用」会让人以为接错了，
+    #    而改造前的代码专门写过注释避免这件事。
+    if not any(p is not None for p in payloads.values()):
         return {"available": False, "status": "langfuse_unavailable"}
 
-    return {"available": True, **values, "alerts": alerts}
+    return {"available": True, **values, "alerts": _evaluate_alerts(values)}
