@@ -2,7 +2,7 @@
 
 **两块数据源，别混**（§4.4）：
 - **业务指标**读 PostgreSQL（本模块的 overview / trend / refusals / hot-questions）；
-- **运行指标**用 PromQL 查 Prometheus（只有 `retrieval_metrics`）。
+- **运行指标**用 Metrics API v2 查 Langfuse（【方案 §8.1】）（只有 `retrieval_metrics`）。
 
 ⚠️ **`refusal_rate` 的口径是 M4-D2 定的**（计划文档 §9.0）：分母是
    **`route='knowledge'` 的轮次**。§3.7.3 说「定义与分母见 5.2」，而 §5.2 里
@@ -12,17 +12,18 @@
 ⚠️ **`qa_count` 不含评测轮次**：评测结果落 `eval_case_results`，天然不进
    业务口径。**若 M5 让评测也写 `qa_logs`，必须在这里加过滤**（已写进 §9.0）。
 
-⚠️ **M4 没有 Prometheus**（三个容器在 M5 才起）：`PROMETHEUS_URL` 为空时
-   `retrieval_metrics` 返回 `{available: false, status: "prometheus_unavailable"}`，
+⚠️ **不可用不是错误**：`LANGFUSE_*` 未配、或云上查询失败/无数据时，
+   `retrieval_metrics` 返回 `{available: false, status: "langfuse_unavailable"}`，
    由 api 层照常返 **HTTP 200** —— §4.4 要求运行指标不可用时
    **业务指标区块照常渲染**，返 500 会把整个仪表盘打白。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import httpx
 
@@ -31,15 +32,17 @@ from app.core.config import cfg
 
 logger = logging.getLogger(__name__)
 
-# Prometheus 基址。M5 起三个容器后由配置或环境变量给上；M4 为空 → 走不可用分支。
-PROMETHEUS_URL: str = (cfg("observability.prometheus_url", "")
-                       or os.environ.get("PROMETHEUS_URL", ""))
-# 测试注入用（httpx.MockTransport）—— 让「Prometheus 答得上」这条分支
-# 走**真实的 HTTP 代码路径**，而不是把内部函数打桩
-_prom_transport: httpx.BaseTransport | None = None
+# Langfuse 配置。⚠️ 实测 v1 接口对本组织全部 410，一切走 v2（【方案 §12.4】）。
+LANGFUSE_BASE_URL: str = (os.environ.get("LANGFUSE_BASE_URL", "").strip()
+                          or cfg("observability.langfuse_base_url", "") or "")
+LANGFUSE_PUBLIC_KEY: str = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+LANGFUSE_SECRET_KEY: str = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
 
-# 超时要短：仪表盘是给人看的，Prometheus 慢不该拖垮页面
-_PROM_TIMEOUT = 3.0
+# 测试注入用（httpx.MockTransport）—— 让「答得上」这条分支走**真实 HTTP 代码路径**
+_lf_transport: httpx.BaseTransport | None = None
+
+# 超时要短：仪表盘是给人看的，Langfuse 慢不该拖垮页面
+_LF_TIMEOUT = 3.0
 
 # 「当前生效」口径与 `document_service._CURRENT_VERSION_SQL` **同一份**（§3.3.1）
 _CURRENT_VERSION_SQL = """
@@ -166,105 +169,172 @@ async def hot_questions(*, limit: int = TOP_N) -> dict:
     return {"items": [{"question": r["question"], "count": r["count"]} for r in rows]}
 
 
-async def _prom_query(query: str) -> float | None:
-    """查一条 PromQL，取第一个标量。任何失败都返回 None（**由调用方决定怎么降级**）。"""
-    if not PROMETHEUS_URL:
-        return None
-    try:
-        async with httpx.AsyncClient(base_url=PROMETHEUS_URL, timeout=_PROM_TIMEOUT,
-                                     transport=_prom_transport) as client:
-            resp = await client.get("/api/v1/query", params={"query": query})
-            resp.raise_for_status()
-            payload = resp.json()
-        result = (payload.get("data") or {}).get("result") or []
-        if not result:
-            return None
-        return float(result[0]["value"][1])
-    except Exception as e:  # noqa: BLE001 —— 运行指标缺失不该让页面挂掉
-        logger.warning("Prometheus 查询失败：%s", e,
-                       extra={"event": "stats.prom_failed"})
-        return None
+def _build_metrics_query(*, measures: list[tuple[str, str]],
+                         dimensions: list[str] | None, hours: int) -> str:
+    """拼 Metrics API v2 的 `query` 参数（**一个 JSON 字符串**，实测形状）。
 
-
-# ⚠️ 指标名**按实测写**（M4 那版是占位，两处都不对）。
-#    2026-10-06 起 spanmetrics 后从 Prometheus 的
-#    `/api/v1/label/__name__/values` 直读，实际是：
-#        spanmetrics_calls_total
-#        spanmetrics_duration_milliseconds_{bucket,sum,count}
-#    占位那版写的是 `span_metrics_latency_bucket` —— 名字不对、单位也不是 ms。
-#    `duration_milliseconds_*` 的直方图单位就是**毫秒**，与前端「延迟 p50（ms）」对得上。
-_PROM_QUERIES = {
-    "latency_p50": ('histogram_quantile(0.50, '
-                    'sum(rate(spanmetrics_duration_milliseconds_bucket[5m])) by (le))'),
-    "latency_p95": ('histogram_quantile(0.95, '
-                    'sum(rate(spanmetrics_duration_milliseconds_bucket[5m])) by (le))'),
-    # HTTP 5xx 占比。http.status_code 是应用在 HTTP span 上打的属性，
-    # 已在 collector 里登记为 spanmetrics 维度（值为空串的其它 span 用 != "" 排除）。
-    # ⚠️ 分子要 `or vector(0)`：一次 5xx 都没有时该序列**不存在**，
-    #    整条表达式会算成「无结果」→ 接口返回 null → 面板显示「—」，
-    #    看起来像没接上。补 0 之后是 0/总量 = 0，语义正确。
-    "error_rate": ('(sum(rate(spanmetrics_calls_total{http_status_code=~"5.."}[5m]))'
-                   ' or vector(0))'
-                   ' / clamp_min(sum(rate(spanmetrics_calls_total'
-                   '{http_status_code!=""}[5m])), 0.001)'),
-    # 应用自己发的计数器（collector 的 metrics 管道接了 otlp 接收器才有）。
-    # ⚠️ 用**累计值**而不是 `rate(...)`：问答是稀疏事件，窗口两端数值常常相同，
-    #    rate 会算成 0（实测踩过 —— 指标明明有 331，rate 报 0），
-    #    在「token 用量」这种展示型面板上会让人以为没接上。
-    "token_usage": 'sum(llm_tokens_total)',
-}
-
-
-async def _prom_rules() -> dict | None:
-    """读 Prometheus 的**告警规则状态**（§4.4 状态卡：有 firing 即标红）。
-
-    ⚠️ 走 Prometheus 自己的 `/api/v1/rules`，**不接 Alertmanager**（§3.2.3.3）：
-       Alertmanager 解决的是通知的分组/去重/静默/分发，而本项目无人值班、
-       没有接收方。Prometheus 自己就把「当前是否越限」算好了，读出来展示即可。
+    ⚠️ `fromTimestamp` / `toTimestamp` 是**必填**的（不传直接 400）。
+    ⚠️ 窗口一律取「相对当前时间」—— 实测传很久以前的绝对日期会报
+       「fromTimestamp must be before toTimestamp」（**报错信息有误导性**）。
     """
-    if not PROMETHEUS_URL:
+    now = datetime.now(timezone.utc)
+    query: dict = {
+        "view": "observations",
+        "metrics": [{"measure": m, "aggregation": a} for m, a in measures],
+        "fromTimestamp": (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "toTimestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if dimensions:
+        query["dimensions"] = [{"field": d} for d in dimensions]
+    return json.dumps(query)
+
+
+def _extract_scalar(payload: dict | None, key: str) -> float | None:
+    """从 v2 返回里取一个标量。
+
+    ⚠️ **两种空结果都要扛住**（实测）：
+       ① `{"data":[{"count_count":0,"p95_latency":null}]}` —— 字段是 `null`
+       ② `{"data":[]}` —— 连行都没有
+       直接 `float(row[key])` 会在①上抛 TypeError，被 swallow 后变成静默的「—」。
+    """
+    rows = (payload or {}).get("data") or []
+    if not rows:
+        return None
+    value = rows[0].get(key)
+    if value is None:
         return None
     try:
-        async with httpx.AsyncClient(base_url=PROMETHEUS_URL, timeout=_PROM_TIMEOUT,
-                                     transport=_prom_transport) as client:
-            resp = await client.get("/api/v1/rules", params={"type": "alert"})
-            resp.raise_for_status()
-            payload = resp.json()
-    except Exception as e:  # noqa: BLE001 —— 告警读不到不该让页面挂掉
-        logger.warning("Prometheus 规则查询失败：%s", e,
-                       extra={"event": "stats.prom_rules_failed"})
+        return float(value)
+    except (TypeError, ValueError):
         return None
+
+
+async def _lf_query(query_json: str) -> dict | None:
+    """查一次 Metrics API v2。任何失败返回 None（由调用方决定怎么降级）。"""
+    if not (LANGFUSE_BASE_URL and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        return None
+    try:
+        async with httpx.AsyncClient(
+            base_url=LANGFUSE_BASE_URL,
+            auth=(LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY),
+            timeout=_LF_TIMEOUT, transport=_lf_transport,
+        ) as client:
+            resp = await client.get("/api/public/v2/metrics",
+                                    params={"query": query_json})
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:  # noqa: BLE001 —— 运行指标缺失不该让页面挂掉
+        logger.warning("Langfuse 查询失败：%s", e,
+                       extra={"event": "stats.langfuse_failed"})
+        return None
+
+
+def _sum_rows(payload: dict | None, key: str) -> float | None:
+    rows = (payload or {}).get("data") or []
+    vals = [r.get(key) for r in rows if r.get(key) is not None]
+    return float(sum(vals)) if vals else None
+
+
+def _error_rate_from_levels(payload: dict | None) -> float | None:
+    """按 level 分组算错误率（【方案 §8.3】实测的替代方案）。"""
+    rows = (payload or {}).get("data") or []
+    total = sum(r.get("count_count") or 0 for r in rows)
+    if not total:
+        return None
+    errs = sum(r.get("count_count") or 0 for r in rows if r.get("level") == "ERROR")
+    return errs / total
+
+
+def _node_latency_rows(payload: dict | None) -> list[dict]:
+    """按节点分组的 p95（§8.2 新增面板）。"""
+    rows = (payload or {}).get("data") or []
+    out = []
+    for r in rows:
+        name = r.get("name") or ""
+        val = r.get("p95_latency")
+        if name.startswith("node.") and val is not None:
+            out.append({"node": name[len("node."):], "p95": float(val)})
+    return sorted(out, key=lambda x: x["p95"], reverse=True)
+
+
+def _evaluate_alerts(values: dict) -> dict:
+    """告警后端自算（【方案 §8.3】方案 A）。
+
+    ⚠️ **不用 Langfuse Alerts**：实测告警没有公开 API（6 个候选端点全 404），
+       「后端读告警状态」这条路走不通。改为后端拿指标自己比阈值。
+
+    ⚠️ 返回形状与改造前**保持一致**（`{firing, pending, rules:[{name,state}]}`），
+       前端告警卡不用改。
+
+    ⚠️ 值为 None（无数据）时**不触发** —— 刚起服务、还没有流量是正常状态，
+       误报会让人把「已接好、只是还没流量」当成故障。
+
+    阈值取自 `observability.alert_thresholds`（Task 11 加进 app.yaml）。
+    """
+    thresholds = cfg("observability.alert_thresholds", {}) or {}
+    node_p95_ms = float(thresholds.get("node_p95_ms", 10000))
+    err_threshold = float(thresholds.get("http_5xx_rate", 0.05))
 
     rules: list[dict] = []
-    for group in (payload.get("data") or {}).get("groups") or []:
-        for rule in group.get("rules") or []:
-            rules.append({"name": rule.get("name", ""), "state": rule.get("state", "")})
+
+    # 规则一：按节点的 p95 越限（原 prometheus-rules.yml 的 RAGNodeP95High，
+    # 那条因为指标名对不上而**从来没触发过**，【方案 §1.1】）
+    for row in values.get("node_latency") or []:
+        state = "firing" if row["p95"] > node_p95_ms else "inactive"
+        rules.append({"name": f"RAGNodeP95High[{row['node']}]", "state": state})
+
+    # 规则二：5xx 比例（原按 http_status_code 过滤；现靠 level=ERROR，
+    # 因为实测 Metrics API **没有 HTTP 状态码维度**）
+    rate = values.get("error_rate")
+    rules.append({
+        "name": "RAGHttp5xxRate",
+        "state": ("firing" if rate is not None and rate > err_threshold
+                  else "inactive"),
+    })
+
     return {
         "firing": sum(1 for r in rules if r["state"] == "firing"),
-        "pending": sum(1 for r in rules if r["state"] == "pending"),
+        "pending": 0,          # 自算没有 pending 态（原 Prometheus 的 for: 5m 概念）
         "rules": rules,
     }
 
 
 async def retrieval_metrics() -> dict:
-    """运行指标（§4.4）—— 唯一读 Prometheus 的接口。
+    """运行指标（§4.4）—— 唯一读 Langfuse 的接口。
 
     ⚠️ 不可用时返回 `available: False`，**api 层仍返 HTTP 200**（M4-D5）。
+    ⚠️ token 用**累计值**不用 rate：问答是稀疏事件，窗口两端数值常常相同，
+       rate 会算成 0（实测踩过 —— 指标明明有 331，rate 报 0）。
     """
-    if not PROMETHEUS_URL:
-        return {"available": False, "status": "prometheus_unavailable"}
+    if not (LANGFUSE_BASE_URL and LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY):
+        return {"available": False, "status": "langfuse_unavailable"}
 
-    values = {}
-    for key, query in _PROM_QUERIES.items():
-        values[key] = await _prom_query(query)
+    hours = int(cfg("observability.metrics_window_hours", 24))
 
-    alerts = await _prom_rules()
+    lat = await _lf_query(_build_metrics_query(
+        measures=[("latency", "p50"), ("latency", "p95")],
+        dimensions=None, hours=hours))
+    # 5xx 率：实测**没有 HTTP 状态码维度**，改用 level=ERROR（【方案 §8.3】）
+    err = await _lf_query(_build_metrics_query(
+        measures=[("count", "count")], dimensions=["level"], hours=hours))
+    tok = await _lf_query(_build_metrics_query(
+        measures=[("totalTokens", "sum"), ("totalCost", "sum")],
+        dimensions=["usageType"], hours=hours))
+    nodes = await _lf_query(_build_metrics_query(
+        measures=[("latency", "p95")], dimensions=["name"], hours=hours))
 
-    # ⚠️ 加 `alerts is None` 这一支：Prometheus 起来了、规则也读到了，但 span
-    #    还没产生过（刚起服务、还没人来提问）时会「四条 query 全空」——
-    #    那种情况仍算**可用**，否则仪表盘会把「已接好、只是还没流量」
-    #    显示成「暂不可用」，让人以为接错了。
-    if all(v is None for v in values.values()) and alerts is None:
-        return {"available": False, "status": "prometheus_unavailable"}
+    values = {
+        "latency_p50": _extract_scalar(lat, "p50_latency"),
+        "latency_p95": _extract_scalar(lat, "p95_latency"),
+        "error_rate": _error_rate_from_levels(err),
+        "token_usage": _sum_rows(tok, "sum_totalTokens"),
+        "cost": _sum_rows(tok, "sum_totalCost"),
+        "node_latency": _node_latency_rows(nodes),
+    }
+
+    alerts = _evaluate_alerts(values)
+
+    if all(v is None for k, v in values.items() if k != "node_latency") and not values["node_latency"]:
+        return {"available": False, "status": "langfuse_unavailable"}
 
     return {"available": True, **values, "alerts": alerts}

@@ -10,13 +10,14 @@
 ⚠️ **`trend` 必须按天补零**：没有问答的那天也要出现，否则折线图会断开
    （§3.7.3 的响应说明）。
 
-⚠️ **`stats/retrieval` 在 M4 没有 Prometheus**，必须返回
-   `{available: false}` 且 **HTTP 200** —— §4.4 明文：运行指标不可用时
-   **业务指标区块照常渲染**，所以这里不能 500（M4-D5）。
+⚠️ **`stats/retrieval` 读的是 Langfuse**（Task 10 起换到 Metrics API v2）：
+   Langfuse 未配 / 不可达 / 窗口内无数据时返回 `{available: false}` 且 **HTTP 200**
+   —— §4.4 明文：运行指标不可用时**业务指标区块照常渲染**，所以这里不能 500（M4-D5）。
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, timedelta
 
@@ -27,6 +28,7 @@ import pytest_asyncio
 from app import db
 from app.core.security import hash_password
 from app.main import app
+from app.services import stats_service
 
 PASSWORD = "Test@12345"
 
@@ -259,105 +261,186 @@ async def test_hot_questions_is_top_10_by_default(client, admin, logs):
 
 
 # ============================================================
-# retrieval（运行指标）
+# retrieval（运行指标）—— Task 10 起读 Langfuse Metrics API v2
 # ============================================================
 
-async def test_retrieval_is_200_and_unavailable_without_prometheus(client, admin,
-                                                                   monkeypatch):
-    """★ Prometheus 不可用时必须 `available:false` + **HTTP 200**（M4-D5）。
+# 夹具里用的度量值：**每个指标一个不可能撞车的数**。
+# ⚠️ 不能只断言「有值/相等」而不挑数：Langfuse SDK 本身架在 OTel 上，
+#    两条读取路径（Prometheus 时代 vs 现在）会返回逐字节相同的值，
+#    用通用值断言等于什么都没验。这里每个数只可能在夹具里出现一次。
+_V2_LATENCY_P50 = 250.5
+_V2_LATENCY_P95 = 1300.5
+_V2_ERROR_COUNTS = {"DEFAULT": 90, "ERROR": 10}      # → 10% ，越过 5% 阈值
+_V2_TOKENS = 4321
+_V2_COST = 0.25
+_V2_NODE_P95 = {
+    "node.rerank": 15000.0,        # > 10s 阈值 → firing
+    "node.retrieve": 120.0,        # 不越 → inactive
+    "not-a-node-span": 99999.0,    # 不叫 node.*，不该进面板或告警规则
+}
+
+
+def _v2_payload(request: httpx.Request) -> dict:
+    """按 `query` 参数里要的维度，回**实测形状**的 v2 响应体。"""
+    query = json.loads(request.url.params["query"])
+    dims = [d["field"] for d in query.get("dimensions") or []]
+    if dims == ["name"]:
+        return {"data": [{"name": n, "p95_latency": v} for n, v in _V2_NODE_P95.items()]}
+    if dims == ["level"]:
+        return {"data": [{"level": k, "count_count": v}
+                         for k, v in _V2_ERROR_COUNTS.items()]}
+    if dims == ["usageType"]:
+        return {"data": [{"usageType": "input", "sum_totalTokens": _V2_TOKENS,
+                          "sum_totalCost": _V2_COST}]}
+    # 不分组：延迟
+    return {"data": [{"count_count": 100, "p50_latency": _V2_LATENCY_P50,
+                      "p95_latency": _V2_LATENCY_P95}]}
+
+
+def _langfuse_answering(monkeypatch, payload=_v2_payload) -> None:
+    """配上假密钥 + MockTransport，让「答得上」这条分支走**真实的 HTTP 代码路径**
+    （而不是把内部函数打桩 —— 打桩只能证明自己调了自己）。
+
+    ⚠️ 三个常量必须**显式设**：`stats_service` 是 **import 时**从 `.env` 读进
+       常量的，而 conftest 的 `_never_talk_to_langfuse` 只删环境变量、管不到常量
+       —— 不设的话这条用例会**真的打到 Langfuse 云上**（结果随本机 `.env` 变）。
+    """
+    monkeypatch.setattr("app.services.stats_service.LANGFUSE_BASE_URL",
+                        "http://langfuse.test")
+    monkeypatch.setattr("app.services.stats_service.LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setattr("app.services.stats_service.LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setattr(
+        "app.services.stats_service._lf_transport",
+        httpx.MockTransport(lambda request: httpx.Response(200, json=payload(request))))
+
+
+async def test_retrieval_is_200_and_unavailable_without_langfuse(client, admin,
+                                                                 monkeypatch):
+    """★ Langfuse 未配时必须 `available:false` + **HTTP 200**（M4-D5）。
 
     返 500 的话前端整个仪表盘会白屏，而 §4.4 要求**业务指标区块照常渲染**。
 
-    ⚠️ **必须显式打桩成空**：M5 起 app.yaml 里配了 `observability.prometheus_url`
-       的默认值，不再依赖"没配"这个前提 —— 不显式清空的话，这条用例的结果
-       会取决于**本机 Prometheus 有没有在跑**（本地起着就变红，CI 上就绿）。
+    ⚠️ **必须显式打桩成空**：常量是 import 时从 `.env` 读的（真密钥），
+       不清空的话这条用例会真的去查云端，结果取决于本机 `.env` 与网络。
     """
-    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "")
+    for name in ("LANGFUSE_BASE_URL", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+        monkeypatch.setattr(f"app.services.stats_service.{name}", "")
 
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     assert r.status_code == 200, "不可用不是错误，不能 500"
     body = r.json()
     assert body["available"] is False
-    assert body.get("status") == "prometheus_unavailable"
+    assert body.get("status") == "langfuse_unavailable"
 
 
-async def test_retrieval_returns_metrics_when_prometheus_answers(client, admin,
-                                                                monkeypatch):
-    """Prometheus 能答上时的分支 —— 用 MockTransport 走**真实的 HTTP 代码路径**，
-    而不是把内部函数打桩（打桩只能证明自己调了自己）。"""
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "status": "success",
-            "data": {"resultType": "vector", "result": [{"value": [0, "0.42"]}]},
-        })
-
-    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "http://prom.test")
-    monkeypatch.setattr("app.services.stats_service._prom_transport",
-                        httpx.MockTransport(handler))
+async def test_retrieval_returns_metrics_when_langfuse_answers(client, admin,
+                                                              monkeypatch):
+    """Langfuse 能答上时的分支 —— 四个查询各自返回值，逐个对号。"""
+    _langfuse_answering(monkeypatch)
 
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["available"] is True
-    assert body["latency_p95"] is not None or body["error_rate"] is not None
+    assert body["latency_p50"] == _V2_LATENCY_P50
+    assert body["latency_p95"] == _V2_LATENCY_P95
+    assert body["error_rate"] == pytest.approx(
+        _V2_ERROR_COUNTS["ERROR"] / sum(_V2_ERROR_COUNTS.values()))   # ERROR 10/100
+    assert body["token_usage"] == _V2_TOKENS
 
 
 async def test_retrieval_reports_firing_alerts(client, admin, monkeypatch):
     """告警状态（§4.4）—— 状态卡「有 firing 即标红」的数据源。
 
-    读的是 Prometheus 自己的 `/api/v1/rules`，**不接 Alertmanager**。
+    ⚠️ 改**后端自算**（【方案 §8.3】方案 A）：Langfuse 告警没有公开 API
+       （6 个候选端点全 404），所以阈值比较落在后端。返回形状与改造前一致
+       （`{firing, pending, rules:[{name,state}]}`），前端不用改。
     """
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/api/v1/rules"):
-            return httpx.Response(200, json={"status": "success", "data": {"groups": [
-                {"name": "campus-rag", "rules": [
-                    {"name": "RAGNodeP95High", "state": "firing"},
-                    {"name": "RAGSpanErrorRateHigh", "state": "inactive"},
-                ]},
-            ]}})
-        return httpx.Response(200, json={
-            "status": "success", "data": {"resultType": "vector",
-                                          "result": [{"value": [0, "1.23"]}]}})
-
-    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "http://prom.test")
-    monkeypatch.setattr("app.services.stats_service._prom_transport",
-                        httpx.MockTransport(handler))
+    _langfuse_answering(monkeypatch)
 
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["alerts"]["firing"] == 1
-    assert body["alerts"]["pending"] == 0
-    assert [x["name"] for x in body["alerts"]["rules"]] == [
-        "RAGNodeP95High", "RAGSpanErrorRateHigh"]
+    alerts = r.json()["alerts"]
+    assert alerts["pending"] == 0, "自算没有 pending 态"
+    assert alerts["firing"] == 2, "rerank p95 越限 + 错误率越限"
+    # 节点规则按 p95 倒序，`not-a-node-span` 不在其中（只统计 `node.*`）
+    assert [x["name"] for x in alerts["rules"]] == [
+        "RAGNodeP95High[rerank]", "RAGNodeP95High[retrieve]", "RAGHttp5xxRate"]
+    assert [x["state"] for x in alerts["rules"]] == ["firing", "inactive", "firing"]
 
 
-async def test_retrieval_available_even_before_any_span(client, admin, monkeypatch):
-    """★ Prometheus 活着、规则读到了，但**还没有流量**（四条 query 全空）时，
-    必须报 `available: true`。
+async def test_retrieval_service_exposes_cost_and_node_latency(monkeypatch):
+    """`cost` / `node_latency`（§8.2 新增面板）—— 在 **service 层**锁字段名与解析。
 
-    报 false 的话，仪表盘会把「已接好、只是还没人提问」显示成「暂不可用」，
-    让人以为接错了、跑去查配置。
+    ⚠️ 为什么不走 HTTP：`RetrievalMetricsResponse` 要到 Task 12 才补这两个字段，
+       Pydantic v2 默认 ignore 多余键 → 这一层还看不见它们。但字段名
+       （`sum_totalCost`、`node.*` 前缀）是**实测来的**，取错了面板恒显示「—」，
+       所以现在就得锁住。
     """
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/api/v1/rules"):
-            return httpx.Response(200, json={"status": "success", "data": {"groups": []}})
-        return httpx.Response(200, json={
-            "status": "success", "data": {"resultType": "vector", "result": []}})
+    _langfuse_answering(monkeypatch)
 
-    monkeypatch.setattr("app.services.stats_service.PROMETHEUS_URL", "http://prom.test")
-    monkeypatch.setattr("app.services.stats_service._prom_transport",
-                        httpx.MockTransport(handler))
+    body = await stats_service.retrieval_metrics()
+
+    assert body["cost"] == _V2_COST
+    assert body["node_latency"] == [{"node": "rerank", "p95": 15000.0},
+                                    {"node": "retrieve", "p95": 120.0}]
+
+
+async def test_retrieval_200_when_langfuse_answers_empty(client, admin, monkeypatch):
+    """★ Langfuse 答得上、但窗口内**一条数据都没有**（两种空结果形态都在）时，
+    仍必须 **HTTP 200**（M4-D5）—— 业务指标区块不能被这一块拖白。
+
+    ⚠️ 这条用例锁的是**行为变了**的那一半：自建栈时代读 `/api/v1/rules` 能证明
+       「服务活着」，所以「没流量」判 `available: true`；Metrics API 没有等价的
+       存活探针，全空与「不可达」分不开，一律按不可用报（前端显示「暂不可用」），
+       而 `langfuse_unavailable` 就是 T14 验收 B8 要看到的那个 status。
+    """
+    def payload(request: httpx.Request) -> dict:
+        query = json.loads(request.url.params["query"])
+        if query.get("dimensions"):
+            return {"data": []}                      # 空结果形态二：空数组
+        return {"data": [{"count_count": 0,         # 空结果形态一：字段是 null 不是 0
+                          "p50_latency": None, "p95_latency": None}]}
+
+    _langfuse_answering(monkeypatch, payload)
+
+    r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
+
+    assert r.status_code == 200, "不可用不是错误，不能 500"
+    body = r.json()
+    assert body["available"] is False
+    assert body.get("status") == "langfuse_unavailable"
+
+
+async def test_retrieval_available_when_only_some_metrics_present(client, admin,
+                                                                  monkeypatch):
+    """正控：答得上、且**只要有任意一个指标有值**就算可用。
+
+    窗口里还没产生 LLM 延迟（刚起服务 / 这一小时没人提问）不代表接错了 ——
+    判成不可用会让人跑去查配置。注意 `error_rate` 算出来是 **0.0**，
+    而 `0.0` 是**有值**：不能跟「没数据」混为一谈。
+    """
+    def payload(request: httpx.Request) -> dict:
+        query = json.loads(request.url.params["query"])
+        dims = [d["field"] for d in query.get("dimensions") or []]
+        if dims == ["level"]:
+            return {"data": [{"level": "DEFAULT", "count_count": 7}]}
+        return {"data": []}
+
+    _langfuse_answering(monkeypatch, payload)
 
     r = await client.get("/api/admin/stats/retrieval", headers=_h(admin["token"]))
 
     body = r.json()
-    assert body["available"] is True, "读到了规则就不算不可用"
+    assert body["available"] is True, "有任一指标有值就不算不可用"
     assert body["latency_p95"] is None
-    assert body["alerts"] == {"firing": 0, "pending": 0, "rules": []}
+    assert body["error_rate"] == 0.0
+    assert body["alerts"] == {"firing": 0, "pending": 0,
+                              "rules": [{"name": "RAGHttp5xxRate",
+                                         "state": "inactive"}]}
 
 
 async def test_student_cannot_read_stats(client):
