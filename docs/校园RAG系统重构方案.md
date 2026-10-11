@@ -42,9 +42,9 @@
 > | | 做 / 不做 |
 > |---|---|
 > | **不做** | 值班表、告警通知渠道（邮件/短信/webhook）、发布流程、多环境部署、容量规划 |
-> | **做** | `trace_id` 贯通、JSON 结构化日志、**指标栈（Collector + Prometheus + Jaeger）**、仪表盘的耗时分位数与告警状态（即 3.2.3 的全部内容 + 4.4 的面板） |
+> | **做** | `trace_id` 贯通、JSON 结构化日志、**可观测性（Langfuse 云：trace 树 + Metrics API + 告警状态）**、仪表盘的耗时分位数与告警状态（即 3.2.3 的全部内容 + 4.4 的面板） |
 >
-> 三个可观测容器**是"工具"，不是"运维体系"**——它们由启动脚本一并拉起，不需要人值守。真正属于"运维体系"的（值班、通知渠道、发布流程）都不做，见 3.2.3.6。
+> 可观测性走 Langfuse 云**是"工具"，不是"运维体系"**——它不占本地容器、不需要人值守（2026-10-11 改造：曾自建 Collector + Prometheus + Jaeger 三容器，已删，见 3.2.3）。真正属于"运维体系"的（值班、通知渠道、发布流程）都不做，见 3.2.3.6。
 
 ### 1.2 决策清单
 
@@ -165,11 +165,11 @@ backend/
 │   ├── core/
 │   │   ├── config.py            配置加载（YAML + .env，禁止硬编码密钥）
 │   │   ├── logging.py           结构化日志（JSON + trace_id 注入 + 脱敏，见 3.2.3.2）
-│   │   ├── telemetry.py         OTel 初始化、trace_id 生成与传播（见 3.2.3.1）
+│   │   ├── observability.py     可观测性唯一出口：Langfuse 客户端 + 脱敏钩子 +
+│   │   │                        trace_id 取值（见 3.2.3.1；取代原 telemetry.py）
 │   │   ├── security.py          JWT 签发/校验、密码哈希
 │   │   ├── deps.py              依赖注入：current_user、require_role
-│   │   ├── exceptions.py        统一异常 + 全局处理
-│   │   └── metrics.py           业务指标落 PostgreSQL + 运行指标 OTLP 导出（见 3.2.3.3）
+│   │   └── exceptions.py        统一异常 + 全局处理
 │   ├── api/
 │   │   ├── auth.py              login / refresh / logout / me（见 3.7.1）
 │   │   ├── users.py             用户管理（/api/admin/users/*，见 3.7.3）
@@ -284,7 +284,7 @@ core/deps.py      构造 UserContext
 > **分两类，不可互相替代**——这是本节的组织原则：
 >
 > - **业务可观测**：答「系统答得好不好」。落 PostgreSQL，供评测、仪表盘、消融实验。**已有设计，保留不变。**
-> - **运行时可观测**：答「刚才那次请求为什么慢 / 为什么错」。走 OTel 三支柱，供排障与告警。**本节新增——原方案这块基本空白。**
+> - **运行时可观测**：答「刚才那次请求为什么慢 / 为什么错」。走 Langfuse，供排障与告警。**本节新增——原方案这块基本空白。**
 
 **业务可观测（保留）**
 
@@ -295,29 +295,45 @@ core/deps.py      构造 UserContext
 | 降级事件 | 重排超时、**路由降级**、BM25 索引失效、**历史压缩失败**等 → 落 `degradation_events` 表 | 仪表盘"降级次数"的**数据源** |
 | 问答日志 | `qa_logs` 表 | 评测与统计的原始数据；拒答/规则命中/token 用量都在这里 |
 
-**运行时可观测（新增）——以 OpenTelemetry（OTel）为骨架**
+**运行时可观测（新增）——以 Langfuse（LLM 专用可观测平台）云为骨架**
 
-**为什么用 OTel 而不是自研**：
+> ⚠️ **本节曾以自建 OTel 栈（Collector + Jaeger + Prometheus）为骨架，2026-10-11 已整体换成 Langfuse 云。**
+> 两版理由**都保留**：换掉的原因，正是当初选 OTel 的理由被逐条推翻——写下来免得将来又绕回去。
+
+**为什么一度选 OTel 而不是自研**（背景，非现行方案）：
 
 - **一次解决三件事**：span 树（tracing）+ 指标导出（metrics）+ 统一关联（logs 带 trace_id）。自研要写三套，且互相拼不起来
 - **接入成本低于预期**（实测）：OTel 核心 SDK **已在依赖树里**——`chromadb` 的传递依赖带进了 `opentelemetry-sdk@1.42.1` 与 `opentelemetry-exporter-otlp-proto-grpc@1.42.1`
 - **图节点埋点可自动化**：`opentelemetry-instrumentation-langchain`（PyPI 实测 `0.62.4`）能把 LangGraph 节点变成 span——**本方案要的「节点级耗时追踪」不必手写埋点**
 - **厂商中立**：将来换后端（Jaeger → Tempo → 商业 APM）不改代码
 
+**为什么最终换 Langfuse**（现行方案）：
+
+| 理由 | 说明 |
+|---|---|
+| **自建那套的告警会「静默失效」** | 实测发现 `prometheus-rules.yml` 的 `RAGNodeP95High` 查的是**不存在的指标名**（collector 0.115.1 实际产出 `spanmetrics_duration_milliseconds_bucket`，规则写的是 `spanmetrics_latency_bucket`）——空结果不算错，所以规则**永远不可能触发、也看不出异常**。自己维护 PromQL 与采集器版本的耦合，代价大于收益 |
+| **LLM 专用能力是白捡的** | 成本（按模型自动折算）、token 输入/输出天然分开、generation 级观测——自建那套要么没有，要么只有一个合计 |
+| **不再运维三个容器** | 采集器 / 时序库 / trace 库全部不自建，云平台开箱即用 |
+| **换的成本可控** | 上一版已把埋点**收口在四处**（见 3.2.3.4），所以这次是「换实现」而不是「重新铺」 |
+
+**代价与缓解（必须写明）**：正文（提问、检索片段、答案）**会上传到 Langfuse 云**——从「数据不出网」变为「**标识符不出网**」。
+缓解措施是**导出前脱敏**：学号 / 手机号 / 身份证在数据离开应用之前打码（见 3.2.3.2），
+配套测试断言**实际发出的字节**（不是 SDK 的自我声明）。这条口径的落地处：3.2.3.6 与附录 C.2.1。
+
 ##### 3.2.3.1 `trace_id` 契约（原方案最大的空洞）
 
-**`trace_id` 直接采用 OTel 的 128-bit trace id**（W3C Trace Context 格式），**不自造**。
+**`trace_id` 采用 Langfuse 的 32 位十六进制 trace id**——格式与 OTel 的 128-bit trace id 相同（W3C Trace Context 兼容），**不自造**。
 
 | 项 | 约定 |
 |---|---|
-| **生成位置** | HTTP 入口中间件。请求头无 `traceparent` 则新建，有则沿用（便于将来接网关或前端串联） |
-| **传播格式** | W3C Trace Context（`traceparent` / `tracestate`） |
-| **注入日志** | 每条日志必带 `trace_id`（32 位十六进制）与 `span_id`（16 位） |
+| **生成位置** | Langfuse SDK。HTTP 入口中间件用 `start_as_current_observation` 开根观测，trace_id 由 SDK 生成（**请求头带合法 `traceparent` 则沿用**，便于将来接网关或前端串联） |
+| **传播格式** | W3C Trace Context（`traceparent` / `tracestate`）——Langfuse 兼容，入站上下文按此解析 |
+| **注入日志** | 每条日志必带 `trace_id`（32 位十六进制）与 `span_id`（16 位）；**未配置 Langfuse 密钥时兜底为全 0 串**，不是 `null`（见 3.2.3.2） |
 | **跨 SSE 长连接** | 一次 SSE 流**全程同一个 `trace_id`**，流内所有 `token` / `stage` / `verify` 事件共享 |
-| **返回前端** | 响应头回传 `traceparent`；出错提示里展示 trace_id，用户报障时可直接定位 |
+| **返回前端** | 响应头回传 `traceparent`（值即 Langfuse trace_id）与 `x-trace-id`；出错提示里展示 trace_id，用户报障时可直接定位 |
 | **后台任务** | ⚠️ **必须显式传递**，见下 |
 
-> ⚠️ **后台任务不能靠 contextvars 隐式继承**。上传 → 解析 → 嵌入是**脱离请求生命周期**的长任务，asyncio 任务可能在不同 context 中运行，隐式继承会丢。做法：**入口处把 `trace_id` 写进 `ingestion_tasks` 表**，任务各阶段从表里取。
+> ⚠️ **后台任务不能靠 contextvars 隐式继承**。上传 → 解析 → 嵌入是**脱离请求生命周期**的长任务，asyncio 任务可能在不同 context 中运行，隐式继承会丢。做法：**入口处把 `trace_id` 写进 `ingestion_tasks` 表**，任务各阶段从表里取，续接用 Langfuse 的 `trace_context={"trace_id": ..., "parent_span_id": ...}`（见 3.2.3.4）。
 
 > **`trace_id` 与 `session_id` 不是一回事，两者都要带**：
 >
@@ -345,130 +361,139 @@ core/deps.py      构造 UserContext
 > - 需要排查时**按 `trace_id` 去 `qa_logs` 取**——那里本来就有全文，且受 ACL 保护
 > - 密钥 / 令牌绝不入日志（附录 A 第 1 条已有硬编码密钥的教训）
 >
-> 日志文件沿用现有 `RotatingFileHandler` 轮转，**不引入日志检索平台**（见 3.2.3.6）。
+> 日志文件沿用现有 `RotatingFileHandler` 轮转，**不引入日志检索平台**（见 3.2.3.6）。**日志仍留在本地**——Langfuse 不做日志存储。
 
-**⚠️ span 属性必须同级脱敏——自动埋点默认会记录问答原文**
+**⚠️ 上传 Langfuse 的数据必须脱敏——自动捕获默认就会把正文发出去**
 
-上面的规则只管住了**日志**。但 3.2.3.4 把节点埋点交给了 `opentelemetry-instrumentation-langchain` **自动埋点**，而**这类埋点的默认行为就会把 prompt 与模型返回内容写进 span 属性**（OpenLLMetry 的 `TRACELOOP_TRACE_CONTENT`、OTel GenAI 语义约定里的内容捕获，默认都是开的）。
-
-**后果**：日志干净了，**Jaeger 里却摆着学号、姓名、成绩原文**——而 Jaeger UI 会给任何能访问它的人看。
-
-**约定**：
+上面的规则只管住了**日志**。而**上传到 Langfuse 的是整段正文**（prompt、模型返回、检索片段），且 Langfuse 的观测**默认自动捕获输入输出与异常**（官方原话："automatically capture inputs, outputs, timings, and errors"）。所以「span 上只有元数据」不是白捡的，要显式做三件事：
 
 | 项 | 做法 |
 |---|---|
-| 关闭内容捕获 | 显式设置对应环境变量（如 `TRACELOOP_TRACE_CONTENT=false`）——**具体变量名随埋点库版本而变，接入时必须实测确认**（见下） |
-| span 上只保留 | 节点名、耗时、召回条数、token 数、状态码——**不含任何正文** |
-| Jaeger 的访问范围 | **仅内网、仅管理员**可访问；不对 User 端暴露 |
-| 验收 | M5 的 trace 可还原验收里，**加一条「抽查 span 属性不含正文」** |
+| **导出前打码（主要防线）** | 官方钩子 `mask_otel_spans`——它在**导出阶段、数据离开应用之前**跑，逐 span 打码。学号 / 手机号 / 身份证 / 邮箱在**本地就打码**，上传的是打码后文本（打码形如 `[REDACTED:student_id]`） |
+| **节点观测不捕获输入输出** | 节点观测不把正文交给 SDK——本 SDK 版本（实测签名）**没有** `capture_input` / `capture_output` 参数，等价做法是显式传 `input=None, output=None`；异常只写 `metadata={"rag.error": type(e).__name__}`，**不把异常对象交给 SDK**（LLM 异常的 message 可能回显 prompt） |
+| **访问范围** | Langfuse 云按项目成员权限控制，密钥只进 `.env`；**不对 User 端暴露** |
+| **验收** | 用**本地捕获服务器冒充云端**、断言**实际发出的字节**：原始学号不出现、打码标记出现；并断言节点观测不含输入输出正文（见第六章的测试策略） |
 
-> ⚠️ **这条必须实测**：不同版本的 instrumentation 对内容捕获的开关名与默认值不同（有的默认开、有的默认关）。**在 M0 接入埋点时，先跑一次真实问答，然后去 Jaeger 里翻那次的 span 属性，确认没有正文**——不能只看文档就认为关掉了。
+> ⚠️ **打码规则必须配置化**：`app.yaml` 顶部写明「规则词表必须配置化」，脱敏规则同样不写死在代码里——词表与正则在 `observability.masking.patterns`（`enabled` 可整体关掉）。
+
+> ⚠️ **两套脱敏并存，别只留一套**：本地日志走 `logging.py` 的**键名黑名单**（日志是键值结构，键名可枚举）；上传 Langfuse 的走**模式正则**（input/output 是整段文本，学号藏在句子中间，键名法抓不到）。日志那套管不住 span 里的整段 prompt，Langfuse 那套管不住本地日志。
 
 ##### 3.2.3.3 指标栈与仪表盘（追踪数据可视化）
 
-**决策：引入指标栈（OTel Collector + Prometheus），把 trace 派生的运行数据接到管理端仪表盘上。**
+**决策：运行指标改由 Langfuse Metrics API v2 提供，接到管理端仪表盘上**——**面板保留，数据源换掉**。
 
-> 本节原先把「指标导出 + 分位数 + 告警」列为**必须**，而 3.2.3.6 又写「不建 Collector、单容器 Jaeger 即可」——两者不能同时成立：**Jaeger 只做 trace，不存指标、不算分位数**。现在按「引入指标栈」定案，3.2.3.6 相应收窄。
+> 本节曾按「引入自建指标栈（OTel Collector + Prometheus）」定案；**2026-10-11 随 Langfuse 改造一并换源**，
+> 上一版为此引入的三个容器已删（见 3.2.3.6）。**仪表盘的交付物不变**：耗时分位数、错误率、token 用量、告警状态照旧在，另白捡三项（成本 / token 拆分 / 按节点分组，见下）。
 
-**数据流**（一条链路，三处消费）：
+**数据流**（一条链路）：
 
 ```
 FastAPI + LangGraph（应用）
-        │ OTLP（自动埋点，见 3.2.3.4）
+        │ Langfuse Python SDK（手工埋点，见 3.2.3.4）
         ▼
-OTel Collector（单实例）
-        ├─ spanmetrics connector ──→ 从 span 派生指标（节点耗时直方图、调用计数、错误计数）
-        ├─ ──→ Prometheus          存指标（拉取）
-        └─ ──→ Jaeger              存 trace（单次请求的完整 span 树）
-                        │
-   Prometheus ◄── PromQL ──┐
-                           ▼
-              后端 `stats/*` 接口（见 3.7.3）
-                           ▼
-                  管理端仪表盘（见 4.4）
-                           │ 点异常 → 深链到 Jaeger
-                           ▼
-                     Jaeger UI（看具体是哪次请求）
+   Langfuse 云 ────────────────────────────────────────┐
+        ├── Trace 树（图节点 span + LLM generation）    │ ← 取代 Jaeger
+        ├── Metrics API v2（p50/p95、token、cost）      │ ← 取代 PromQL
+        └── Alerts（阈值告警，通知走 Slack/Webhook）     │ ← 可选，见下
+                    │                                   │
+        后端 `stats/retrieval`（见 3.7.3）◄─ httpx 查询 ─┘
+                    ▼
+           管理端仪表盘「运行指标」面板（见 4.4）
+                    │ 用响应头里的 x-trace-id 去 Langfuse 搜这条 trace
+                    ▼
+             Langfuse UI（看单条 trace 的完整 span 树）
+
+   旁路（不变）：日志 → 本地 JSON 文件（带 trace_id）；业务指标 → PostgreSQL
 ```
 
-**关键点：`spanmetrics` connector 是「追踪数据能上仪表盘」的那一环**——它把 span 实时聚合成 Prometheus 指标（按 span 名、状态、耗时分桶）。**没有它，Jaeger 里的 trace 就只是一个个孤立的请求，出不了分位数与趋势**。这也是原方案「单容器 Jaeger 即可」不成立的原因。
+**关键点：Metrics API v2 是「追踪数据能上仪表盘」的那一环**——它把观测聚合成可查询的指标（按观测名分组、按 level 过滤）。
+与自建栈的差别：**trace 与指标本来就是同一份数据、同一家**，不用再协调 Prometheus 与 Jaeger 之间的口径。
 
-**仪表盘上能看到什么**（全部来自 Prometheus，不再从 PostgreSQL 现算）：
+**仪表盘上能看到什么**（全部来自 Langfuse，不再从 PostgreSQL 现算）：
 
-| 面板 | 指标 | PromQL 形态（示意） |
+| 面板 | 指标 | 查询形态（示意，见 3.7.3） |
 |---|---|---|
-| 节点耗时分位数 | p50 / p95 / p99，按节点维度 | `histogram_quantile(0.95, sum by (le, node) (rate(node_duration_bucket[5m])))` |
-| 端到端延迟 | p50 / p95 / p99 | 同上，不按节点分组 |
-| 错误率 | HTTP 5xx 比例、LLM 调用失败率 | `rate(http_5xx[5m]) / rate(http_total[5m])` |
-| LLM token 用量 | 输入 / 输出，按时间 | `sum(rate(llm_tokens_total[1h]))` |
-| 检索召回条数 | 分布 | 直方图 |
-| 降级次数 | 按 `kind` 分组 | 来自 `degradation_events`（业务表，非 Prometheus） |
+| 节点耗时分位数 | p50 / p95 / **按节点分组** | `{"view":"observations","metrics":[{"measure":"latency","aggregation":"p95"}],"dimensions":[{"field":"name"}]}` |
+| 端到端延迟 | p50 / p95 | 同上，不带 `dimensions` |
+| 错误率 | 观测 `level=ERROR` 占比（⚠️ **不是按 HTTP 状态码**——Metrics API 没有该维度，见 3.7.3） | 带 `filter level=ERROR` 的 `count` 查询 ÷ 全量 `count` |
+| LLM token 用量 | 输入 / 输出**分开** | `sum(inputTokens)` / `sum(outputTokens)` |
+| **LLM 成本**（新增） | 按模型自动折算 | `sum(totalCost)` |
+| 降级次数 | 按 `kind` 分组 | 来自 `degradation_events`（业务表，非 Langfuse） |
 
-> **`degradation_events` 仍走 PostgreSQL**：它是**业务语义**的降级记录（重排超时、路由降级、BM25 索引失效……），不是运行指标。仪表盘的「降级次数」面板继续读它，与 Prometheus 那几块并列展示。
+> **`degradation_events` 仍走 PostgreSQL**：它是**业务语义**的降级记录（重排超时、路由降级、BM25 索引失效……），不是运行指标。仪表盘的「降级次数」面板继续读它，与 Langfuse 那几块并列展示。
 
 **「追踪的可观测数据」怎么落到仪表盘上**
 
-仪表盘不直接展示 raw trace（那是 Jaeger 的活），而是展示**由 trace 聚合出来的指标**，并提供下钻：
+仪表盘不直接展示 raw trace（那是 Langfuse UI 的活），而是展示**由观测聚合出来的指标**，并提供下钻：
 
 1. 仪表盘看到「`rerank` 节点 P95 异常抬升」
-2. **点该面板 → 深链到 Jaeger**，带上时间范围与 `service.name` + span 名过滤
-3. Jaeger 里看到那段时间的所有 `rerank` span，点开任一条看完整 span 树（含它父级的 `route` / 子级的模型调用）
+2. 面板下方给出提示：**拿那条回答响应头里的 `x-trace-id` 去 Langfuse 搜**（云控制台没有免登录深链，做成手工跳转）
+3. Langfuse UI 里看到 `node.rerank` 观测，点开任一条看完整 trace 树（含它父级的 `route` / 子级的模型调用）
 
-> 这样分工：**Prometheus 答「什么时候、哪个环节变慢了」，Jaeger 答「那一次具体慢在哪一步」**。两者靠同一份 OTel 数据，不重复埋点。
+> 这样分工：**Metrics API 答「什么时候、哪个环节变慢了」，Langfuse UI 答「那一次具体慢在哪一步」**。两者是同一份数据，不重复埋点。
 
 **告警**
 
 | 监控项 | 依据 | 呈现 |
 |---|---|---|
-| 错误率 / P95 延迟 / 降级速率 / 拒答率 | Prometheus 告警规则（阈值在 M5 用真实流量标定） | ① 仪表盘状态卡标红 ② **`/api/v1/rules` 的告警状态回读**，同一个面板显示"当前有几条规则处于 firing" |
+| 节点 P95 延迟 / 5xx 比例 | **后端自算**：阈值配在 `app.yaml` 的 `observability.alert_thresholds`，`stats_service` 取指标与阈值比较 | ① 仪表盘状态卡标红 ② `stats/retrieval` 的 `alerts` 字段回读，显示"当前有几条规则处于 firing"（阈值在 M5 用真实流量标定） |
 
-> **不引入 Alertmanager（无接收方）**：它解决的是**通知的分组、去重、静默、多渠道分发**——而本项目「不真上线」（1.1）、无人值班，**没有接收方**。Prometheus 自身的告警规则足以算出「当前是否越限」，仪表盘把它读出来展示即可。
+> ⚠️ **为什么阈值在我们这边，而不是配在 Langfuse Alerts**：Langfuse 的告警**只有 UI、没有公开 API**（实测六个候选端点全部 404），
+> 「后端读告警状态 → 仪表盘标红」这条路走不通。改为**后端自己拿指标比阈值**——阈值配置化，与既有做法一致。
+> 代价是**两处阈值不会自动同步**：Langfuse UI 里若也配了告警，那是用于 Slack/Webhook 通知的，两者各管各的。
+
+> **不引入自建告警通知链（无接收方）**：通知的分组、去重、静默、多渠道分发——本项目「不真上线」（1.1）、无人值班，**没有接收方**。
+> 后端把「当前是否越限」算出来给仪表盘展示即可。改用 Langfuse 后这一点不变：**Langfuse Alerts 的通知渠道（Slack / Webhook）同样是可选而非必配**——配了能收到推送，不配也不影响仪表盘标红。
 >
-> 若日后真要上线，接 Alertmanager 只是加一个容器 + 配置通知渠道，**指标与规则不用改**——所以现在不加不损失什么。
+> 若日后真要上线，把通知渠道配上即可，**指标与阈值定义不用改**——所以现在不做不损失什么。
 
 ##### 3.2.3.4 接入范围与采样策略
 
-**接入范围**（自动埋点）：
+**接入范围**（**手工埋点**，四个收口点——取代原「自动埋点」方案）：
 
-| 层 | 包 | 实测版本 |
-|---|---|---|
-| HTTP | `opentelemetry-instrumentation-fastapi` | `0.66b0` |
-| **图节点** | `opentelemetry-instrumentation-langchain` | `0.62.4` |
-| DB / HTTP 客户端 | PostgreSQL、httpx 自动埋点 | 可选 |
+| # | 收口点 | 位置 | 覆盖范围 |
+|---|---|---|---|
+| 1 | 图节点 | `graph/builder.py` 的 `traced()` → `observability.observe_node()` | **一个装饰器包住全部图节点**；调用点一行不改 |
+| 2 | LLM 调用 | `core/llm.py` 的 `complete` / `complete_json` / `stream_raw` | 全部模型调用，包成 generation 观测；**usage 手填**（本项目 LLM 客户端是手写 httpx，自动集成抓不到，而这几处本来就在解析 usage） |
+| 3 | HTTP 入口 | `main.py` 的 `trace_middleware` | 全部请求；5xx 标 `level=ERROR`（错误率面板靠它） |
+| 4 | 后台任务续接 | `api/chat.py`、`services/document_service.py` 的 `attach_trace()` | 两处；`trace_context` 显式续接（替代原 `reattach()`） |
 
-**需要起的组件**（见 3.2.3.3 的数据流）：
+> **为什么手工埋点**：① 这条是决策时负责人指定的接入方式；② 与既有代码口径一致——`builder.py` 本来就写着「手工埋点、不用自动埋点」；③ 本项目要的是**节点级语义**的观测，且脱敏要求「精确知道每条观测带了什么数据」。自动集成（`opentelemetry-instrumentation-langchain` 那类）满足不了后两条。
+> 代价是四个收口点各写一次；好处是**换后端只换实现**——上一版把埋点收口在四处，这次换 Langfuse 才没变成重新铺。
+
+**需要起的组件**：
 
 | 组件 | 形态 | 作用 |
 |---|---|---|
-| OTel Collector | 单容器，含 `spanmetrics` connector | 收 OTLP；把 span 聚合成指标；分发到 Prometheus 与 Jaeger |
-| Prometheus | 单容器，保留期 15 天 | 存指标，供 `stats/*` 用 PromQL 查询 |
-| Jaeger | 单容器 | 存 trace，供下钻查看单次请求的 span 树 |
+| Langfuse | **云服务，无本地组件** | trace 存储、Metrics API v2、Alerts（通知渠道可选） |
 
-> **三个容器，不做集群、不做高可用**（3.2.3.6）。开发期可只起 Collector + console exporter，Prometheus / Jaeger 按需起。
+> **不再自建任何可观测容器**：Collector / Prometheus / Jaeger 与三个配置文件（`otel-collector-config.yaml` / `prometheus.yml` / `prometheus-rules.yml`）已删（见 3.2.3.6）。开发时本地只起 PostgreSQL（附录 G）。
+>
+> ⚠️ **不配 `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` = 完全不发外网**（跑测试、跑 CLI 时就是这个状态）——行为与改造前「不配 `OTEL_EXPORTER_OTLP_ENDPOINT` 就不挂 exporter」一致。
 
 **采样策略**：
 
-- 本项目**流量低**（校园内网），**默认全量采样**，不设采样率
-- 若将来流量上来改 head sampling，有一条**硬约束**：**错误与降级的 trace 不能被采样丢弃**。head sampling 做不到这点（采样决策在请求入口就做了，那时还不知道会不会失败），需改用**尾采样**，或对错误强制 `ALWAYS_ON`
-- 采样率必须做成**配置项**，便于临时调成全量排查
+- **应用侧不实现采样**（代码里不设采样率）：需要时由 Langfuse SDK 的 `sample_rate` 参数控制（本项目维持默认），不再自研
+- 本项目**流量低**（校园内网），**默认全量上报**
+- 若将来流量上来要降采样，有一条**硬约束**：**错误与降级的 trace 不能被丢弃**（head sampling 在请求入口就决策，那时还不知道会不会失败）
 
 ##### 3.2.3.5 必须 vs 加分
 
 | 档 | 内容 | 判据 |
 |---|---|---|
-| **必须** | ① `trace_id` 生成与传播（3.2.3.1）② 日志 JSON 化 + 脱敏（3.2.3.2）③ **指标栈接入：Collector（含 spanmetrics）+ Prometheus**（3.2.3.3）④ **仪表盘的耗时分位数与错误率面板**（4.4） | 不做就不叫生产标准 |
-| **加分** | ⑤ 图节点自动成 span（Jaeger 可视化完整图执行轨迹 + 仪表盘深链下钻）⑥ 采样策略（3.2.3.4）⑦ Prometheus 告警规则 + 面板标红 | 答辩展示价值高 |
+| **必须** | ① `trace_id` 生成与传播（3.2.3.1）② 日志 JSON 化 + 脱敏（3.2.3.2）③ **Langfuse 接入：四个收口点埋点 + 导出前脱敏钩子**（3.2.3.4）④ **仪表盘的耗时分位数与错误率面板**（4.4，数据源 Metrics API v2） | 不做就不叫生产标准 |
+| **加分** | ⑤ 图节点观测成完整 span 树（Langfuse UI 可视化图执行轨迹 + 面板下钻）⑥ **LLM 成本面板与 token 输入/输出拆分**（改造前完全没有）⑦ **告警阈值标红**（后端自算，阈值配置化，见 3.2.3.3） | 答辩展示价值高 |
 
 ##### 3.2.3.6 明确不做（防止施工时无限扩张）
 
 | 不做 | 原因 |
 |---|---|
-| 多服务分布式追踪 | **单服务**，无跨服务链路，OTel 的分布式能力在这里用不上 |
-| 商业 APM（Datadog / New Relic 等） | 内网部署、无预算、数据不应出网 |
-| **Alertmanager（告警通知）** | 它解决的是通知的分组、去重、静默、多渠道分发——而本项目无人值班、**没有接收方**。Prometheus 自身的规则已能算出「是否越限」，仪表盘读出来展示即可（3.2.3.3）。将来真上线时再加，指标与规则不用改 |
-| Collector **集群 / 编排** | **单实例**足够；不做高可用、不做分布式采集 |
-| **长期指标存储（VictoriaMetrics / Thanos / S3 归档）** | Prometheus 本地保留期（建议 15 天）够用；本项目不做长期趋势分析 |
-| 日志检索平台（ES / Loki） | 文件轮转够用；业务查询走 `qa_logs`。**日志与指标不做联合查询**——需要联查时按 `trace_id` 人工关联 |
+| 多服务分布式追踪 | **单服务**，无跨服务链路，分布式追踪在这里用不上 |
+| **通用商业 APM（Datadog / New Relic 等）** | 内网部署、无预算、**数据不应出网**——**这条理由不变**。⚠️ 注意它与「用 Langfuse 云」**不冲突**：Langfuse 是 **LLM 专用**可观测平台（trace / token / 成本是它的主业），且出网内容已由**脱敏钩子**控制（学号 / 手机号 / 身份证本地打码，见 3.2.3.2）。口径是「**标识符不出网**」，不是「数据不出网」 |
+| **自建可观测后端（Collector / Prometheus / Jaeger 及其替代品）** | 2026-10-11 已删三个容器改接 Langfuse 云，**不再重建**。需要长期存储、自托管、离线部署的场景本项目没有 |
+| **告警通知链（Alertmanager 类组件 / 多渠道分发）** | 它解决的是通知的分组、去重、静默、多渠道分发——而本项目无人值班、**没有接收方**（1.1）。阈值越限由后端自算、仪表盘标红即可（3.2.3.3）。将来真上线时加通知渠道即可，指标与阈值不用改；**Langfuse Alerts 的 Slack / Webhook 通知同样是可选而非必配** |
+| **长期指标存储 / 自建归档（VictoriaMetrics / Thanos / S3）** | 运行指标的保留期由 Langfuse 档位决定（M5 在 Langfuse 后台核对）；本项目不做长期趋势分析 |
+| 日志检索平台（ES / Loki） | 文件轮转够用；业务查询走 `qa_logs`。**日志与指标不做联合查询**——需要联查时按 `trace_id` 人工关联（**Langfuse 不做日志存储**，日志仍在本机） |
 | 全链路 Replay / 事件溯源 | 超出可观测性范畴 |
 
 ---
@@ -707,7 +732,7 @@ DELETE FROM session_locks WHERE session_id = $1 AND holder = $2;
 | doc_group_id | TEXT | 目标文档组 |
 | **batch_id** | TEXT | **同一压缩包内的任务共享**；单文件上传时等于自己的 `id` |
 | **file_name** | TEXT | 包内文件名——**进度条与错误列表要显示它**，不能只显示 `task_id` |
-| **trace_id** | TEXT | **OTel trace id（32 位十六进制）**。后台任务**不能靠 contextvars 隐式继承**，必须在这里显式落库、各阶段从表里取（见 3.2.3.1） |
+| **trace_id** | TEXT | **Langfuse trace id（32 位十六进制）**。后台任务**不能靠 contextvars 隐式继承**，必须在这里显式落库、各阶段从表里取（见 3.2.3.1） |
 | status | TEXT | pending / parsing / chunking / embedding / done / **duplicate** / failed |
 | progress | INTEGER | 0–100 |
 | message | TEXT | 当前阶段说明 |
@@ -795,7 +820,7 @@ DELETE FROM session_locks WHERE session_id = $1 AND holder = $2;
 | 字段 | 说明 |
 |---|---|
 | id / session_id / user_id | 归属 |
-| **trace_id** | **OTel trace id（32 位十六进制），建索引**——与日志、Jaeger 的关联键，也是「按 trace_id 还原单次请求全链路」这条验收的落点（见 3.2.3.2 / 1.4） |
+| **trace_id** | **Langfuse trace id（32 位十六进制），建索引**——与日志、Langfuse 的关联键，也是「按 trace_id 还原单次请求全链路」这条验收的落点（见 3.2.3.2 / 1.4） |
 | **user_role** | 提问时的角色（student / staff / admin） |
 | question | 原始问题 |
 | resolved_query | 消解补全后 |
@@ -2514,7 +2539,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 仪表盘：
   GET /api/admin/stats/overview          ← 业务指标，读 PostgreSQL
   GET /api/admin/stats/trend?days=30     ← 业务指标，读 PostgreSQL
-  GET /api/admin/stats/retrieval         ← ★ 运行指标，用 PromQL 查 Prometheus（见 3.2.3.3）
+  GET /api/admin/stats/retrieval         ← ★ 运行指标，查 Langfuse Metrics API v2（见 3.2.3.3）
   GET /api/admin/stats/refusals          ← 仅聚合（饼图/Top N 计数），不含可标注的记录标识
   GET /api/admin/stats/hot-questions     ← 业务指标，读 PostgreSQL
 
@@ -2552,11 +2577,11 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 >
 > **GPU 争用**：评测会大量调用 rerank（与线上问答抢同一块 GPU）。**约定：评测任务与线上问答共用同一个 GPU 信号量**（见 3.2.4），即评测会让在线请求变慢，但不会 OOM。**不做优先级抢占**。
 
-> **`stats/retrieval` 是唯一读 Prometheus 的接口**：它返回节点耗时分位数、错误率、token 用量等**运行指标**，数据源是 Prometheus（PromQL 查询）。其余 `stats/*` 读 PostgreSQL 的**业务指标**。
+> **`stats/retrieval` 是唯一读 Langfuse 的接口**：它返回节点耗时分位数、错误率、token 用量、成本等**运行指标**，数据源是 Langfuse Metrics API v2。其余 `stats/*` 读 PostgreSQL 的**业务指标**。
 >
 > 两类的区别见 3.2.3 开头：业务指标答「系统答得好不好」，运行指标答「这次请求为什么慢」。
 >
-> **Prometheus 不可用时**该接口降级为返回 `null` 并附状态，**不能 500**——仪表盘的其他面板（读 PostgreSQL）必须照常可用。
+> **Langfuse 不可用时**该接口降级为返回 `available: false` 并附状态（HTTP 仍 200），**不能 500**——仪表盘的其他面板（读 PostgreSQL）必须照常可用。
 
 **`stats/*` 的响应结构**（**本版补写**——原方案只有路径与用途，M4 照着建仪表盘时无从下手）
 
@@ -2566,7 +2591,7 @@ GET  /api/documents/{id}/images/{name}  图片访问票据，返回短期签名 
 | `stats/trend?days=N` | `{ days: [{ date, qa_count, refusal_count }] }`——**按天补零**（没有问答的那天也必须出现，否则折线图会断开） |
 | `stats/refusals` | `{ by_reason: [{ reason, count }], top_questions: [{ question, count }] }`——`reason` 取值用 5.2 的词表，**不要自造** |
 | `stats/hot-questions` | `{ items: [{ question, count }] }`，**默认 Top 10**（原方案没给 N，这里钉死） |
-| `stats/retrieval` | 可用：`{ available: true, latency_p50, latency_p95, error_rate, token_usage }`；**不可用**：`{ available: false, status: "prometheus_unavailable" }`——**HTTP 状态码仍为 200**（见上） |
+| `stats/retrieval` | 可用：`{ available: true, latency_p50, latency_p95, error_rate, token_usage, token_input, token_output, cost, node_latency: [{node, p95}], alerts: {firing, pending, rules} }`；**不可用**：`{ available: false, status: "langfuse_unavailable" }`——**HTTP 状态码仍为 200**（见上）。⚠️ **`available: true` 的判据是「至少有一条查询答上了」**，不是「有非空值」：刚起服务、窗口里还没流量时也必须算「可用」，显示成「暂不可用」会让人以为接错了 |
 
 > ⚠️ **口径两条**：
 > ① **`refusal_rate` 用的是本项目自定义的拒答率**（定义与分母见 5.2），**不是 `is_refused` 的简单平均**；
@@ -3542,7 +3567,7 @@ POST /api/admin/refusals/{log_id}/annotate  写标注
 
 ### 4.4 仪表盘
 
-**分两块**：业务指标读 PostgreSQL，运行指标读 Prometheus（数据流见 3.2.3.3）。
+**分两块**：业务指标读 PostgreSQL，运行指标读 **Langfuse Metrics API v2**（数据流见 3.2.3.3）。
 
 **业务指标**（数据源：PostgreSQL）
 
@@ -3553,23 +3578,24 @@ POST /api/admin/refusals/{log_id}/annotate  写标注
 | 拒答分布 | `stats/refusals`（**仅聚合**） | 饼图 + Top N 计数；明细列表由 `GET /api/admin/refusals` 提供（见 4.3.1.3） |
 | 高频问题 | `stats/hot-questions` | 横向柱状图 |
 | 降级次数 | **`stats/overview` 的 `degradation_counts`** | 按 `kind` 分组的柱状图（数据源自 `degradation_events`，**读 PostgreSQL**） |
-| | | ⚠️ **本行原写「`stats/retrieval` 的降级字段」是错的**：`stats/retrieval` 是**唯一读 Prometheus** 的接口，而 `degradation_events` 在 PostgreSQL 里（见 3.2.3.3 与 3.7.3）——两处说法原本打架，现按「PG 业务指标」统一 |
+| | | ⚠️ **本行原写「`stats/retrieval` 的降级字段」是错的**：`stats/retrieval` 是**唯一读 Langfuse 的接口**，而 `degradation_events` 在 PostgreSQL 里（见 3.2.3.3 与 3.7.3）——两处说法原本打架，现按「PG 业务指标」统一 |
 
-**运行指标**（数据源：Prometheus —— `stats/retrieval` 用 PromQL 查询）
+**运行指标**（数据源：Langfuse —— `stats/retrieval` 查 Metrics API v2，查询形态见 3.7.3）
 
 | 面板 | 指标 | 类型 |
 |---|---|---|
-| 节点耗时分位数 | p50 / p95 / p99，**按节点分组** | 折线图（可切时间范围） |
-| 端到端延迟 | p50 / p95 / p99 | 折线图 |
-| 错误率 | HTTP 5xx、LLM 调用失败率 | 折线图 + 当前值 |
-| LLM token 用量 | 输入 / 输出 | 堆叠柱状图 |
-| 告警状态 | Prometheus 规则的 firing 状态 | 状态卡——**有 firing 即标红** |
+| 延迟 p50 / p95 | 全窗口分位数（不分组） | 数字卡 |
+| 错误率 | 观测 `level=ERROR` 占比——⚠️ **不是按 HTTP 状态码**，Metrics API 没有该维度（5xx 由中间件标 `level=ERROR`，见 3.2.3.4） | 数字卡 |
+| token 用量 | 合计 + **输入 X / 输出 Y 拆分**（改造前只有一个合计） | 数字卡 |
+| **LLM 成本**（新增） | 按模型自动折算 | 数字卡 |
+| **节点 P95 耗时**（新增） | **按节点分组**的 p95——改造前「按节点分组」只存在于告警规则里，面板从未实现 | 列表卡（按 p95 降序） |
+| 告警状态 | **后端自算**的阈值比较结果（见 3.2.3.3） | 状态卡——**有 firing 即标红** |
 
-> **每个运行指标面板都要能下钻到 Jaeger**：点击面板 → 带时间范围与 span 名过滤跳到 Jaeger UI，看那段时间的具体 trace。
+> **下钻到 Langfuse**：面板不做直接跳转（云控制台没有免登录深链），面板下方给出提示——**拿该次回答响应头里的 `x-trace-id` 去 Langfuse 搜**，看那条 trace 的完整 span 树（含父级 `route` / 子级模型调用）。
 >
-> 分工：**Prometheus 答「什么时候、哪个环节变慢了」，Jaeger 答「那一次具体慢在哪一步」**。两者共用同一份 OTel 数据，不重复埋点。
+> 分工：**Metrics API 答「什么时候、哪个环节变慢了」，Langfuse UI 答「那一次具体慢在哪一步」**。两者是同一份数据，不重复埋点。
 
-> **Prometheus 不可用时的降级**：运行指标区块显示「运行指标暂不可用」，**业务指标区块照常渲染**——3.7.3 已约定 `stats/retrieval` 返回 `null` 而非 500。
+> **Langfuse 不可用时的降级**：运行指标区块显示「运行指标暂不可用」，**业务指标区块照常渲染**——3.7.3 已约定 `stats/retrieval` 返回 `available: false`（HTTP 仍 200），而非 500。
 
 ---
 
@@ -3754,7 +3780,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 | **M2** | 查询理解 | resolve 节点（含条件跳过 + 注入防护）、三分类路由（**规则层 + LLM 兜底** + last_route 稳定 + 命中率观测）、clarify 分支（facets 结构化澄清 + 重新进图）、三类查询扩展、加权 RRF、机制化拒答 | **多轮指代题通过**（题库来源见下） |
 | **M3** | 生成与引用 | 上下文组装（含 3.8 的预算 / 滚动压缩 / 四道防线）、答案生成（**结构化输出格式**）、引用统一（句级标记解析）、页码/章节/偏移定位、原文回跳、**声明级后校验（轻量）** | 点击引用可跳转原文；校验能标出无依据句 |
 | **M4** | React 两端 | **User 端补全（登录、会话列表、流式渲染与长列表 —— 即 4.2.4）+ 管理端 + 仪表盘** | 全功能可用 |
-| **M5** | 评测与打磨 | **10–15 题拒答校准小集**、测试集构建（**分两阶段**）、ragas 接入、消融实验、测试补齐、**可观测性（OTel 接入 + trace_id 贯通 + 阈值标红标定，见 3.2.3）**、CI（pytest + 契约 + 评测回归，见第六章）、部署配置、**扫描件与乱码字体 PDF 回归样本各一份（见下）** | 消融实验表产出 + 测试通过 + 拒答四项指标有基线 + **按 trace_id 能还原单次请求全链路** |
+| **M5** | 评测与打磨 | **10–15 题拒答校准小集**、测试集构建（**分两阶段**）、ragas 接入、消融实验、测试补齐、**可观测性（Langfuse 接入 + trace_id 贯通 + 阈值标红标定，见 3.2.3）**、CI（pytest + 契约 + 评测回归，见第六章）、部署配置、**扫描件与乱码字体 PDF 回归样本各一份（见下）** | 消融实验表产出 + 测试通过 + 拒答四项指标有基线 + **按 trace_id 能还原单次请求全链路** |
 
 **M0 的两条「开工前必验」**（都是文档里**标注为「待实测」**的项，答案会改变后续设计，必须最先验掉）
 
@@ -3800,7 +3826,7 @@ ragas 四指标：`Faithfulness`（忠实度）、`Answer Relevancy`（答案相
 >
 > **认证必须在 M0/M1 落地，不能拖到 M4**：M0 的「最简聊天页」在「所有接口要 JWT」（3.2.2）的前提下**无法发起请求**；M1 的 ACL 依赖「角色只能来自 JWT」，没有身份来源就只能拼一个 stub，M4 再返工。
 >
-> **「部署配置」的最小规格**（原方案只有这四个字）：① 后端 `Dockerfile` + 前端构建产物 ② **启动脚本一并拉起三个可观测容器**（Collector / Prometheus / Jaeger，见 3.2.3.4）③ 环境变量清单（`.env` 模板，含 `MINERU_TOKEN` 等，**不含任何真实密钥**）④ **单 worker 的 uvicorn 启动参数**——会话锁的前提（见 3.2.4），写成 `--workers 1` 或等价形式。
+> **「部署配置」的最小规格**（原方案只有这四个字）：① 后端 `Dockerfile` + 前端构建产物 ② **可观测性接 Langfuse 云**（**不再自建容器**；`.env` 模板含 `LANGFUSE_*`，见 3.2.3.4；告警阈值放 `app.yaml`，见 3.2.3.3）③ 环境变量清单（`.env` 模板，含 `MINERU_TOKEN` 等，**不含任何真实密钥**）④ **单 worker 的 uvicorn 启动参数**——会话锁的前提（见 3.2.4），写成 `--workers 1` 或等价形式。
 >
 > **不做**：多环境编排、K8s、CI/CD 部署流水线（见 1.1「不建运维体系」）。
 
@@ -4177,8 +4203,9 @@ v1.2 的原决策是 **SQLite**，理由很明确：「本项目需要的是事�
 
 1. **决策时机**：**全量重写是改表结构成本最低的唯一窗口**——此刻 12 张表还没建、数据还没迁；
    等 M0–M5 做完再换，3.3.1、附录 D 和全部 SQL 都要重写一遍
-2. **「免运维」这笔账已经付出了一部分**：M5 的部署配置本来就要一并拉起三个可观测容器
-   （Collector / Prometheus / Jaeger，见 3.2.3.6）。**既然已经在跑容器，再加一个 PG 的边际成本不高**
+2. **「免运维」这笔账已经付出了一部分**：M5 的部署配置本来就要起容器——**可观测性在决策当时是三个自建容器**
+   （Collector / Prometheus / Jaeger），**2026-10-11 已删掉改接 Langfuse 云**（见 3.2.3）；但 **PostgreSQL 自己就是容器**（附录 G），
+   部署形态与启动脚本仍要走 `docker-compose.yml`。**容器这套东西反正要维护，再加一个 PG 的边际成本不高**
 
 **换 PG 拿到什么（如实列，不夸大）**
 
@@ -4430,7 +4457,7 @@ ollama pull qwen3-embedding:0.6b
 
 | 维度 | 变化 |
 |---|---|
-| **数据不出网** | ✅ 每段检索文本只在本地处理 |
+| **数据不出网** | ⚠️ **本行原写「✅ 每段检索文本只在本地处理」，已不成立**——2026-10-11 可观测性改接 Langfuse 云后，**正文（含检索片段）会上传云端**（见 3.2.3）。现行口径是「**标识符不出网**」：学号 / 手机号 / 身份证在导出前**本地打码**，上传的是打码后文本（见 3.2.3.2）。切本地嵌入模型**仍能少一条出网路径**（嵌入请求不再发给在线 API），但 Langfuse 那条路径与之无关、照旧 |
 | **无调用成本** | ✅ 首次下载后零费用 |
 | **离线可用** | ✅ 断网也能检索 |
 | **速度** | ⚠️ **需实测**：本地 GPU 推理 vs 云端 API 的网络往返 |
@@ -5570,7 +5597,7 @@ print(sorted({b["page_idx"] for b in r.content_list}))     # → [0, 1]
 
 ## 附录 G：PostgreSQL 部署（本版新增）
 
-**形态**：以容器运行，由 `docker-compose.yml` 一并拉起（与 M5 的三个可观测容器同文件）。
+**形态**：以容器运行，由 `docker-compose.yml` 拉起——**该文件现在只有 PostgreSQL 一个 service**：可观测性已改接 Langfuse 云、不再自建容器（见 3.2.3）。
 
 ```yaml
 services:
