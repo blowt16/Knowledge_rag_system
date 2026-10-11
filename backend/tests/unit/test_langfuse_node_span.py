@@ -74,7 +74,7 @@ def test_metadata_keys_stay_allowlisted(capture):
     ⚠️ 这条是从被取代的 `test_span_redaction.py:70` 那条白名单搬过来的。
        「正文不出现在字节里」比白名单**更强**，但盖不住一种缺口：
        新加了一个键、而它的值恰好不含测试标记 —— 白名单是那条缺口唯一的锁。
-       （原测试绑死在 OTel 的属性名上，且用了 `telemetry.get_tracer`，故只能重写。）
+       （原测试绑死在 OTel 的属性名上，故只能重写。）
     """
 
     async def _fake_node(state):

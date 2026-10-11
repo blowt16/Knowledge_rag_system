@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键起整套：基础设施 + 可观测三件套 + 后端 + 前端。
+# 一键起整套：基础设施 + 后端 + 前端（可观测性走 Langfuse 云，无需本地容器）。
 #
 #   bash scripts/start.sh              # 起全部（后端前台跑，Ctrl+C 停后端）
 #   bash scripts/start.sh --infra-only # 只起容器，不起应用（跑测试/CLI 前用这个）
@@ -20,26 +20,11 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-echo "==> 起容器（PostgreSQL + Jaeger + OTel Collector + Prometheus）"
-# PG 有 healthcheck，可以 --wait；可观测三件套没有，用下面的探测等 Collector
+echo "==> 起 PostgreSQL"
 docker compose up -d --wait postgres
-docker compose up -d jaeger otel-collector prometheus
-
-# 等 Collector 的 OTLP 口真的能连上再起应用 —— 否则启动那几秒的 span 会丢，
-# 表现为「明明发了请求，Jaeger 里查不到」
-echo "==> 等 OTel Collector 就绪"
-for i in $(seq 1 30); do
-  if docker exec campus-rag-otel-collector \
-       /otelcol-contrib --version >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
 
 if [ "${1:-}" = "--infra-only" ]; then
   echo "==> 只起基础设施，完成"
-  echo "    Jaeger:     http://127.0.0.1:16686"
-  echo "    Prometheus: http://127.0.0.1:9090"
   exit 0
 fi
 

@@ -81,10 +81,9 @@ jobs:
     runs-on: [self-hosted, campus-rag]
     steps:
       - uses: actions/checkout@v4
-      - name: 起基础设施（PG + 可观测三件套）
+      - name: 起基础设施（PG）
         run: |
           docker compose up -d --wait postgres
-          docker compose up -d jaeger otel-collector prometheus
       - name: 跑校准小集并与基线比对
         run: |
           cd backend

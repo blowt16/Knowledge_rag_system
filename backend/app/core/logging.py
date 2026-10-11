@@ -5,7 +5,7 @@
     校园场景的提问可能含学号、姓名、成绩等个人信息。
     需要排查时按 trace_id 去 qa_logs 取 —— 那里本来就有全文，且受 ACL 保护。
 
-⚠️ span 属性必须同级脱敏 —— 见 telemetry.py 的说明。这里只管住日志。
+⚠️ span 属性必须同级脱敏 —— 见 observability.py 的 mask_otel_spans。这里只管住日志。
 """
 
 from __future__ import annotations
