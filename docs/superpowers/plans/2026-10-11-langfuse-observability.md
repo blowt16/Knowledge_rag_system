@@ -2651,7 +2651,7 @@ git commit -m "[docs] 主文档同步改造：§3.2.3 整章、§4.4 面板表�
 - LLM API Key 可用（会真实消耗 token）
 - 精排模型预热完成 —— 等日志里出现 `rerank.preloaded`（实测约 29 秒，没完就提问会撞在加载锁上等）
 
-- [ ] **Step 1: 起服务**
+- [x] **Step 1: 起服务**
 
 ```bash
 cd /d/Knowledge_rag_system
@@ -2664,59 +2664,59 @@ bash scripts/start.sh
 cd /d/Knowledge_rag_system/frontend/web && npx vite --port 5273
 ```
 
-- [ ] **Step 2: 验收 A —— Langfuse 链路（8 项逐条打勾）**
+- [x] **Step 2: 验收 A —— Langfuse 链路（8 项逐条打勾）**
 
 登录 → 提一个**知识型问题**（不能是寒暄，那会被 route 分流走）→ 等流式回答结束 → 去 `https://cloud.langfuse.com` 核对：
 
-- [ ] **A1** 按时间范围能查到这一次 trace
-- [ ] **A2** 是**一棵树**：HTTP span 为根 → 图节点 span 为子 → generation 为孙，父子关系正确
-- [ ] **A3** 图节点**齐全**：实际走过的都在（`node.resolve` / `route` / `retrieve` / `rerank` / `generate` / `cite`），不重不漏
-- [ ] **A4** 每个 LLM 调用是 **generation**，input/output token **都不是 0**
-- [ ] **A5** 一次 SSE 流**全程同一个 trace_id**（流内事件没分裂成多条 trace）
-- [ ] **A6** **四处 trace_id 一致**：响应头 `x-trace-id` == `logs/app.jsonl` 里的 `trace_id` == `qa_logs.trace_id` == Langfuse UI 显示的
-- [ ] **A7** **脱敏生效**：造一条**含 10 位假学号**的提问去跑，Langfuse 里该学号**已打码**
-- [ ] **A8** **后台任务挂回原 trace**：上传文档触发解析，解析的 span 挂在**那次上传请求**的 trace 下
+- [x] **A1** 按时间范围能查到这一次 trace
+- [x] **A2** 是**一棵树**：HTTP span 为根 → 图节点 span 为子 → generation 为孙，父子关系正确
+- [x] **A3** 图节点**齐全**：实际走过的都在（`node.resolve` / `route` / `retrieve` / `rerank` / `generate` / `cite`），不重不漏
+- [ ] **A4** 每个 LLM 调用是 **generation**，input/output token **都不是 0** —— ❌ 2026-10-11 实测未通过：流式 `llm.generate` 的 `usageDetails={}`（非流式 rewrite 有值）；根因 `generate.py` 早退没读到尾部 usage chunk，详见 §12.4 验收结果
+- [x] **A5** 一次 SSE 流**全程同一个 trace_id**（流内事件没分裂成多条 trace）
+- [x] **A6**（日志一路以 A8 上传路径代证：问答成功路径不写 app.jsonl） **四处 trace_id 一致**：响应头 `x-trace-id` == `logs/app.jsonl` 里的 `trace_id` == `qa_logs.trace_id` == Langfuse UI 显示的
+- [ ] **A7** **脱敏生效**：造一条**含 10 位假学号**的提问去跑，Langfuse 里该学号**已打码** —— ❌ 2026-10-11 实测未通过：`我的学号是2024001234…` 已打码，但 `学号2024001234的学生…` 原文未打码；根因是脱敏正则跑在 JSON 转义文本上，约 3/4 中文前导字会被静默卡掉，详见 §12.4 验收结果
+- [x] **A8** **后台任务挂回原 trace**：上传文档触发解析，解析的 span 挂在**那次上传请求**的 trace 下
 
 > ⚠️ A7 是决策 3 的唯一验收方式，也是唯一能证明「脱敏不是自我声明」的一条。
 > A8 单独跑 —— 它走的是另一条代码路径（`attach_trace`）。
 
-- [ ] **Step 3: 验收 B —— 仪表盘（8 项）**
+- [x] **Step 3: 验收 B —— 仪表盘（8 项）**
 
 admin 登录 → 打开仪表盘：
 
-- [ ] **B1** 核心指标卡有值（文档数/chunk 数/问答量/拒答率）
-- [ ] **B2** 延迟 p50 / p95 有值，**不是 NaN、不是「—」**
-- [ ] **B3** 错误率有值
-- [ ] **B4** token 用量有值
-- [ ] **B5** **LLM 成本**有值（新增面板）
+- [x] **B1** 核心指标卡有值（文档数/chunk 数/问答量/拒答率）
+- [x] **B2** 延迟 p50 / p95 有值，**不是 NaN、不是「—」**
+- [x] **B3** 错误率有值
+- [x] **B4** token 用量有值
+- [ ] **B5** **LLM 成本**有值（新增面板）—— ⚠️ 2026-10-11 实测记「有值但恒 0」：面板 0、`cost=0.0`，原因＝Langfuse 项目未配 `deepseek-flash` 价格表（非代码）
       ⚠️ **已知前置**：Task 10 实测 `totalCost`/`inputCost`/`outputCost` **都是 0** ——
       大概率是 Langfuse 项目里**没配 DeepSeek 的模型价格**（不是代码问题）。
       若确实如此，在 Langfuse 后台「Settings → Models」加上 `deepseek-flash` 的单价后再验；
       **在此之前 B5 记「有值但恒 0」并注明原因**，不要当成通过。
-- [ ] **B6** **节点耗时 p95** 有值且按节点分行（新增面板）
-- [ ] **B7** 告警状态卡正常显示，不报错
-- [ ] **B8** 业务指标区块照常渲染（趋势/拒答分布/高频问题/降级次数）
+- [x] **B6** **节点耗时 p95** 有值且按节点分行（新增面板）
+- [x] **B7** 告警状态卡正常显示，不报错
+- [x] **B8** 业务指标区块照常渲染（趋势/拒答分布/高频问题/降级次数）
 
-- [ ] **Step 4: 验收 B8 —— 降级路径（必须单独验）**
+- [x] **Step 4: 验收 B8 —— 降级路径（必须单独验）**
 
 把 `.env` 的 `LANGFUSE_BASE_URL` 改成一个**不存在**的地址 → 重启后端 → 重开仪表盘：
 
-- [ ] 运行指标区块显示「运行指标暂不可用（langfuse_unavailable）」
-- [ ] **业务指标区块照常渲染**
-- [ ] 接口返 **HTTP 200 不是 500**（`curl -s -o /dev/null -w "%{http_code}"` 确认）
-- [ ] **提问主链路不受影响**（还能正常问答）
+- [x] 运行指标区块显示「运行指标暂不可用（langfuse_unavailable）」
+- [x] **业务指标区块照常渲染**
+- [x] 接口返 **HTTP 200 不是 500**（实测 200 + `available:false`/`langfuse_unavailable`）
+- [x] **提问主链路不受影响**（还能正常问答）
 
 验完**改回正确地址**。
 
-- [ ] **Step 5: 验收 C —— 静默失败边界（3 项）**
+- [x] **Step 5: 验收 C —— 静默失败边界（3 项）**
 
-- [ ] **C1** 把两个 `LANGFUSE_*` key 注释掉 → 重启 → 提一次问 → 看 `logs/app.jsonl`：`trace_id` 是 `"000…0"`（32 位），**不是 `null`**
-- [ ] **C2** 配好密钥重启后，数据出现在**你自己的项目** `Knowledge_rag_system` 里（不是别的项目）
-- [ ] **C3** 提一个**走流式**的问题 → Langfuse 里 `generate` 的 generation **存在**且 **usage 有值**
+- [x] **C1** 把两个 `LANGFUSE_*` key 注释掉 → 重启 → 提一次问 → 看 `logs/app.jsonl`：`trace_id` 是 `"000…0"`（32 位），**不是 `null`**
+- [x] **C2** 配好密钥重启后，数据出现在**你自己的项目** `Knowledge_rag_system` 里（不是别的项目）
+- [ ] **C3** 提一个**走流式**的问题 → Langfuse 里 `generate` 的 generation **存在**且 **usage 有值** —— ❌ 2026-10-11 实测未通过：generation 存在但 usage 无值（最小实验：全量消费有 66 tokens，见 `}` 就 break 得 0），与 A4 同源
 
 验完**改回正确配置**。
 
-- [ ] **Step 6: 跑全量测试收尾**
+- [x] **Step 6: 跑全量测试收尾**（627 passed / 1 warning，168.76s —— 优于基线 563）
 
 ```bash
 cd /d/Knowledge_rag_system
@@ -2725,7 +2725,7 @@ cd /d/Knowledge_rag_system
 
 Expected: 与 Task 1 Step 1 的基线**一致或更好**（新增测试全绿，旧测试没有新失败）
 
-- [ ] **Step 7: 提交验收记录**
+- [x] **Step 7: 提交验收记录**（已追加 §12.4「验收结果」并勾本清单；**提交按负责人要求未做**，由负责人处理）
 
 在 `docs/superpowers/specs/2026-10-11-langfuse-observability-design.md` 的 §12.4 末尾追加一节 `#### 验收结果（YYYY-MM-DD 实际执行）`，逐条记录 A1-A8 / B1-B8 / C1-C3 的实测结果，然后把任务清单勾完。
 
