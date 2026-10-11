@@ -2205,9 +2205,14 @@ async def retrieval_metrics() -> dict:
     # 5xx 率：实测**没有 HTTP 状态码维度**，改用 level=ERROR（【方案 §8.3】）
     err = await _lf_query(_build_metrics_query(
         measures=[("count", "count")], dimensions=["level"], hours=hours))
+    # ⚠️ **不要给 token 加 `dimensions=["usageType"]`** —— 实测（2026-10-11）那个维度
+    #    返回的 total/input/output 三行是**同一个总量的副本**：既拆不开，全加还会报 3 倍。
+    #    真正的拆分靠三个**独立 measure**（`inputTokens`/`outputTokens`/`totalTokens`），
+    #    返回正确的 7 / 3 / 10。下面这版就是实测确认过的形状。
     tok = await _lf_query(_build_metrics_query(
-        measures=[("totalTokens", "sum"), ("totalCost", "sum")],
-        dimensions=["usageType"], hours=hours))
+        measures=[("inputTokens", "sum"), ("outputTokens", "sum"),
+                  ("totalTokens", "sum"), ("totalCost", "sum")],
+        dimensions=None, hours=hours))
     nodes = await _lf_query(_build_metrics_query(
         measures=[("latency", "p95")], dimensions=["name"], hours=hours))
 
@@ -2215,8 +2220,15 @@ async def retrieval_metrics() -> dict:
         "latency_p50": _extract_scalar(lat, "p50_latency"),
         "latency_p95": _extract_scalar(lat, "p95_latency"),
         "error_rate": _error_rate_from_levels(err),
-        "token_usage": _sum_rows(tok, "sum_totalTokens"),
-        "cost": _sum_rows(tok, "sum_totalCost"),
+        # 三个 measure 都从**同一行**读（`_extract_scalar` 只取 `data[0]`）——
+        # 绝不能退化成按行求和。
+        "token_usage": _extract_scalar(tok, "sum_totalTokens"),
+        "token_input": _extract_scalar(tok, "sum_inputTokens"),
+        "token_output": _extract_scalar(tok, "sum_outputTokens"),
+        # ⚠️ 实测恒为 0：Langfuse 项目里没配 deepseek-flash 的价格
+        #    （`/api/public/models` 50 条内置模型里没有 deepseek）。
+        #    修法是在 Langfuse 后台加模型定义，**不是代码**。
+        "cost": _extract_scalar(tok, "sum_totalCost"),
         "node_latency": _node_latency_rows(nodes),
     }
 
@@ -2231,10 +2243,10 @@ async def retrieval_metrics() -> dict:
 再补三个小工具函数与告警自算（Task 11 也会用到，这里先写好）：
 
 ```python
-def _sum_rows(payload: dict | None, key: str) -> float | None:
-    rows = (payload or {}).get("data") or []
-    vals = [r.get(key) for r in rows if r.get(key) is not None]
-    return float(sum(vals)) if vals else None
+# ⚠️ 原稿在这里有个 `_sum_rows()`（把返回的每一行加起来）。
+#    **已删除，不要再加回来** —— 实测：`usageType` 维度返回的 total/input/output
+#    三行是同一个总量，按行求和会把 token 用量报成 3 倍（Task 10 实测到 `12963 == 4321*3`）。
+#    现在一律用 `_extract_scalar()` 从**单行**取字段。
 
 
 def _error_rate_from_levels(payload: dict | None) -> float | None:
