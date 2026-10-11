@@ -2475,6 +2475,11 @@ git commit -m "[feat] 告警改后端自算（方案 A）：阈值配置化，�
 ```python
     #: LLM 成本（【方案 §8.2】新增，改造前完全没有）
     cost: float | None = None
+    #: token 拆输入/输出（【方案 §8.2】新增；改造前只有一个合计）
+    #: ⚠️ 数据来自 Metrics API 的 usageType 分组，**不能把三行全加** ——
+    #:    实测它会同时返回 total/input/output，三者带同一个总量（Task 10 踩过，会变 3 倍）
+    token_input: float | None = None
+    token_output: float | None = None
     #: 按节点的 p95 耗时（§8.2 新增；把 §4.4 表里「按节点分组」那条真正做出来）
     node_latency: list[NodeLatency] = []
 ```
@@ -2507,7 +2512,8 @@ grep -c "node_latency" src/api/schema.d.ts   # 期望 ≥1，否则后端没重�
               <Stat title="延迟 p50（ms）" value={retrieval.latency_p50 ?? '—'} />
               <Stat title="延迟 p95（ms）" value={retrieval.latency_p95 ?? '—'} />
               <Stat title="错误率" value={retrieval.error_rate ?? '—'} />
-              <Stat title="token 用量" value={retrieval.token_usage ?? '—'} />
+              <Stat title="token 用量" value={retrieval.token_usage ?? '—'}
+                    hint={`输入 ${retrieval.token_input ?? '—'} / 输出 ${retrieval.token_output ?? '—'}`} />
               {/* —— §8.2 新增：Langfuse 白捡的三项 —— */}
               <Stat title="LLM 成本" value={retrieval.cost ?? '—'} hint="按模型自动折算" />
               <AlertCard alerts={retrieval.alerts} />
