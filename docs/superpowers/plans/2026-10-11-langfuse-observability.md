@@ -2389,7 +2389,11 @@ def test_none_values_do_not_fire():
 
 Expected: FAIL — `_evaluate_alerts` 不存在
 
-- [ ] **Step 3: 在 `app.yaml` 加阈值**
+- [ ] **Step 3: 在 `app.yaml` 加阈值，并删掉死键**
+
+⚠️ **先删掉 `observability.prometheus_url` 那一条及其注释**（Task 10 报告指出）：
+`stats_service.py` 已不再读它，Prometheus 容器也已删除 —— 留着是一条**指向不存在服务的配置**，
+下一个人会以为还有东西在用它。
 
 在 `observability` 段下追加：
 
