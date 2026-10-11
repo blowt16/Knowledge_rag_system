@@ -1,4 +1,4 @@
-"""可观测性统一出口 —— Langfuse（【方案 §5】，取代原 `core/telemetry.py`）。
+"""可观测性统一出口 —— Langfuse（【方案 §5】，取代原 `telemetry.py`）。
 
 **只有本模块 import langfuse**，其余模块一律经这里取能力（【方案 决策 4】：
 代码不得直接 import opentelemetry，langfuse 同理）。

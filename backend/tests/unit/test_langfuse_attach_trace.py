@@ -62,3 +62,56 @@ def test_attach_trace_is_noop_when_disabled(monkeypatch):
 
     with observability.attach_trace("a" * 32, "b" * 16):
         pass          # 不抛即通过
+
+
+def _otel_spans(capture) -> dict[str, object]:
+    """把**实际发出的** OTLP 载荷解成 `{span 名: span}`。"""
+    from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
+
+    bodies = capture.bodies()
+    assert bodies, "没发出任何东西 —— 下面的断言会假通过"
+
+    spans: dict[str, object] = {}
+    for raw in bodies:
+        req = trace_service_pb2.ExportTraceServiceRequest()
+        req.ParseFromString(raw)
+        for rs in req.resource_spans:
+            for ss in rs.scope_spans:
+                for sp in ss.spans:
+                    spans[sp.name] = sp
+    return spans
+
+
+def test_resumed_span_is_child_of_original_span(capture):
+    """★ 挂回去的观测必须**以原 span 为父**，不能挂在 trace 根上。
+
+    只断言 trace_id 相等是不够的：`observability.py` 里挂 `parent_span_id`
+    那两行删掉，trace_id 照样相等（都是原 trace），但 `resumed` 会静默变成
+    trace 根的直接子节点 —— 后台任务的观测与原请求的 span 断成两截。
+
+    ⚠️ 断言只认**实际发出的字节**（`resumed` 那条 span 的 `parent_span_id`），
+       不从运行时上下文取任何值：上下文能给出的东西，把挂 parent 的代码删掉
+       也一样能满足（本任务已实测：brief 原版就是这么假绿的）。
+    """
+    client = observability.get_client()
+
+    with client.start_as_current_observation(as_type="span", name="root-req"):
+        root_trace = observability.current_trace_id()
+        root_span = observability.current_span_id()
+        assert root_span != "0" * 16
+
+    with observability.attach_trace(root_trace, root_span):
+        pass
+
+    client.flush()
+
+    spans = _otel_spans(capture)
+    assert {"root-req", "resumed"} <= set(spans), (
+        f"没抓到预期的 span，只看到：{sorted(spans)}"
+    )
+    resumed = spans["resumed"]
+    assert resumed.trace_id.hex() == root_trace, "resumed 没挂在原 trace 上"
+    assert resumed.parent_span_id.hex() == root_span, (
+        "resumed 没挂在原 span 下：parent="
+        f"{resumed.parent_span_id.hex() or '(空 —— 即 trace 根)'} != {root_span}"
+    )

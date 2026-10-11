@@ -83,5 +83,14 @@ class CapturingLangfuse:
         return "".join(b.decode("utf-8", errors="replace")
                        for _path, b in self._srv.captured)  # type: ignore[attr-defined]
 
+    def bodies(self) -> list[bytes]:
+        """逐次请求的**原始字节**。
+
+        ⚠️ 解 OTLP protobuf 必须用这个，不能用 `body()` ——
+           `body()` 是 `errors="replace"` 解码出来的字符串，非 UTF-8 的字节
+           已经被换成 U+FFFD，再编回去就是另一份数据，protobuf 会解错或解不动。
+        """
+        return [b for _path, b in self._srv.captured]  # type: ignore[attr-defined]
+
     def clear(self) -> None:
         self._srv.captured.clear()  # type: ignore[attr-defined]
