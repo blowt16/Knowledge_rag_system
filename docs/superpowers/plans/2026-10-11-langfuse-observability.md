@@ -2472,13 +2472,23 @@ git commit -m "[feat] 告警改后端自算（方案 A）：阈值配置化，�
 
 ## Task 12: 前端仪表盘
 
+> ⚠️ **顺带清掉三处过时的 Prometheus 措辞**（Task 11 报告点名，宽 grep 在验收时会命中它们）：
+> - `backend/app/api/stats.py:5`（"Prometheus 不可用"）、`:55`（"PromQL 查 Prometheus"）
+> - `backend/app/schemas/stats.py:71`（"Prometheus 规则，非 Alertmanager"）
+>
+> 它们现在是**错的**：运行指标读的是 Langfuse Metrics API v2，告警是后端自算的。
+> ⚠️ **但 `stats_service.py` 里那两处 Prometheus 字样要留着** —— 那是解释历史的注释
+> （说明为什么 5xx 用 `level` 而不是状态码维度）。**改错地方会把有用的注释删掉。**
+
 **Files:**
 - Modify: `frontend/web/src/api/schema.d.ts`（重新生成）
 - Modify: `frontend/web/src/views/admin/AdminDashboard.tsx:144-199`
+- Modify: `backend/app/api/stats.py`（两处过时措辞）
+- Modify: `backend/app/schemas/stats.py`（加字段 + 一处过时措辞）
 
 **Interfaces:**
 - Consumes: Task 10/11 的 `/api/admin/stats/retrieval` 新字段
-- Produces: 三个新面板 + Langfuse 深链提示
+- Produces: 四个新面板（成本 / token 拆分 / 按节点 p95）+ 深链提示改指 Langfuse
 
 - [ ] **Step 1: 先改后端 schema**
 
