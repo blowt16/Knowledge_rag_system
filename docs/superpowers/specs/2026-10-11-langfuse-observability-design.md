@@ -413,16 +413,50 @@ GET /api/public/v2/automations      → 404
 而 B 等于把它删了。A 的实现成本不高——指标已经在取了，只多一步比较。
 Langfuse UI 里的 Alerts **仍可配**，用于 Slack/邮件通知，两者不冲突（只是别指望阈值自动同步）。
 
-三条现有规则在 A 方案下的落法：
+三条现有规则在 A 方案下的落法（**形状均已实测**）：
 
-| 现规则 | A 方案下怎么写 | 备注 |
+| 现规则 | A 方案下怎么写 | 状态 |
 |---|---|---|
-| `RAGNodeP95High`（节点 p95 > 10s） | Metrics API v2 按 `name` 分组取 p95 → 比阈值 | **这条现在是坏的**（§1.1），换过去顺带修好 |
-| `RAGHttp5xxRate`（5xx > 5%） | 需先确认能否按 HTTP 状态码过滤（§13.1 未决项 3） | |
-| `RAGSpanErrorRateHigh` | 建议**删掉** | 原注释写明「本项目当前不标 span 状态，平时恒为 0」——它从来就没触发过 |
+| `RAGNodeP95High`（节点 p95 > 10s） | 按 `name` 分组取 `p95_latency` → 比阈值。**实测可用** | ✅ 可落地。**这条现在是坏的**（§1.1），换过去顺带修好 |
+| `RAGHttp5xxRate`（5xx > 5%） | ⚠️ **不能按 HTTP 状态码**（见下），改用观测的 `level` 字段。**实测可用** | ✅ 可落地（原以为要做不了） |
+| `RAGSpanErrorRateHigh` | 建议**删掉** | ⛔ 建议删。原注释写明「本项目当前不标 span 状态，平时恒为 0」——它从来就没触发过 |
 
-> ⚠️ 若走 A 方案，§13.1 未决项 1（Hobby 档 2 条告警额度）**自动消失**——
-> 因为不再需要 Langfuse 侧的告警额度。
+> ⚠️ 走 A 方案后，§13.1 未决项 1（Hobby 档 2 条告警额度）**自动消失**——
+> 不再需要 Langfuse 侧的告警额度。
+
+#### ⚠️ 实测：HTTP 状态码**不能**当维度 —— 5xx 率改用 `level`
+
+实测把合法 dimension 全列出来了（API 报错信息里会带完整清单），**共 29 个，没有 HTTP 状态码**：
+
+```
+id, evaluatorId, isEvaluatorTest, traceId, environment, parentObservationId,
+isRootObservation, type, name, level, version, userId, sessionId, tags, release,
+traceName, traceRelease, traceVersion, providedModelName, promptName,
+promptVersion, startTimeMonth, toolNames, calledToolNames, costType, usageType,
+experimentName, experimentDatasetId, experimentId
+```
+
+**`metadata.http.status_code` 这种任意元数据字段不能作为 dimension**（试了 4 种写法全 400）。
+
+**改用 `level`**——它本来就是合法维度，且语义正好对得上：
+
+| 做法 | 说明 |
+|---|---|
+| 中间件里 `status >= 500` | 把 HTTP span 的 `level` 设为 `"ERROR"`（并写 `status_message`） |
+| 5xx 率 | `count(level=ERROR) / count(全部)`，两条查询相除 |
+
+**实测结果**：
+
+```
+dim=level          → {"data":[{"level":"DEFAULT","count_count":7},{"level":"ERROR","count_count":1}]}
+filter level=ERROR → {"data":[{"count_count":1}]}
+```
+
+> 这比原来的 PromQL（`spanmetrics_calls_total{http_status_code=~"5.."}`）**更干净**——
+> 不用在 collector 里登记维度，也不受「空结果序列不存在」那个坑影响。
+
+**filter 语法**（实测可用）：`{"type":"string","column":"level","operator":"=","value":"ERROR"}`
+（注意：`categoryOptions` 等类型用的是 `key` 而非 `column`，别混）
 
 ---
 
@@ -735,10 +769,10 @@ GET /api/public/traces/{id}  →  410
 
 | # | 问题 | 影响 | 状态 |
 |---|---|---|---|
-| 1 | **告警改走 A 方案还是 B 方案**（§8.3） | 决定「面板标红」这个 §3.2.3.5 加分项是否保留 | ⚠️ **待定**（推荐 A） |
-| 2 | ~~云平台 2 条告警额度放不下 3 条规则~~ | — | ✅ **已消失**：实测告警无 API，改走 A 方案后不再需要额度 |
-| 3 | **Metrics API 能否按 HTTP 状态码过滤/分组**（`RAGHttp5xxRate` 要用） | 决定 5xx 那条规则能不能原样搬过去 | ⚠️ **待验证**（实测只验了按 `name` / `level` 分组） |
-| 4 | **云平台保留期是否满足「15 天」** | §3.2.3.6 原写 Prometheus 保留 15 天 | ⚠️ **待核对**（需在 Langfuse 后台看档位设置） |
+| 1 | 告警走 A 方案（后端自算阈值） | 保住 §3.2.3.5 的「面板标红」加分项 | ✅ **已定：A**（负责人 2026-10-11 指定） |
+| 2 | ~~云平台 2 条告警额度放不下 3 条规则~~ | — | ✅ **已消失**：告警无 API，改走 A 后不再需要额度 |
+| 3 | ~~Metrics API 能否按 HTTP 状态码过滤~~ | — | ✅ **已验**：**不能**（29 个合法维度里没有它）。改用 `level=ERROR`，实测可用（§8.3） |
+| 4 | **云平台保留期是否满足「15 天」** | §3.2.3.6 原写 Prometheus 保留 15 天 | ⚠️ **唯一待办**：需在 Langfuse 后台看档位设置 |
 
 ### 13.2 明确不做
 
