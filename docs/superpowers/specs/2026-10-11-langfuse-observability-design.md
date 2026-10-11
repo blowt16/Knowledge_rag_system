@@ -175,7 +175,10 @@ def record_generation(...) -> ContextManager: ... # 包 LLM 调用
 
 **做法**：节点观测一律 **`capture_input=False, capture_output=False`**，
 异常只写 `metadata={"rag.error": type(e).__name__}`，**不把异常对象交给 SDK**。
-§12 的测试就是这条承诺的凭据。
+
+> ✅ **已实测**：带这两个参数的 `@observe` 包住 async 函数后，**正文标记未出现在发送字节里**
+> （§12.1 上表 #5、#6，用本地捕获服务器验的，不是看文档）。
+> §12.2 的测试把这条锁死。
 
 ### 5.2 LLM 调用：`core/llm.py`
 
@@ -239,7 +242,10 @@ with langfuse.start_as_current_observation(
 | `qa_logs.trace_id TEXT` 及索引 | 格式相同，TEXT 存得下 |
 | `ingestion_tasks.trace_id TEXT` | 同上 |
 | 日志 JSON 的 `trace_id` / `span_id` 字段 | 格式相同，`JsonFormatter` 只换取值来源 |
-| 全 0 兜底（`"0"*32`） | 保留同样语义：无有效 trace 时的合法占位 |
+
+⚠️ **但「全 0 兜底」不是白捡的**：实测**未配置密钥时 `get_current_trace_id()` 返回 `None`**。
+`observability.current_trace_id()` **必须显式把它转成 `"0"*32`**，否则日志字段变成 `null`，
+破坏既有契约（前端错误提示、日志检索都按「合法字符串」用它）。写法见 §12.1 修正 2。
 
 **要改的**：
 
@@ -247,7 +253,7 @@ with langfuse.start_as_current_observation(
 |---|---|
 | `core/telemetry.py` | **删除**，能力并入 `core/observability.py` |
 | `core/logging.py` | `JsonFormatter.format()` 里那段 `from opentelemetry import trace` 换成 `observability.current_trace_id()` |
-| `core/llm.py` 的 `_current_node()` | 现在靠**读 OTel 当前 span 名**反推节点（L60-68）。换成读 Langfuse 当前观测名——同样从 `node.<名字>` 反推。⚠️ **SDK 只保证有 `get_current_observation_id()`，没写有「取当前观测名」的方法**，故这条列为动手前必验项（§12.1 第 4 条）；取不到就退回 contextvar 方案（见下） |
+| `core/llm.py` 的 `_current_node()` | 现在靠**读 OTel 当前 span 名**反推节点（L60-68）。⚠️ **实测确认 Langfuse 不提供「当前观测名」（`obs.name` 不存在）**，故改为读 `observability` 自记的 contextvar——见 §12.1 修正 1 |
 | `pyproject.toml` | 删掉对 `opentelemetry-*` 的**直接 import 依赖**（代码不再直接用；SDK 由 langfuse 带上） |
 
 ⚠️ **`logging.py` 有个约束**：现在那段 OTel 取值包在 `try/except` 里，
@@ -420,9 +426,14 @@ LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_HOST=https://cloud.langfuse.com    # ⚠️ 必填，见下
 ```
 
-⚠️⚠️ **`LANGFUSE_HOST` 必须显式写**：Langfuse SDK 的 host 有**默认值**，
-配错了 key 但没配 host 时，**会静默往 `cloud.langfuse.com` 发**，本地还不报错。
-这是公开记录过的坑。写死它，并且**在 §12 的测试里断言 host 可配置**。
+⚠️⚠️ **`LANGFUSE_HOST` 必须显式写**。**已从安装好的 SDK 源码确认**（不是传闻、不是看文档）：
+
+```
+langfuse._client.client.Langfuse.__init__  →  _base_url = https://cloud.langfuse.com
+```
+
+**不配 host 就会把数据发去公有云**——对本项目这是**隐私事故级别的默认值**。
+写死它，并由 §12.2 的 `test_langfuse_host_config.py` 断言钉死。
 
 ### 10.3 密钥管理
 
@@ -463,31 +474,94 @@ observability:
 
 ## 12. 测试
 
-### 12.1 必须先做的实测（否则不要动手写实现）
+### 12.1 动手前的实测（2026-10-11 已全部跑完，附结果）
 
-按「先实测，再下结论」，**四条都要先跑通**：
+**验证环境**：独立 3.13 虚拟环境（`langfuse 4.17.0` + `fastapi 0.143.0` + `otel-sdk 1.45.1`），
+**未触碰项目主环境**。脱敏与 trace 两项用一个**本地捕获服务器**冒充 Langfuse 云端，
+断言的是**实际收到的字节**，不是 SDK 的自我声明。
 
-| # | 要验证的 | 为什么必须先验 |
+| # | 验证项 | 结果 |
 |---|---|---|
-| 1 | **中间件里 `get_current_trace_id()` 拿得到值**，且与 Langfuse UI 里看到的一致 | Starlette 中间件与 Langfuse 的 OTel 上下文是否同一 context，**文档没写**。拿不到就要改用别的方式注入 |
-| 2 | **`trace_context` 能把后台任务挂到原 trace 上** | 这是 `reattach()` 的替代品，是「按 trace_id 还原双链路」验收的落点 |
-| 3 | **`mask_otel_spans` 真的在导出前跑**（构造含标记的文本，确认 Langfuse 收到的是打码后的） | 官方说在导出阶段跑，但**上一版就栽在「注释声称安全 ≠ 实际安全」**（`builder.py:93-97`）。不许只看文档 |
-| 4 | **能从 SDK 取到「当前观测名」**（供 `_current_node()` 反推节点） | SDK 文档只保证 `get_current_observation_id()`（返回 ID 不返回名字）。取不到就必须换方案，而它影响 `llm_tokens_total` 的按节点分组 |
+| 1 | 中间件里 `get_current_trace_id()` | ✅ **通过**。中间件内 / 端点内 / 响应头三处**完全一致**（`7eb48f9c…`），且非全 0 |
+| 2 | `trace_context` 挂回原 trace | ✅ **通过**。后台观测的 trace_id 与根**逐字符相同**（`deb9480d…`） |
+| 3 | `mask_otel_spans` 在导出前跑 | ✅ **通过**。收到的 3 个 OTLP 请求里，**原始学号 `2023123456` 一次都没出现**，第 2 个请求里出现了 `[REDACTED:student_id]`；钩子被调用 1 次 |
+| 4 | 从 SDK 取「当前观测名」 | ❌ **不可行**。`obs.name` **不存在**（公开属性清单里没有 `name`）。名字只藏在私有属性 `obs._otel_span.name` 里 |
+| 5 | `capture_input/output=False` 挡不挡得住正文 | ✅ **通过**。节点函数返回的正文标记**未出现在发送字节里** |
+| 6 | `@observe` 包 **async** 函数 | ✅ **通过**（本项目节点全是 async） |
+| 7 | 忘记 `.end()` 的后果 | ✅ **确认会丢**：未 end 的观测**完全没出现在发送字节里**，且**不报错** |
+| 8 | 不配密钥时是否真的不发外网 | ✅ **通过**。收到 0 字节。⚠️ 但返回值有坑，见下 |
+| 9 | 不配 `host` 时的默认去向 | ⚠️ **确认危险**：从安装好的 SDK 源码读出 `_base_url = https://cloud.langfuse.com` |
 
-> **第 4 条的兜底方案**（取不到名字时）：
-> `observability.observe_node()` 在进入时把一个 `ContextVar[str]` 设成节点名，`_current_node()` 读它。
-> 这就是**回到 contextvars**——而 §3.2.3.1 明确警告过后台任务不能靠 contextvars 隐式继承。
-> ⚠️ 但**此处不矛盾**：节点执行是**同步的请求内调用链**，不是跨 asyncio 任务的长任务，
-> contextvars 在同步调用链上是可靠的。**跨任务的那两处仍然走 `trace_context`**（§5.4）。
+#### 由实测得出的三处设计修正（实现时必须照此写）
+
+**修正 1 —— `_current_node()` 改用 contextvar（不再是「兜底」，是唯一方案）**
+
+`obs.name` 取不到，`obs._otel_span.name` 是私有属性（版本一升就可能没）。
+唯一干净的路子是让 `observe_node()` 自己记：
+
+```python
+# core/observability.py
+_current_node: ContextVar[str] = ContextVar("rag_node", default="unknown")
+
+@contextmanager
+def observe_node(name: str, ...):
+    token = _current_node.set(name)
+    try:
+        with langfuse.start_as_current_observation(as_type="span",
+                                                    name=f"node.{name}", ...):
+            yield
+    finally:
+        _current_node.reset(token)
+```
+
+> ⚠️ 这**不违反** §3.2.3.1「后台任务不能靠 contextvars 隐式继承」那条警告——
+> 节点执行是**同步的请求内调用链**，contextvars 在此可靠；
+> **跨 asyncio 任务的那两处仍然走 `trace_context`**（§5.4），实测已通过（上表 #2）。
+
+**修正 2 —— `current_trace_id()` 必须兜底 `None`**
+
+实测：**未配置密钥时 `get_current_trace_id()` 返回 `None`**，不是 32 位十六进制串。
+若直接写进日志，`trace_id` 字段会变成 `null`，**破坏 §6 承诺的「全 0 兜底」契约**（现有 `logging.py` 与前端错误提示都依赖它是合法字符串）。
+
+```python
+def current_trace_id() -> str:
+    try:
+        return langfuse.get_client().get_current_trace_id() or "0" * 32
+    except Exception:          # ⚠️ 保留 logging.py:73 那条「日志不能因埋点故障挂掉」
+        return "0" * 32
+```
+
+**修正 3 —— `LANGFUSE_HOST` 必须显式配置并断言**
+
+实测从 SDK 源码读出默认 `_base_url = https://cloud.langfuse.com`。
+**不配 host 就会把数据发去公有云**——这是隐私事故级别的默认值，不是普通的默认值。
+除 §10.2 的「必须写死」外，再加一条测试（§12.2）钉死它。
+
+#### 尚未验证的部分（诚实标注）
+
+| 项 | 为什么没验 |
+|---|---|
+| **Metrics API v2 的实际返回形状** | 需要一个**真实的 Langfuse 项目**（密钥）。§8.1 的查询写法目前**只有官方文档依据，无实测** |
+| **Alerts 的配置与状态读取** | 同上。且 §13.1 的档位问题也依赖真实账号 |
+| **云端保留期** | 同上 |
+
+> ⚠️ 这三项是**方案里唯一还没落地证据的部分**。实施时应**先建 Langfuse 账号**做一次最小验证
+> （发一条 trace → 用 Metrics API 查出来 → 配一条告警），再动 §8 的代码。
 
 ### 12.2 新增测试
 
-| 测试 | 断言 |
-|---|---|
-| `test_langfuse_masking.py` | 构造含学号/手机号的 prompt，断言**导出前**已打码（沿用 `test_span_redaction.py` 的正控思路：既要断言敏感串不在，也要断言该有的字段在） |
-| `test_langfuse_no_content_in_span.py` | 节点观测**不含**输入输出（`capture_input/output=False` 的凭据） |
-| `test_langfuse_trace_id.py` | 同一次请求的日志 trace_id == 响应头 trace_id == Langfuse 的 trace_id |
-| `test_langfuse_host_config.py` | 断言 host 取自配置，且未配置时**不往云端发** |
+测试手段与 §12.1 的探针相同：**起一个本地捕获服务器冒充云端，断言实际收到的字节**——
+不用 mock 掉 SDK（mock 掉的正是最容易出问题的接缝）。
+
+| 测试 | 断言 | 钉住哪条实测发现 |
+|---|---|---|
+| `test_langfuse_masking.py` | 构造含学号/手机号的 prompt，断言**导出前**已打码（沿用 `test_span_redaction.py` 的正控思路：既要断言敏感串不在，也要断言该有的字段在） | §12.1 #3 |
+| `test_langfuse_no_content_in_span.py` | 节点观测**不含**输入输出（`capture_input/output=False` 的凭据） | §12.1 #5、#6 |
+| `test_langfuse_trace_id.py` | 同一次请求的日志 trace_id == 响应头 trace_id == Langfuse 的 trace_id | §12.1 #1 |
+| `test_langfuse_trace_id_disabled.py` | **未配置密钥时 `current_trace_id()` 返回 `"0"*32` 而非 `None`**；日志 JSON 里 `trace_id` 是合法字符串 | §12.1 **修正 2**（否则日志字段变 `null`） |
+| `test_langfuse_host_config.py` | host 取自配置；**默认值断言为 `https://cloud.langfuse.com`**（写明这个默认值是危险的），未配置时不发外网 | §12.1 #9（隐私事故级默认值） |
+| `test_langfuse_span_lifecycle.py` | 流式 `stream_raw` 即使抛异常，generation 也**必须被 `.end()`**——断言观测出现在捕获内容里 | §12.1 #7（忘 end 会**静默丢**，不报错） |
+| `test_langfuse_node_name.py` | 节点内 `_current_node()` 返回正确节点名（contextvar 生效） | §12.1 **修正 1** |
 
 ### 12.3 回归（必须仍通过）
 
@@ -548,6 +622,34 @@ observability:
 > 第 8 条是 §4.4「Prometheus 不可用时的降级」契约的移植版，**必须实测**——
 > 降级路径是典型的「平时看不出问题、出事才发现根本没接」的地方。
 
+#### 验收 C：静默失败边界（由 2026-10-11 可行性实测得出，负责人追加）
+
+**A、B 两条验收的是「功能对不对」；C 验的是「错了会不会不吭声」。**
+下面三条**都是实测发现的静默失败点**——它们不会报错、不会让页面变红，只会让数据悄悄不对。
+
+| # | 怎么验 | 判据 | 为什么单列（实测依据） |
+|---|---|---|---|
+| 1 | **不配 `LANGFUSE_*`** 起服务 → 提一次问 → 看 `logs/app.jsonl` | `trace_id` 字段是 **`"000…0"`（32 位）**，**不是 `null`** | 实测：未配置时 `get_current_trace_id()` 返回 **`None`**。不兜底就会写 `null`，破坏契约且**不报错** |
+| 2 | 配好密钥起服务 → 在 Langfuse 官网**你自己的项目**里找数据 | 数据出现在**你的项目**里 | 实测：SDK 默认 `_base_url = https://cloud.langfuse.com`。**配错 host 会发去公有云，本地毫无提示**——对本项目这是隐私事故 |
+| 3 | 提一个**走流式**的知识型问题 → 去 Langfuse 看 | `generate` 节点的 generation **存在**，且 **usage 有值** | 实测：`start_observation()` **忘了 `.end()` 就完全不出现在导出里**，且**不报错**。流式正是"开始与结束不连续"的那个场景（§5.2），最容易漏 |
+
+> ⚠️ 三条都是**"不验就不会发现"**的类型：功能测试全绿、页面全正常，但数据是错的或丢了。
+> 这也正是本次可行性检查的价值所在——**它们全是真跑出来的，不是推出来的。**
+
+#### 验收 D：尚未验证的云端部分（建好账号后第一件事）
+
+§12.1 末尾已标注：**Metrics API v2 与 Alerts 只有文档依据，无实测**（需要真实账号）。
+因此**在动 §8 的代码之前**，先做一次最小验证：
+
+| # | 干什么 | 通过判据 |
+|---|---|---|
+| 1 | 建 Langfuse 账号，按文档建一条最小 trace | 官网能看到 |
+| 2 | 用 Metrics API v2 把那 5 个指标查一遍 | 返回形状与 §8.1 设计对得上；**确认「结果为空」与「结果真的是 0」怎么区分**（`stats_service.py:203-205` 那个坑的移植） |
+| 3 | 配一条告警规则 | 能触发、状态读得到 |
+| 4 | 核对**保留期**与档位 | 满足 §13.1 未决项 2 |
+
+> **这四项没做完，§8 的代码不要动手**——否则是在没有依据的形状上写实现。
+
 ---
 
 ## 13. 已知风险与不做的事
@@ -594,6 +696,13 @@ observability:
 | 7 一并改主文档 | 负责人指定 | §11 |
 | 8~14 | 由决策 1~7 推导，实现时不得自行改动 | §2 |
 | 验收 A / B（两条端到端） | 负责人 2026-10-11 追加指定 | §12.4 |
+| 验收 C（静默失败边界） | 负责人要求「检查方案是否可实施，再分析并添加需要的验收标准」→ 由可行性实测得出 | §12.4、§12.1 |
+| 验收 D（云端未验证部分） | 同上。诚实标注 Metrics API / Alerts 尚无实测证据 | §12.4、§12.1 末 |
+
+**可行性实测记录**（2026-10-11）：独立 3.13 环境装 `langfuse 4.17.0` + 本地捕获服务器冒充云端，
+验证 9 项（§12.1）。结果 **8 项通过、1 项不可行**（`obs.name` 不存在），
+另有 **2 处设计必须修正**（`None` 兜底、contextvar 记节点名）与 **1 个确认的危险默认值**（host）。
+**这些全部是跑出来的，不是推出来的**——修正已回写进 §5.1 / §6 / §10.2 / §12.1。
 
 **事实来源**：Langfuse 官方文档五页实测（自托管 / Alerts / Metrics API v2 / Masking / Python SDK 埋点）+
 PyPI 元数据实测（`langfuse 4.17.0`）+ 本仓库代码与文档通读 + 本地三容器的 Prometheus/Jaeger 实查询。
