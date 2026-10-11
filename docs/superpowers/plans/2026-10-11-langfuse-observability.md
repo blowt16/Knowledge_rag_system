@@ -1921,11 +1921,24 @@ git commit -m "[refactor] 全部 telemetry 引用换源（6 文件）：SSE/后�
 
 - [ ] **Step 1: 确认没有残留引用**
 
+⚠️ **判据要精确到 import**（Task 8 踩过）：`observability.py` 的模块 docstring 里有
+**散文提及** `core/telemetry.py`，用宽 grep 会把它算进去、看起来像"还有引用"。
+
 ```bash
-grep -rn "telemetry\|record_llm_tokens\|opentelemetry" backend/app/ --include="*.py"
+grep -rnE "^\s*(from|import)\s.*telemetry|from app\.core\.telemetry|app\.core\.telemetry" backend/app/ --include="*.py"
 ```
 
 Expected: **无输出**。有输出就先改完再删 —— 否则删了会 import 崩。
+
+另跑一遍宽 grep 看**注释里**的过时提及（这些不影响运行，但会误导后来人）：
+
+```bash
+grep -rn "telemetry\.py\|record_llm_tokens" backend/app/ backend/tests/ --include="*.py"
+```
+
+Expected: 只剩 `core/observability.py` 顶部的历史说明（那是**有意保留**的散文，见该文件 docstring）。
+其余（Task 8 报告点名了 `core/logging.py:8`、`core/metrics.py:12`、`tests/unit/test_langfuse_node_span.py:77`）
+**在本步一并清掉** —— 它们指向的文件马上就不存在了。`metrics.py` 本身在本任务删除，其注释随之消失。
 
 - [ ] **Step 2: 删代码文件**
 
