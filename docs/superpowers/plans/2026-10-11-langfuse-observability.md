@@ -2476,8 +2476,9 @@ git commit -m "[feat] 告警改后端自算（方案 A）：阈值配置化，�
     #: LLM 成本（【方案 §8.2】新增，改造前完全没有）
     cost: float | None = None
     #: token 拆输入/输出（【方案 §8.2】新增；改造前只有一个合计）
-    #: ⚠️ 数据来自 Metrics API 的 usageType 分组，**不能把三行全加** ——
-    #:    实测它会同时返回 total/input/output，三者带同一个总量（Task 10 踩过，会变 3 倍）
+    #: ⚠️ 数据来自**三个独立 measure**（`inputTokens`/`outputTokens`/`totalTokens`），
+    #:    **不是** `usageType` 维度 —— 实测那个维度返回的三行是同一个总量的副本，
+    #:    既拆不开、全加还会报 3 倍（Task 10 踩过两次）
     token_input: float | None = None
     token_output: float | None = None
     #: 按节点的 p95 耗时（§8.2 新增；把 §4.4 表里「按节点分组」那条真正做出来）
@@ -2660,6 +2661,10 @@ admin 登录 → 打开仪表盘：
 - [ ] **B3** 错误率有值
 - [ ] **B4** token 用量有值
 - [ ] **B5** **LLM 成本**有值（新增面板）
+      ⚠️ **已知前置**：Task 10 实测 `totalCost`/`inputCost`/`outputCost` **都是 0** ——
+      大概率是 Langfuse 项目里**没配 DeepSeek 的模型价格**（不是代码问题）。
+      若确实如此，在 Langfuse 后台「Settings → Models」加上 `deepseek-flash` 的单价后再验；
+      **在此之前 B5 记「有值但恒 0」并注明原因**，不要当成通过。
 - [ ] **B6** **节点耗时 p95** 有值且按节点分行（新增面板）
 - [ ] **B7** 告警状态卡正常显示，不报错
 - [ ] **B8** 业务指标区块照常渲染（趋势/拒答分布/高频问题/降级次数）
