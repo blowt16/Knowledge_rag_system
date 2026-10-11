@@ -120,6 +120,39 @@ app = FastAPI(
 install_handlers(app)
 
 
+def _is_hex(value: str, length: int) -> bool:
+    """W3C trace id / span id 的合法性检查（长度 + 十六进制）。"""
+    return len(value) == length and all(c in "0123456789abcdef" for c in value.lower())
+
+
+def _incoming_trace_id(carrier: dict[str, str]) -> str | None:
+    """入站 `traceparent` → trace id；**任何畸形形态一律当作「没有传入上下文」**。
+
+    ⚠️ 这个 header **完全由客户端控制**，解析必须容错 —— 改造前用的是 OTel 官方
+       propagator（`TraceContextTextMapPropagator`），畸形值静默忽略；
+       等价行为是底线。手写解析后实测踩到**两条**客户端一行就能打出的 500：
+         1. `traceparent: garbage` → 原稿 `.split("-")[1]` 直接 IndexError；
+         2. `00-<32 位非十六进制>-…` → 值一路送进 Langfuse SDK，内部 `int(id, 16)`
+            抛 ValueError。
+       两条都在这里挡掉，不让客户端可控的字符串到达 SDK。
+
+    W3C 格式：`00-<32hex trace-id>-<16hex span-id>-<2hex flags>`。
+    版本 00 不允许额外字段；trace-id / span-id 全 0 规范判无效（OTel 同此判定）。
+    版本 `ff` 保留、未知版本一律不解析 —— 本项目的契约就是 OTel 注入的 `00-` 形态。
+    """
+    parts = carrier.get("traceparent", "").split("-")
+    if len(parts) != 4:
+        return None
+    version, trace_id, span_id, flags = parts
+    if version != "00" or not _is_hex(flags, 2):
+        return None
+    if not _is_hex(trace_id, 32) or trace_id == "0" * 32:
+        return None
+    if not _is_hex(span_id, 16) or span_id == "0" * 16:
+        return None
+    return trace_id
+
+
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
     """trace_id 生成与传播（【方案 §5.3】）。
@@ -135,8 +168,11 @@ async def trace_middleware(request: Request, call_next):
         return response
 
     carrier = {k.lower(): v for k, v in request.headers.items()}
-    trace_id = carrier.get("traceparent", "").split("-")[1] if "traceparent" in carrier else None
-    trace_ctx = {"trace_id": trace_id} if trace_id else None
+    # ⚠️ 入站 traceparent 必须**容错解析**（完全由客户端控制）：畸形一律当作
+    #    「没有传入上下文」，绝不让一行请求头把请求打成 500（实测两条路径，
+    #    详见 `_incoming_trace_id`）。
+    incoming = _incoming_trace_id(carrier)
+    trace_ctx = {"trace_id": incoming} if incoming else None
 
     with client.start_as_current_observation(
         as_type="span",
@@ -171,14 +207,18 @@ async def trace_middleware(request: Request, call_next):
                 span.update(level="ERROR",
                             status_message=f"HTTP {response.status_code}")
 
-        # ⚠️⚠️ 必须在 with **内**取 id（实测）：出了 with 观测已结束，
-        #     `get_current_trace_id()` 返回 None → 响应头变成全 0 占位。
-        trace_id = observability.current_trace_id()
+            # ⚠️⚠️ 两个 id 必须在 with **内**取（实测）：出了 with 观测已结束，
+            #     `get_current_trace_id()` 返回 None → 响应头退化成全 0 占位。
+            trace_id = observability.current_trace_id()
+            span_id = observability.current_span_id()
+            response.headers["x-trace-id"] = trace_id
+            # §3.2.3.1「返回前端」：W3C Trace Context 格式回传，便于前端/用户
+            # 报障时直接拿去 Langfuse 搜（span_id 取不到时是全 0，格式仍合法）。
+            response.headers["traceparent"] = f"00-{trace_id}-{span_id}-01"
 
     if pending is not None:
         raise pending          # 出了 with 才重抛 —— 见上面那条警告
 
-    response.headers["x-trace-id"] = trace_id
     return response
 
 
