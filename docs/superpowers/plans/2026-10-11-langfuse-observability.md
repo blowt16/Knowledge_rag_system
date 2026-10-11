@@ -2479,6 +2479,12 @@ git commit -m "[feat] 告警改后端自算（方案 A）：阈值配置化，�
 > 它们现在是**错的**：运行指标读的是 Langfuse Metrics API v2，告警是后端自算的。
 > ⚠️ **但 `stats_service.py` 里那两处 Prometheus 字样要留着** —— 那是解释历史的注释
 > （说明为什么 5xx 用 `level` 而不是状态码维度）。**改错地方会把有用的注释删掉。**
+>
+> ⚠️ 另补一处**配置注释的误导**（Task 11 审查指出）：`app.yaml` 里
+> `http_5xx_rate` 的注释写着「5xx 比例超过 5%」，但该阈值实际拦的是
+> **`level=ERROR` 的观测占比**（Metrics API 没有 HTTP 状态码维度）。
+> 加一句「实际是 ERROR 级观测占比」即可 —— 读这份配置的人看不到代码里的解释。
+> **不要改键名**：名字继承自规则名 `RAGHttp5xxRate`，是前端契约的一部分。
 
 **Files:**
 - Modify: `frontend/web/src/api/schema.d.ts`（重新生成）
