@@ -1155,6 +1155,20 @@ git commit -m "[refactor] 图节点埋点换 Langfuse：关内容捕获 + contex
 
 ## Task 6: LLM 调用包 generation
 
+> ⚠️ **先读这条（Task 5 实测发现的同类陷阱）**：Langfuse 内部用 OTel 的
+> `start_as_current_span`，其 `use_span` 默认 `record_exception=True`，
+> 且 SDK **不暴露关闭它的参数** —— 异常一旦穿过 `start_as_current_observation()`
+> 的 with 块，`exception.message`（= `str(e)`，可能回显 prompt）与整个栈都会上传。
+>
+> **本任务用的是 `start_observation()`（手工观测），它不设置当前 OTel 上下文**
+> （官方说明：Manual observations 的 "No Context Shift"），因此**理论上不该中招** ——
+> 但**这是推断，不是实测**。按「先实测再下结论」：
+>
+> **Step 1 之前先补一个验证**：写一个临时用例，让 `complete()` 抛异常，
+> 断言捕获到的字节里**没有**异常 message。若真的没有 → 手工观测路径安全，照常做下去；
+> **若有** → 按 Task 5 的做法处理（在 try 内吞掉、`finally` 里 `obs.end()` 之后再到函数外重抛），
+> 并把发现写进报告。**不许跳过这一步直接假设它安全。**
+
 **Files:**
 - Modify: `backend/app/core/llm.py`
 - Create: `backend/tests/unit/test_langfuse_generation.py`
@@ -1162,6 +1176,10 @@ git commit -m "[refactor] 图节点埋点换 Langfuse：关内容捕获 + contex
 **Interfaces:**
 - Consumes: Task 2 的 `observability.get_client()` / `current_node()`
 - Produces: 三个 LLM 函数的签名**不变**；每次调用产生一条 generation 观测（带 usage）
+
+> 附带修一个 Task 5 报告指出的既有小问题：`llm._current_node()` 在**没有 Langfuse 客户端**时
+> 会退化成 `"unknown"`。本任务把它改成 `observability.current_node()`（读 contextvar）后，
+> 该退化消失 —— 顺手在测试里钉住「未启用客户端时也能取到正确节点名」。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1601,7 +1619,40 @@ def test_2xx_is_not_marked_error(capture):
 
     observability.get_client().flush()
     assert "ERROR" not in capture.body()
+
+
+def test_unhandled_exception_does_not_leak_message_to_cloud(capture):
+    """★ 端点抛异常时，异常 message **不得**进入发出去的字节。
+
+    ⚠️ 实测（Task 5）：Langfuse 内部用 OTel 的 `start_as_current_span`，
+       其 `use_span` 默认 `record_exception=True` 且**无参数可关** ——
+       异常一旦穿过 with 块，`exception.message`（= `str(e)`）与整个栈都会上传。
+       中间件必须在 with 内部吞掉、外部重抛。
+    """
+    from app.main import trace_middleware
+
+    SECRET_IN_ERROR = "学号2023123456的回显正文"
+
+    app = FastAPI()
+    app.middleware("http")(trace_middleware)
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError(SECRET_IN_ERROR)
+
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        tc.get("/boom")
+
+    observability.get_client().flush()
+    body = capture.body()
+    assert body, "没发出任何东西 —— 断言会假通过"
+    assert SECRET_IN_ERROR not in body, (
+        f"异常 message 被发到了云端：\n{body[:500]}"
+    )
 ```
+
+并在 `backend/app/main.py` 里**不要**加 FastAPI 的全局异常处理器来吞这个 ——
+异常必须照常冒泡给上层（`install_handlers` 已有自己的处理），中间件的职责只是不让它穿过观测的 with 块。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1640,21 +1691,38 @@ async def trace_middleware(request: Request, call_next):
         trace_context=trace_ctx,
         input=None, output=None,
     ) as span:
-        response = await call_next(request)
-        span.update(metadata={
-            "http.method": request.method,
-            "http.route": request.url.path,
-            "http.status_code": response.status_code,
-        })
-        # ★ 5xx 标 ERROR —— Metrics API **没有 HTTP 状态码维度**（实测 29 个合法
-        #    维度里没有它），错误率面板靠 level 分组读（【方案 §8.3】）。
-        #    ⚠️ 不标的话错误率恒为 0，且不报错。
-        if response.status_code >= 500:
-            span.update(level="ERROR",
-                        status_message=f"HTTP {response.status_code}")
+        # ⚠️⚠️ **异常必须在这里吞掉、到 with 外面再重抛**（Task 5 实测发现）：
+        #     Langfuse 内部用的是 OTel 的 `start_as_current_span`，其 `use_span`
+        #     默认 `record_exception=True`，而 SDK **不暴露关闭它的参数**
+        #     （实测 `start_as_current_observation` 的签名里没有 record_exception）。
+        #     异常一旦穿过 with，`exception.message`（= `str(e)`，可能回显 prompt）
+        #     与整个栈就会发到云端。
+        pending: BaseException | None = None
+        response = None
+        try:
+            response = await call_next(request)
+        except BaseException as e:  # noqa: BLE001
+            span.update(level="ERROR", status_message=type(e).__name__)
+            pending = e
 
-        response.headers["x-trace-id"] = observability.current_trace_id()
-        return response
+        if response is not None:
+            span.update(metadata={
+                "http.method": request.method,
+                "http.route": request.url.path,
+                "http.status_code": response.status_code,
+            })
+            # ★ 5xx 标 ERROR —— Metrics API **没有 HTTP 状态码维度**（实测 29 个
+            #    合法维度里没有它），错误率面板靠 level 分组读（【方案 §8.3】）。
+            #    ⚠️ 不标的话错误率恒为 0，且不报错。
+            if response.status_code >= 500:
+                span.update(level="ERROR",
+                            status_message=f"HTTP {response.status_code}")
+
+    if pending is not None:
+        raise pending          # 出了 with 才重抛 —— 见上面那条警告
+
+    response.headers["x-trace-id"] = observability.current_trace_id()
+    return response
 ```
 
 并把 `lifespan` 里（L102-104）改为：
