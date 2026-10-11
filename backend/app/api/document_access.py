@@ -31,10 +31,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import db
+from app.core import observability
 from app.core.config import data_dir, secret
 from app.core.deps import CurrentUser, OptionalUser
 from app.core.exceptions import Forbidden, NotFound, Unauthorized
-from app.core.telemetry import current_trace_id
 from app.retrieval import filters
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def _audit_escalation(user, document_id: str, action: str) -> None:
         "user_role": user.role,
         "document_id": document_id,
         "action": action,
-        "trace_id": current_trace_id(),
+        "trace_id": observability.current_trace_id(),
     })
 
 

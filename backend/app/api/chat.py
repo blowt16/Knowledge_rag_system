@@ -13,8 +13,8 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from app.core import observability
 from app.core.deps import CurrentUser
-from app.core.telemetry import current_span_id, current_trace_id, reattach
 from app.schemas.chat import ChatRequest
 from app.services import chat_service
 
@@ -28,10 +28,10 @@ async def chat_stream(body: ChatRequest, user: CurrentUser, request: Request):
 
     # ⚠️ Starlette 的 StreamingResponse 生成器可能跑在另一个 context 里，
     #    trace 会丢 —— 先取出来，进生成器第一件事就是挂回来（§3.2.3.1）
-    trace_id, span_id = current_trace_id(), current_span_id()
+    trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
 
     async def generator():
-        with reattach(trace_id, span_id):
+        with observability.attach_trace(trace_id, span_id):
             async for frame in chat_service.stream_chat(
                 query=body.query,
                 session_id=session_id,

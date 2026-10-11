@@ -63,7 +63,7 @@ class UpstreamError(AppError):
 
 
 def install_handlers(app: FastAPI) -> None:
-    from app.core.telemetry import current_trace_id
+    from app.core import observability
 
     @app.exception_handler(AppError)
     async def _app_error(_request: Request, exc: AppError):
@@ -73,7 +73,7 @@ def install_handlers(app: FastAPI) -> None:
                 "code": exc.code,
                 "message": exc.message,
                 # 用户报障时可直接定位（§3.2.3.1）
-                "trace_id": current_trace_id(),
+                "trace_id": observability.current_trace_id(),
             },
         )
 
@@ -84,7 +84,7 @@ def install_handlers(app: FastAPI) -> None:
             content={
                 "code": f"http_{exc.status_code}",
                 "message": str(exc.detail),
-                "trace_id": current_trace_id(),
+                "trace_id": observability.current_trace_id(),
             },
         )
 
@@ -96,7 +96,7 @@ def install_handlers(app: FastAPI) -> None:
                 "code": "validation_error",
                 "message": "请求参数不合法",
                 "detail": exc.errors(),
-                "trace_id": current_trace_id(),
+                "trace_id": observability.current_trace_id(),
             },
         )
 
@@ -110,6 +110,6 @@ def install_handlers(app: FastAPI) -> None:
             content={
                 "code": "internal",
                 "message": "服务器内部错误",
-                "trace_id": current_trace_id(),
+                "trace_id": observability.current_trace_id(),
             },
         )

@@ -9,9 +9,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import StreamingResponse
 
+from app.core import observability
 from app.core.deps import require_role
 from app.core.exceptions import NotFound
-from app.core.telemetry import current_span_id, current_trace_id
 from app.services import document_service as docs
 
 router = APIRouter(prefix="/api/admin/documents", tags=["admin:documents"])
@@ -32,7 +32,7 @@ async def upload(
 ):
     """单文件上传。返回 `{batch_id, tasks:[{task_id, file_name}]}`。"""
     filename = file.filename or "unnamed"
-    trace_id, span_id = current_trace_id(), current_span_id()
+    trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
 
     task_id, batch_id = await docs.create_upload(
         filename=filename,

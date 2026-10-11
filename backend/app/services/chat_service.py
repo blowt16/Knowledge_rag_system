@@ -33,9 +33,9 @@ import uuid
 from typing import AsyncIterator, Awaitable, Callable
 
 from app import db
+from app.core import observability
 from app.core.config import cfg
 from app.core.deps import UserContext
-from app.core.telemetry import current_trace_id
 from app.graph.builder import get_graph
 from app.graph.state import UserContextLite, new_state
 from app.services.conversation_service import (
@@ -386,7 +386,7 @@ async def _persist(session_id: str, query: str, final: dict, latency_ms: int,
             session_id=session_id,
             user_id=user.id,
             user_role=user.role,
-            trace_id=current_trace_id(),
+            trace_id=observability.current_trace_id(),
             query=query,
             resolved_query=final.get("resolved_query", ""),
             route=route,

@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from app import db
+from app.core import observability
 from app.core.config import data_dir
 from app.core.exceptions import AppError, NotFound
-from app.core.telemetry import reattach
 from app.ingestion.pipeline import IngestRequest, ingest
 from app.retrieval import vector
 from app.services import index_service
@@ -148,7 +148,7 @@ def schedule_ingest(req: IngestRequest, *, trace_id: str, span_id: str) -> None:
     """
 
     async def _run() -> None:
-        with reattach(trace_id, span_id):
+        with observability.attach_trace(trace_id, span_id):
             try:
                 await ingest(req)
             finally:
