@@ -89,3 +89,16 @@ async def clean_locks():
     yield
     async with db.tx() as conn:
         await conn.execute("DELETE FROM session_locks")
+
+
+@pytest.fixture(autouse=True)
+def _never_talk_to_langfuse(monkeypatch):
+    """测试进程绝不往 Langfuse 发数据。
+
+    ⚠️ 为什么必须有这道闸：`app/core/config.py` 在 **import 时**就 `load_dotenv`，
+       而仓库根 `.env` 里配着真实的 `LANGFUSE_*`。没有这道闸，任何走到
+       `observability.setup()` 的测试都会**真的把数据发去云端**。
+       需要客户端的测试自己用 monkeypatch 设 dummy 值（见 test_langfuse_*.py）。
+    """
+    for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
