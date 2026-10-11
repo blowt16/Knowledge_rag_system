@@ -595,7 +595,8 @@ export interface paths {
         };
         /**
          * Retrieval
-         * @description ★ 运行指标（PromQL 查 Prometheus）—— M4 里恒为 `available: false` + 200。
+         * @description ★ 运行指标（Langfuse Metrics API v2，【方案 §8.1】）——
+         *     不可用时返 `available: false` + 200。
          */
         get: operations["retrieval_api_admin_stats_retrieval_get"];
         put?: never;
@@ -1607,6 +1608,13 @@ export interface components {
             /** Messages */
             messages: components["schemas"]["MessageItem"][];
         };
+        /** NodeLatency */
+        NodeLatency: {
+            /** Node */
+            node: string;
+            /** P95 */
+            p95: number;
+        };
         /** OverviewResponse */
         OverviewResponse: {
             /** Document Count */
@@ -1756,6 +1764,17 @@ export interface components {
             error_rate?: number | null;
             /** Token Usage */
             token_usage?: number | null;
+            /** Cost */
+            cost?: number | null;
+            /** Token Input */
+            token_input?: number | null;
+            /** Token Output */
+            token_output?: number | null;
+            /**
+             * Node Latency
+             * @default []
+             */
+            node_latency: components["schemas"]["NodeLatency"][];
             alerts?: components["schemas"]["AlertStatus"] | null;
         };
         /**

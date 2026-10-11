@@ -61,6 +61,11 @@ class AlertStatus(BaseModel):
     rules: list[AlertRuleState] = []
 
 
+class NodeLatency(BaseModel):
+    node: str
+    p95: float
+
+
 class RetrievalMetricsResponse(BaseModel):
     available: bool
     status: str | None = None
@@ -68,5 +73,15 @@ class RetrievalMetricsResponse(BaseModel):
     latency_p95: float | None = None
     error_rate: float | None = None
     token_usage: float | None = None
-    #: 告警状态（Prometheus 规则，非 Alertmanager）—— 读不到时为 None
+    #: LLM 成本（【方案 §8.2】新增，改造前完全没有）
+    cost: float | None = None
+    #: token 拆输入/输出（【方案 §8.2】新增；改造前只有一个合计）
+    #: ⚠️ 数据来自**三个独立 measure**（`inputTokens`/`outputTokens`/`totalTokens`），
+    #:    **不是** `usageType` 维度 —— 实测那个维度返回的三行是同一个总量的副本，
+    #:    既拆不开、全加还会报 3 倍（Task 10 踩过两次）
+    token_input: float | None = None
+    token_output: float | None = None
+    #: 按节点的 p95 耗时（§8.2 新增；把 §4.4 表里「按节点分组」那条真正做出来）
+    node_latency: list[NodeLatency] = []
+    #: 告警状态（**后端自算**，【方案 §8.3】方案 A）—— 读不到时为 None
     alerts: AlertStatus | None = None

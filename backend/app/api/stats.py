@@ -2,7 +2,7 @@
 
 **分层**（A7）：这里只做参数校验与响应封装，业务在 `services/stats_service.py`。
 
-⚠️ `stats/retrieval` 在 Prometheus 不可用时返回 **`available: false` 且 HTTP 200**
+⚠️ `stats/retrieval` 在 Langfuse 不可用时返回 **`available: false` 且 HTTP 200**
    （M4-D5）—— §4.4 要求运行指标不可用时**业务指标区块照常渲染**，
    所以它不是错误，不能 500。
 """
@@ -52,5 +52,6 @@ async def hot_questions(user=AdminUser, limit: int = Query(10, ge=1, le=50)
 
 @router.get("/retrieval", response_model=RetrievalMetricsResponse)
 async def retrieval(user=AdminUser) -> RetrievalMetricsResponse:
-    """★ 运行指标（PromQL 查 Prometheus）—— M4 里恒为 `available: false` + 200。"""
+    """★ 运行指标（Langfuse Metrics API v2，【方案 §8.1】）——
+    不可用时返 `available: false` + 200。"""
     return RetrievalMetricsResponse(**await stats_service.retrieval_metrics())

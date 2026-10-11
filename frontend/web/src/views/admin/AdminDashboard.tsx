@@ -3,13 +3,14 @@
  *
  * **两块数据源，别混**：
  * - **业务指标读 PostgreSQL**（核心指标卡 / 问答量趋势 / 拒答分布 / 高频问题 / 降级次数）
- * - **运行指标读 Prometheus**（节点耗时 / 端到端延迟 / 错误率 / token 用量 / 告警状态）
+ * - **运行指标读 Langfuse Metrics API v2**（节点耗时 / 端到端延迟 / 错误率 / token 用量
+ *   / 成本 / 告警状态）
  *
  * ⚠️ **运行指标不可用时，业务指标区块照常渲染**（§4.4）——
  *    所以 `stats/retrieval` 不可用只影响它自己那一块，且它返回的是
  *    `available:false` + HTTP 200，不是错误。
  * ⚠️ 「降级次数」读的是 `stats/overview` 的 `degradation_counts`（PG），
- *    **不是** `stats/retrieval` —— 后者读 Prometheus，两处说法原本打架，
+ *    **不是** `stats/retrieval` —— 后者读 Langfuse，两处说法原本打架，
  *    已按 §4.4 统一。
  */
 import { useEffect, useState } from 'react'
@@ -140,7 +141,7 @@ export default function AdminDashboard() {
         </Card>
       </div>
 
-      {/* ---- 运行指标（Prometheus）——独立降级，不影响上面 ---- */}
+      {/* ---- 运行指标（Langfuse）——独立降级，不影响上面 ---- */}
       <Card>
         <CardHeader><CardTitle className="text-base">运行指标</CardTitle></CardHeader>
         <CardContent>
@@ -149,18 +150,22 @@ export default function AdminDashboard() {
               <Stat title="延迟 p50（ms）" value={retrieval.latency_p50 ?? '—'} />
               <Stat title="延迟 p95（ms）" value={retrieval.latency_p95 ?? '—'} />
               <Stat title="错误率" value={retrieval.error_rate ?? '—'} />
-              <Stat title="token 用量" value={retrieval.token_usage ?? '—'} />
+              <Stat title="token 用量" value={retrieval.token_usage ?? '—'}
+                    hint={`输入 ${retrieval.token_input ?? '—'} / 输出 ${retrieval.token_output ?? '—'}`} />
+              {/* —— §8.2 新增：Langfuse 白捡的三项 —— */}
+              <Stat title="LLM 成本" value={retrieval.cost ?? '—'} hint="按模型自动折算" />
               <AlertCard alerts={retrieval.alerts} />
+              <NodeLatencyCard rows={retrieval.node_latency ?? []} />
               <p className="col-span-2 text-xs text-muted-foreground lg:col-span-4">
-                下钻到 Jaeger（<code>http://127.0.0.1:16686</code>）看单次请求
-                的具体环节：搜这条回答响应头里的 <code>traceparent</code> 即可。
+                下钻到 Langfuse（<code>{'https://cloud.langfuse.com'}</code>）看单次请求
+                的具体环节：搜这条回答响应头里的 <code>x-trace-id</code> 即可。
               </p>
             </div>
           ) : (
             <p className="py-6 text-center text-sm text-muted-foreground">
               运行指标暂不可用
               {retrieval?.status ? `（${retrieval.status}）` : ''} ——
-              业务指标不受影响。启动脚本会一并拉起 Prometheus / Jaeger。
+              业务指标不受影响。可观测性由 Langfuse 云提供。
             </p>
           )}
         </CardContent>
@@ -171,8 +176,8 @@ export default function AdminDashboard() {
 
 /** 告警状态卡（§4.4）：**有 firing 即标红**。
  *
- * ⚠️ 读的是 **Prometheus 自己的规则状态**（`/api/v1/rules`），本项目不接
- *    Alertmanager（无人值班、没有接收方，见方案 3.2.3.3）。
+ * ⚠️ 状态由**后端拿指标自算**（【方案 §8.3】方案 A：Langfuse 没有可读的告警
+ *    API），本项目不接 Alertmanager（无人值班、没有接收方，见方案 3.2.3.3）。
  */
 function AlertCard({ alerts }: {
   alerts?: { firing: number; pending: number; rules: { name: string; state: string }[] } | null
@@ -211,6 +216,31 @@ function Stat({ title, value, hint }: {
           {value === undefined || value === null ? '—' : value}
         </p>
         {hint && <p className="mt-1 text-xs text-muted-foreground">{hint}</p>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** 按节点的 p95 耗时（【方案 §8.2】新增 —— §4.4 要求「按节点分组」，改造前从未实现）。 */
+function NodeLatencyCard({ rows }: { rows: { node: string; p95: number }[] }) {
+  if (!rows.length) {
+    return <Stat title="节点耗时 p95" value="—" hint="暂无数据" />
+  }
+  const worst = rows[0]
+  return (
+    <Card className="col-span-2 lg:col-span-4">
+      <CardContent className="pt-6">
+        <p className="text-sm text-muted-foreground">节点耗时 p95（ms）</p>
+        <div className="mt-2 space-y-1">
+          {rows.slice(0, 8).map(r => (
+            <div key={r.node} className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">{r.node}</span>
+              <span className={r === worst ? 'font-semibold' : ''}>
+                {Math.round(r.p95)}
+              </span>
+            </div>
+          ))}
+        </div>
       </CardContent>
     </Card>
   )
