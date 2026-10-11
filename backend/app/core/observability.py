@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
@@ -47,10 +48,11 @@ _service_name = "campus-rag"
 
 
 def _reset_for_test() -> None:
-    """测试用：清掉单例。**不要在生产代码里调**。"""
-    global _client, _enabled
+    """测试用：清掉单例与脱敏规则缓存。**不要在生产代码里调**。"""
+    global _client, _enabled, _patterns_cache
     _client = None
     _enabled = False
+    _patterns_cache = None
 
 
 def resolved_base_url() -> str | None:
@@ -98,6 +100,7 @@ def setup(service_name: str = "campus-rag") -> None:
         # ★ 显式传参（源码优先级①），绕开环境变量与 SDK 缺省值
         base_url=base_url,
         environment=cfg("observability.environment", "development"),
+        mask_otel_spans=mask_otel_spans,
     )
     _enabled = True
     logger.info("Langfuse 已启用", extra={"event": "observability.enabled",
@@ -192,3 +195,72 @@ def node_context(name: str) -> Iterator[None]:
         yield
     finally:
         _current_node.reset(token)
+
+
+# ---------------------------------------------------------------- 脱敏
+# 【方案 §7】：正文照传（保住 Langfuse 的价值），标识符在**导出前**打码。
+# 官方钩子 `mask_otel_spans` 在导出阶段跑，即「数据离开应用之前」。
+
+_REDACTED = "[REDACTED:{name}]"
+_patterns_cache: list[tuple[str, Any]] | None = None
+
+
+def _compiled_patterns() -> list[tuple[str, Any]]:
+    """编译脱敏正则（带缓存）。配置为空时返回空列表 —— 不脱敏会由测试兜住。"""
+    global _patterns_cache
+    if _patterns_cache is not None:
+        return _patterns_cache
+    import re
+
+    raw = cfg("observability.masking.patterns", []) or []
+    compiled = []
+    for item in raw:
+        try:
+            compiled.append((item["name"], re.compile(item["regex"])))
+        except Exception:  # noqa: BLE001 —— 配置写错不该让服务起不来
+            logger.warning("脱敏规则编译失败，已跳过",
+                           extra={"event": "observability.mask_rule_invalid",
+                                  "rule": item.get("name")})
+    _patterns_cache = compiled
+    return compiled
+
+
+def _redact_text(text: str) -> str:
+    for name, rx in _compiled_patterns():
+        text = rx.sub(_REDACTED.format(name=name), text)
+    return text
+
+
+def _redact_value(value: Any) -> Any:
+    """递归脱敏：字符串走正则，容器递归下去，其余原样。"""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(v) for v in value]
+    return value
+
+
+def mask_otel_spans(*, params: Any):
+    """`mask_otel_spans` 钩子：导出前把 span 属性里的标识符打码。
+
+    ⚠️ 实测确认本钩子**确实在导出前跑**、且打码后的内容才是云端收到的
+    （【方案 §12.1】#3，用本地捕获服务器验的）。
+    但**别据此认为它永远对** —— `test_langfuse_masking.py` 才是每次都跑的凭据。
+    """
+    if not cfg("observability.masking.enabled", True):
+        return None
+
+    from langfuse.types import MaskOtelSpansResult, OtelSpanPatch
+
+    patches = {}
+    for identifier, span in (params.spans or {}).items():
+        sets = {}
+        for key, value in (span.attributes or {}).items():
+            redacted = _redact_value(value)
+            if redacted != value:
+                sets[key] = redacted
+        if sets:
+            patches[identifier] = OtelSpanPatch(set_attributes=sets)
+    return MaskOtelSpansResult(span_patches=patches) if patches else None
