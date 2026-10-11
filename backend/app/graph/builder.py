@@ -39,9 +39,8 @@ from functools import lru_cache
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
-from opentelemetry.trace import Status, StatusCode
 
-from app.core import telemetry
+from app.core import observability
 
 from app.graph.nodes.build_context import build_context_node
 from app.graph.nodes.chat import chat_node
@@ -81,50 +80,74 @@ def _after_generate(state: RAGState) -> Literal["cite", "__end__"]:
 
 
 def traced(node_name: str, fn):
-    """给节点套一层 span（§3.2.3.3 加分项⑤：Jaeger 里能看见完整图执行轨迹）。
+    """给节点套一层 Langfuse 观测（【方案 §5.1】）。
 
-    ⚠️⚠️ **属性里只放"多少钱、几秒、降没降级"，一个字的正文都不放**（§3.2.3.2）。
+    ⚠️⚠️ **属性里只放"多少钱、几秒、降没降级"，一个字的正文都不放**（【方案 §7】）。
        节点的输入输出全是用户提问与检索片段 —— 一旦当属性写进去，
-       日志那边脱敏做得再好也没用，Jaeger 里照样摆着学号姓名。
+       日志那边脱敏做得再好也没用，云端照样摆着学号姓名。
 
-    ⚠️⚠️ 异常**只记类型、不记 message**：`record_exception` 会把异常文本与栈写进
-       span **事件**，而 LLM 相关异常的 message 可能回显 prompt。
+    ⚠️⚠️ **必须关掉内容捕获**（`@observe` 装饰器那边叫
+       `capture_input=False, capture_output=False`）：
+       Langfuse 默认会把输入输出与异常都记下来（官方：automatically capture
+       inputs, outputs, timings, and errors）。不关掉就等于把 state 整个传上去。
+       ⚠️ 本 SDK 版本（4.17.0）的 `start_as_current_observation` **没有**这对
+       参数（实测签名），这里等价的做法是**显式传 `input=None, output=None`** ——
+       别照着上面那行去加参数，会 TypeError。
 
-       ★ **显式传 `record_exception=False` 是必须的**：不写它，
-       `start_as_current_span` 的上下文管理器会**自动**记录异常 ——
-       我第一版就是在注释里写了「刻意不用 record_exception」却没传这个参数，
-       被 `test_span_redaction.py` 当场证伪（标记文本原样出现在 span 事件里）。
-       注释声称的安全 ≠ 实际的安全，这条测试就是两者的对账。
+    ⚠️ 异常**只记类型、不记 message**：message 可能回显 prompt。
+       实测过「注释声称安全 ≠ 实际安全」的教训（旧 builder.py:93-97），
+       `test_langfuse_node_span.py` 是这条承诺每次都跑的凭据。
 
-    ⚠️ 用**手工埋点**而不是 `opentelemetry-instrumentation-langchain`：自动埋点
-       默认就把 prompt 与模型返回写进 span 属性，得反过来去关（且不同版本开关名
-       不一样，关了没关要靠翻 Jaeger 才知道）。这里从头到尾就没让它进过 span。
+    ★★ **异常不能从 `with` 里逃出去**（Task 5 实施时实测，方案原稿未覆盖）：
+       Langfuse 内部走 `otel_tracer.start_as_current_span(...)`（`client.py`
+       `_start_as_current_otel_span_with_processed_media`），而 OTel 的
+       `use_span` 缺省 `record_exception=True`；SDK 的
+       `start_as_current_observation` **没有**任何参数能关掉它（实测签名里
+       没有 `capture_input`/`capture_output`/`record_exception`）。
+       异常一旦从 with 逃出，OTel 就把 `exception.message`（= `str(e)`，
+       可能回显 prompt）与整条栈写成 span **事件** —— 实测标记文本原样出现在
+       发出的字节里（`test_node_exception_records_type_only` 当场证伪）。
+       所以：with 内部**先吞下异常**、记完类型，出了 with 再抛。
     """
     @functools.wraps(fn)
     async def _wrapper(state: RAGState) -> dict:
-        tracer = telemetry.get_tracer("graph")
-        with tracer.start_as_current_span(
-            f"node.{node_name}",
-            record_exception=False,          # ★ 见上面那条警告，别删
-            set_status_on_exception=False,   # 状态由下面显式设置，不让 SDK 覆盖成 UNSET
-        ) as span:
-            span.set_attribute("rag.node", node_name)
-            try:
-                result = await fn(state)
-            except Exception as e:  # noqa: BLE001
-                span.set_status(Status(StatusCode.ERROR))
-                span.set_attribute("rag.error", type(e).__name__)
-                raise
-            if isinstance(result, dict):
-                entries = result.get("trace") or []
-                if entries:
-                    last = entries[-1]
-                    span.set_attribute("rag.duration_ms", int(last.get("ms", 0)))
-                    span.set_attribute("rag.recalled", int(last.get("recalled", 0)))
-                    degraded = last.get("degraded")
-                    if degraded:
-                        span.set_attribute("rag.degraded", str(degraded))
+        client = observability.get_client()
+
+        with observability.node_context(node_name):
+            if client is None:
+                # 未启用（跑测试/CLI）：照常执行，不产生任何观测
+                return await fn(state)
+
+            failure: BaseException | None = None
+            with client.start_as_current_observation(
+                as_type="span", name=f"node.{node_name}",
+                input=None, output=None,
+            ) as obs:
+                try:
+                    result = await fn(state)
+                except Exception as e:  # noqa: BLE001
+                    obs.update(level="ERROR",
+                               status_message=type(e).__name__,
+                               metadata={"rag.error": type(e).__name__})
+                    failure = e   # ★ 见上面那条：出了 with 再抛，别在这里 raise
+                else:
+                    if isinstance(result, dict):
+                        entries = result.get("trace") or []
+                        if entries:
+                            last = entries[-1]
+                            meta = {
+                                "rag.duration_ms": int(last.get("ms", 0)),
+                                "rag.recalled": int(last.get("recalled", 0)),
+                            }
+                            degraded = last.get("degraded")
+                            if degraded:
+                                meta["rag.degraded"] = str(degraded)
+                            obs.update(metadata=meta)
+
+            if failure is not None:
+                raise failure
             return result
+
     return _wrapper
 
 
