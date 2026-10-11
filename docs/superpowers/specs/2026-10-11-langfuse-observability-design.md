@@ -325,21 +325,49 @@ observability:
 
 ### 8.1 `stats_service.py` 的改造
 
+> ✅ **本节形状已对着真实项目实测**（2026-10-11，见 §12.4 验收 D），不是文档推断。
+
+**实测确认的调用形状**：
+
+```
+GET /api/public/v2/metrics?query=<JSON 字符串>        ← 是【一个 query 参数】，不是散装参数
+Authorization: Basic <public_key>:<secret_key>
+
+query = {
+  "view": "observations",
+  "metrics": [{"measure": "latency", "aggregation": "p95"}],
+  "dimensions": [{"field": "name"}],          # 可选，按维度分组
+  "fromTimestamp": "2026-10-01T00:00:00Z",    # ⚠️ 必填，无默认值
+  "toTimestamp":   "2026-10-12T00:00:00Z"     # ⚠️ 必填
+}
+→ {"data": [{"name": "node.retrieve", "p95_latency": 1234}]}
+```
+
+返回字段名是 **`<聚合>_<指标>` 拼接**（实测：`count_count`、`p95_latency`、`sum_totalCost`、`sum_totalTokens`）。
+
 | 现在 | 改成 |
 |---|---|
-| `_PROM_QUERIES` 五条 PromQL，打 Prometheus | 五条 **Metrics API v2** 查询，打 Langfuse（`httpx` 调 `GET /api/public/v2/metrics`） |
-| `_prom_rules()` 读 `/api/v1/rules` | 读 **Langfuse Alerts 的当前状态** |
+| `_PROM_QUERIES` 五条 PromQL，打 Prometheus | 五条 Metrics API v2 查询，打 Langfuse |
+| `_prom_rules()` 读 `/api/v1/rules` | ⚠️ **行不通**——告警没有公开 API，见 §8.3 |
 | `PROMETHEUS_URL` 未配 → `available: false` | 换成 `LANGFUSE_*` 未配 → `available: false`（**语义与降级路径完全保留**） |
 
-⚠️ **降级契约不变**：§4.4 写的「Prometheus 不可用时运行指标区块显示暂不可用、业务指标照常渲染」
-**原样保留**，只是把「Prometheus 不可用」换成「Langfuse 不可用」。api 层仍返 **HTTP 200**（M4-D5）。
+⚠️ **`or vector(0)` 那条修补要移植，而且坑更大了**。实测空结果**有两种形态**：
 
-⚠️ **`or vector(0)` 那条修补要移植**：`stats_service.py:203-205` 记着一个实测踩过的坑——
-一次 5xx 都没有时序列不存在 → 整条表达式无结果 → 面板显示「—」看起来像没接上。
-换成 Metrics API 后，**同样要处理「结果为空」与「结果真的是 0」的区别**。
+| 场景 | 实际返回 |
+|---|---|
+| 不分组、窗口无数据 | `{"data":[{"count_count":0,"p95_latency":null}]}` ← **latency 是 `null`，不是 0** |
+| 有分组、窗口无数据 | `{"data":[]}` ← **空数组**（连行都没有） |
+
+所以移植时要处理**三种情况**：`data` 为空数组、`data` 里字段为 `null`、字段真的是 `0`。
+直接写 `float(row["p95_latency"])` 会在第二种形态上**抛异常**（`None` 不能转 float），
+失败后若被 swallow 就变成静默的「—」，正是 `stats_service.py:203-205` 记的那个坑的放大版。
 
 ⚠️ **`token_usage` 用累计值不用 rate** 的教训同样移植：`stats_service.py:211-213` 写明
 「问答是稀疏事件，窗口两端数值常常相同，rate 会算成 0（实测踩过 —— 指标明明有 331，rate 报 0）」。
+
+⚠️ **时间窗有下限**：实测 `2026-09-01` 作 `fromTimestamp` 报
+`"fromTimestamp must be before toTimestamp"`（**报错信息有误导性**——真实原因不是顺序反了）。
+实现时窗口一律取「相对当前时间」（如近 24h），**不要硬编码绝对日期**。
 
 ### 8.2 新增指标（决策 5 后半句：「有价值的就加上」）
 
@@ -354,17 +382,47 @@ observability:
 > 前两项是**净增能力**；第三项是把 §3.2.3.3 仪表盘表里那条「节点耗时分位数（**按节点分组**）」
 > **真正做出来**——自建栈里它一直只存在于告警规则里，面板从未实现。
 
-### 8.3 告警：`prometheus-rules.yml` → Langfuse Alerts
+### 8.3 告警：`prometheus-rules.yml` → ⚠️ 需要改设计（实测踩空）
 
-三条现有规则逐一映射：
+**实测结果**：Langfuse **告警没有公开 REST API**。六个候选端点全部 404：
 
-| 现规则 | Langfuse Alert 配法 | 备注 |
+```
+GET /api/public/alerts              → 404
+GET /api/public/v2/alerts           → 404
+GET /api/public/alert-rules         → 404
+GET /api/public/monitors            → 404
+GET /api/public/automations         → 404
+GET /api/public/v2/automations      → 404
+```
+
+> Langfuse Alerts **功能是有的**（官方文档确认，UI 里可配，支持 Slack/Webhook 通知），
+> 但**只有 UI，没有 API**。所以「后端读告警状态 → 仪表盘标红」这条路**走不通**。
+
+**这直接推翻本文初稿的设计**（初稿写的是「`_prom_rules()` 改读 Langfuse Alerts 状态」）。
+
+#### 替代方案（推荐 A，需负责人确认）
+
+| | A. 后端自己算阈值（**推荐**） | B. 撤掉告警卡 |
 |---|---|---|
-| `RAGNodeP95High`（节点 p95 > 10s） | 数据源 Observations，指标 p95 latency，窗口 5m，阈值 10 | **这条现在是坏的**（§1.1），换过去就修好了 |
-| `RAGHttp5xxRate`（5xx > 5%） | 数据源 Observations，按 status 过滤计数，窗口 5m，阈值 5% | |
-| `RAGSpanErrorRateHigh`（错误率 > 5%） | 同上 | 原注释写明「本项目当前不标 span 状态，平时恒为 0」——**这条要么真去标状态，要么删掉** |
+| 做法 | 后端用 Metrics API v2 取指标 → 与 `app.yaml` 里的阈值比较 → 返回 `firing: true/false` → 前端标红 | 仪表盘不显示告警；告警只在 Langfuse UI 里看 |
+| 保住 §4.4 的「面板标红」交付物 | ✅ 保住 | ❌ 丢掉 |
+| 阈值配在哪 | `app.yaml`（配置化，与既有做法一致） | Langfuse UI |
+| 缺点 | 与 Langfuse UI 里若也配了告警，**两处阈值不同步** | §3.2.3.5 的「加分项⑦ 面板标红」直接没了 |
 
-⚠️ **云平台 Hobby 档只有 2 条告警额度**。三条规则**放不下**，需要取舍——见 §13.1 未决项。
+**推荐 A** 的理由：你要的「阈值标红标定」是 §3.2.3.5 的加分项交付物，
+而 B 等于把它删了。A 的实现成本不高——指标已经在取了，只多一步比较。
+Langfuse UI 里的 Alerts **仍可配**，用于 Slack/邮件通知，两者不冲突（只是别指望阈值自动同步）。
+
+三条现有规则在 A 方案下的落法：
+
+| 现规则 | A 方案下怎么写 | 备注 |
+|---|---|---|
+| `RAGNodeP95High`（节点 p95 > 10s） | Metrics API v2 按 `name` 分组取 p95 → 比阈值 | **这条现在是坏的**（§1.1），换过去顺带修好 |
+| `RAGHttp5xxRate`（5xx > 5%） | 需先确认能否按 HTTP 状态码过滤（§13.1 未决项 3） | |
+| `RAGSpanErrorRateHigh` | 建议**删掉** | 原注释写明「本项目当前不标 span 状态，平时恒为 0」——它从来就没触发过 |
+
+> ⚠️ 若走 A 方案，§13.1 未决项 1（Hobby 档 2 条告警额度）**自动消失**——
+> 因为不再需要 Langfuse 侧的告警额度。
 
 ---
 
@@ -420,20 +478,30 @@ dependencies = [
 
 ```bash
 # 可观测性（Langfuse 云）
-# ⚠️ 两个都不配 = 完全不发外网（跑测试、跑 CLI 时就是这种状态）
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_HOST=https://cloud.langfuse.com    # ⚠️ 必填，见下
+# ⚠️ 两个 key 都不配 = 完全不发外网（跑测试、跑 CLI 时就是这种状态）
+LANGFUSE_PUBLIC_KEY="pk-lf-..."
+LANGFUSE_SECRET_KEY="sk-lf-..."
+LANGFUSE_BASE_URL="https://cloud.langfuse.com"   # ⚠️ 必填，见下
 ```
 
-⚠️⚠️ **`LANGFUSE_HOST` 必须显式写**。**已从安装好的 SDK 源码确认**（不是传闻、不是看文档）：
+⚠️⚠️ **必须显式写 base_url**。**已从安装好的 SDK 源码逐行确认**（不是传闻、不是看文档）：
 
-```
-langfuse._client.client.Langfuse.__init__  →  _base_url = https://cloud.langfuse.com
+```python
+# langfuse/_client/client.py  Langfuse.__init__
+self._base_url = (
+    base_url                                  # ① 代码显式传参（最优先）
+    or os.environ.get(LANGFUSE_BASE_URL)      # ② 环境变量 LANGFUSE_BASE_URL
+    or host                                   # ③ 显式 host 参数
+    or os.environ.get(LANGFUSE_HOST, "https://cloud.langfuse.com")   # ④ 默认值
+)
 ```
 
-**不配 host 就会把数据发去公有云**——对本项目这是**隐私事故级别的默认值**。
-写死它，并由 §12.2 的 `test_langfuse_host_config.py` 断言钉死。
+**两个环境变量都认**：`LANGFUSE_BASE_URL`（优先）与 `LANGFUSE_HOST`。
+默认值 `https://cloud.langfuse.com` 只有在**两个都不配**时才生效——
+对本项目这是**隐私事故级别的默认值**：配了 key 却漏配地址，数据会静默发去公有云。
+
+最稳的做法是**代码里显式传 `base_url=`**（优先级①，绕开环境变量）。
+无论用哪种，都由 §12.2 的 `test_langfuse_host_config.py` 断言钉死。
 
 ### 10.3 密钥管理
 
@@ -537,16 +605,14 @@ def current_trace_id() -> str:
 **不配 host 就会把数据发去公有云**——这是隐私事故级别的默认值，不是普通的默认值。
 除 §10.2 的「必须写死」外，再加一条测试（§12.2）钉死它。
 
-#### 尚未验证的部分（诚实标注）
+#### 云端部分（2026-10-11 已对真实项目验完，结果见 §12.4 验收 D）
 
-| 项 | 为什么没验 |
+| 项 | 结论 |
 |---|---|
-| **Metrics API v2 的实际返回形状** | 需要一个**真实的 Langfuse 项目**（密钥）。§8.1 的查询写法目前**只有官方文档依据，无实测** |
-| **Alerts 的配置与状态读取** | 同上。且 §13.1 的档位问题也依赖真实账号 |
-| **云端保留期** | 同上 |
-
-> ⚠️ 这三项是**方案里唯一还没落地证据的部分**。实施时应**先建 Langfuse 账号**做一次最小验证
-> （发一条 trace → 用 Metrics API 查出来 → 配一条告警），再动 §8 的代码。
+| Metrics API v2 实际返回形状 | ✅ 已拿到，回写进 §8.1（含**空结果的两种形态**） |
+| Alerts 的 API | ❌ **没有公开 API** → §8.3 已改设计（推荐后端自算阈值） |
+| v1 vs v2 接口 | ⚠️ **v1 对本组织全部不可用（410）**，一切走 v2 |
+| 云端保留期 | ⚠️ 仍需在 Langfuse 后台核对档位（§13.1 未决项 4） |
 
 ### 12.2 新增测试
 
@@ -636,19 +702,30 @@ def current_trace_id() -> str:
 > ⚠️ 三条都是**"不验就不会发现"**的类型：功能测试全绿、页面全正常，但数据是错的或丢了。
 > 这也正是本次可行性检查的价值所在——**它们全是真跑出来的，不是推出来的。**
 
-#### 验收 D：尚未验证的云端部分（建好账号后第一件事）
+#### 验收 D：云端最小验证（2026-10-11 **已对真实项目跑完**，附结果）
 
-§12.1 末尾已标注：**Metrics API v2 与 Alerts 只有文档依据，无实测**（需要真实账号）。
-因此**在动 §8 的代码之前**，先做一次最小验证：
+对着真实项目 `Knowledge_rag_system` 跑的，**4 项里 3 项通过、1 项踩空**：
 
-| # | 干什么 | 通过判据 |
+| # | 干什么 | 结果 |
 |---|---|---|
-| 1 | 建 Langfuse 账号，按文档建一条最小 trace | 官网能看到 |
-| 2 | 用 Metrics API v2 把那 5 个指标查一遍 | 返回形状与 §8.1 设计对得上；**确认「结果为空」与「结果真的是 0」怎么区分**（`stats_service.py:203-205` 那个坑的移植） |
-| 3 | 配一条告警规则 | 能触发、状态读得到 |
-| 4 | 核对**保留期**与档位 | 满足 §13.1 未决项 2 |
+| 1 | 发一条最小 trace，确认云上收得到 | ✅ **通过**。`GET /api/public/projects` 200；用 Metrics API 反查拿到 `count=2`、`sum_totalTokens=10`（正是发出的 7+3），**证明数据真的落库了** |
+| 2 | 摸清 Metrics API v2 的真实形状 | ✅ **通过**。形状已回写进 §8.1；空结果的**两种形态**也拿到了（`[{count:0, latency:null}]` / `[]`） |
+| 3 | 配一条告警规则 | ❌ **踩空**：告警**没有公开 API**（6 个候选端点全 404）。§8.3 已按此改设计 |
+| 4 | 核对保留期与档位 | ⚠️ **未完成**：需在 Langfuse 后台看档位设置（§13.1 未决项 4） |
 
-> **这四项没做完，§8 的代码不要动手**——否则是在没有依据的形状上写实现。
+**验收 D 还额外炸出一个会返工的问题**：
+
+```
+GET /api/public/traces/{id}  →  410
+{"error":"LEGACY_API_UNAVAILABLE_FOR_NEW_ORGANIZATION",
+ "message":"... is a legacy API that is not available to organizations
+            created on or after September 16, 2026.
+            Migrate this request to GET /api/public/v2/observations?..."}
+```
+
+> ⚠️ **本项目所属组织是 2026-09-16 之后创建的，v1 接口全部不可用**。
+> 所有接口调用**必须直接走 v2**，不能照抄任何写 v1 的教程或旧文档。
+> 这条如果等到实施时才发现，§8 会整个返工——**这正是"先验收再动手"的价值**。
 
 ---
 
@@ -656,10 +733,12 @@ def current_trace_id() -> str:
 
 ### 13.1 未决项（实施前需负责人拍板）
 
-| # | 问题 | 影响 |
-|---|---|---|
-| 1 | **云平台 Hobby 档只有 2 条告警额度**，现有 3 条规则放不下 | 要么删一条（`RAGSpanErrorRateHigh` 本来就恒为 0），要么升级档位 |
-| 2 | **Langfuse 云的保留期与项目要求是否匹配** | §3.2.3.6 原写「Prometheus 保留 15 天」。Langfuse 云各档保留期不同，需按实际档位核对 |
+| # | 问题 | 影响 | 状态 |
+|---|---|---|---|
+| 1 | **告警改走 A 方案还是 B 方案**（§8.3） | 决定「面板标红」这个 §3.2.3.5 加分项是否保留 | ⚠️ **待定**（推荐 A） |
+| 2 | ~~云平台 2 条告警额度放不下 3 条规则~~ | — | ✅ **已消失**：实测告警无 API，改走 A 方案后不再需要额度 |
+| 3 | **Metrics API 能否按 HTTP 状态码过滤/分组**（`RAGHttp5xxRate` 要用） | 决定 5xx 那条规则能不能原样搬过去 | ⚠️ **待验证**（实测只验了按 `name` / `level` 分组） |
+| 4 | **云平台保留期是否满足「15 天」** | §3.2.3.6 原写 Prometheus 保留 15 天 | ⚠️ **待核对**（需在 Langfuse 后台看档位设置） |
 
 ### 13.2 明确不做
 
@@ -697,12 +776,25 @@ def current_trace_id() -> str:
 | 8~14 | 由决策 1~7 推导，实现时不得自行改动 | §2 |
 | 验收 A / B（两条端到端） | 负责人 2026-10-11 追加指定 | §12.4 |
 | 验收 C（静默失败边界） | 负责人要求「检查方案是否可实施，再分析并添加需要的验收标准」→ 由可行性实测得出 | §12.4、§12.1 |
-| 验收 D（云端未验证部分） | 同上。诚实标注 Metrics API / Alerts 尚无实测证据 | §12.4、§12.1 末 |
+| 验收 D（云端最小验证） | 同上 | §12.4、§12.1 末 |
+| 验收 D 已完成（2026-10-11，对真实项目） | 负责人提供账号密钥后执行 | §12.4 |
 
-**可行性实测记录**（2026-10-11）：独立 3.13 环境装 `langfuse 4.17.0` + 本地捕获服务器冒充云端，
-验证 9 项（§12.1）。结果 **8 项通过、1 项不可行**（`obs.name` 不存在），
-另有 **2 处设计必须修正**（`None` 兜底、contextvar 记节点名）与 **1 个确认的危险默认值**（host）。
-**这些全部是跑出来的，不是推出来的**——修正已回写进 §5.1 / §6 / §10.2 / §12.1。
+**可行性实测记录**（2026-10-11）：分两轮，**全部是跑出来的，不是推出来的**。
+
+**第一轮**（独立 3.13 环境装 `langfuse 4.17.0` + 本地捕获服务器冒充云端）：
+验证 9 项（§12.1），**8 通过、1 不可行**（`obs.name` 不存在）。
+产出 **2 处设计必须修正**（`None` 兜底、contextvar 记节点名）与 **1 个确认的危险默认值**（host）。
+回写进 §5.1 / §6 / §10.2 / §12.1。
+
+**第二轮**（对真实 Langfuse 项目 `Knowledge_rag_system`）：验收 D 4 项，**3 通过、1 踩空**：
+
+- ✅ 数据真上云（Metrics API 反查 `count=2`、`sum_totalTokens=10`）
+- ✅ Metrics API v2 真实形状拿到 → 回写 §8.1（含**空结果的两种形态**）
+- ❌ **告警没有公开 API**（6 个端点全 404）→ **推翻初稿设计**，§8.3 改为后端自算阈值
+- ⚠️ **v1 接口对本组织全部 410**（组织建于 2026-09-16 后）→ 一切走 v2
+
+> 两轮里有 **3 处推翻了原设计**（`_current_node()`、告警读法、Metrics API 调用形状）
+> 和 **1 处会返工的坑**（v1 不可用）。**这些都是文档上看不出来、只有真跑才会暴露的。**
 
 **事实来源**：Langfuse 官方文档五页实测（自托管 / Alerts / Metrics API v2 / Masking / Python SDK 埋点）+
 PyPI 元数据实测（`langfuse 4.17.0`）+ 本仓库代码与文档通读 + 本地三容器的 Prometheus/Jaeger 实查询。
