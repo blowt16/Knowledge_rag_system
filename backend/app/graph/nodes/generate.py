@@ -400,7 +400,15 @@ async def _stream_generate(prompt: str, writer, timeout: float) -> tuple[str, st
                 if text and parser.state.decision != "REFUSED_NO_EVIDENCE":
                     writer({"type": "token", "text": text})
             if parser.state.finished:
-                break
+                # ⚠️⚠️ **别改回 `break`**（验收 A4/C3 实测的 bug，2026-10-11）：
+                #    答案正文到 `}` 就齐了，但**上游的流还没结束** ——
+                #    带 `usage` 的那个 chunk 在内容**之后**（`choices` 是空数组），
+                #    提前退出循环就永远读不到它，Langfuse 里留下一条
+                #    「有 output、usageDetails={}」的 generation。
+                #    继续读（不再下发 token，parser.feed 已自动吞掉尾部）
+                #    才能把 token 用量写进这次观测；实测尾部只有 ~1ms
+                #    （模型收尾后立刻断流，2026-10-11 真实 API 计时）。
+                continue
     except Exception as e:  # noqa: BLE001
         logger.warning("流式生成中断：%s", e, extra={"event": "generate.stream_failed",
                                                 "node": "generate"})

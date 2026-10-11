@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.core import llm, observability
@@ -107,6 +109,77 @@ def test_stream_generation_is_ended_even_on_error(capture, monkeypatch):
     assert "deepseek-flash" in body, (
         "流式观测没出现 —— 多半是异常路径漏了 .end()（实测：忘 end 会静默丢，不报错）"
     )
+
+
+def test_streaming_generate_records_usage(capture, monkeypatch):
+    """★ 流式生成也要把 token 用量写进 generation（验收 A4 / C3 实测的 bug）。
+
+    ⚠️ 上游把带 `usage` 的 chunk 放在**内容之后**（`choices` 是**空数组**）。
+       消费方（`generate._stream_generate`）见到答案 JSON 的收尾 `}` 就退出循环 ——
+       尾部那个 chunk 永远读不到，Langfuse 里于是是一条
+       「有 output、usageDetails={}」的 generation，`qa_logs` 也拿不到数。
+       **静默**：不报错、不告警，只有反查云端字节才看得出来。
+
+    ⚠️ 本用例走**真实消费方**（`generate._stream_generate`）而不是直接遍历
+       `llm.stream_raw` —— 丢数的那一环就在消费方，绕开它测等于没测。
+    """
+    import asyncio
+
+    import httpx
+
+    from app.graph.nodes import generate as gen_node
+
+    #: 与验收探针同款：先内容、后 usage（choices 空）、再 [DONE]
+    content = '{"decision":"ANSWERED","answer":"图书馆每天 8:00 至 22:00 开放[1]。"}'
+    lines = (
+        [f'data: {json.dumps({"choices": [{"delta": {"content": c}}]})}'
+         for c in _chunks(content)]
+        + [f'data: {json.dumps({"choices": [], "usage": _USAGE})}',
+           "data: [DONE]"]
+    )
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def stream(self, *a, **k):
+            class _Ctx:
+                async def __aenter__(self_inner): return _FakeStreamResponse(_aiter(lines))
+                async def __aexit__(self_inner, *a): return False
+            return _Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
+
+    written: list[dict] = []
+    decision, answer, error = asyncio.run(
+        gen_node._stream_generate("提示词", written.append, 30.0)
+    )
+    observability.get_client().flush()
+
+    assert error is None, f"流式路径不该报错：{error}"
+    assert decision == "ANSWERED" and answer == "图书馆每天 8:00 至 22:00 开放[1]。"
+    body = capture.body()
+    assert body, "没发出任何东西 —— 断言会假通过"
+    # ⚠️ 断言 usage 的**键与值**，不只断言数字存在 —— 裸数字会命中 trace id / 时间戳
+    assert "langfuse.observation.usage_details" in body or "usage_details" in body, \
+        "usage 结构没进 generation"
+    assert '"input": 54' in body and '"output": 12' in body, (
+        "流式的 token 用量没写进 generation —— 多半是消费方提前退出，"
+        "尾部那个 choices 为空的 usage chunk 没被读到"
+    )
+
+
+#: 流式响应的 usage 是**尾部**那个 chunk 给的（`choices` 为空数组）
+_USAGE = {"prompt_tokens": 54, "completion_tokens": 12}
+
+
+def _chunks(text: str) -> list[str]:
+    """把一段文本切成几片，模拟逐 token 到达。"""
+    return [text[i:i + 7] for i in range(0, len(text), 7)]
+
+
+async def _aiter(lines):
+    for line in lines:
+        yield line
 
 
 def test_generation_records_node_name(capture, monkeypatch):

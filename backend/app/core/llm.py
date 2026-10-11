@@ -176,6 +176,12 @@ async def stream_raw(
 
     ⚠️ 只产出 `content` 的 delta：思考模式下 `reasoning_content` 是另一个字段，
        混进来会让节点 9 的 JSON 解析器看到非 JSON 内容。
+
+    ⚠️⚠️ **消费方契约：必须把流读到自然结束才能拿到 usage。**
+       带 `usage` 的 chunk 在**内容之后**（`choices` 为空数组，见下面的注释），
+       消费方若在正文收尾时就 `break`，`obs.update(usage_details=…)` 永远不会执行
+       —— 观测里于是只有 output、没有 token 数，且**不报错**（验收 A4/C3 实测）。
+       提前收工的正确写法是继续 `continue` 把流读完，**不是** `break`。
     """
     body: dict[str, Any] = {
         "model": _model(),
