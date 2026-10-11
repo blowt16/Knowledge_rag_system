@@ -39,3 +39,9 @@ ingestion:
 bootstrap:
   admin_username: ADMIN_USERNAME
   admin_password: ADMIN_PASSWORD
+
+observability:
+  # Langfuse 云（【方案 §10.3】）——本文件只存变量名，值在仓库根 .env
+  langfuse_public_key: LANGFUSE_PUBLIC_KEY
+  langfuse_secret_key: LANGFUSE_SECRET_KEY
+  langfuse_base_url: LANGFUSE_BASE_URL
