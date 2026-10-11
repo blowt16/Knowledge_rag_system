@@ -271,7 +271,9 @@ async def test_hot_questions_is_top_10_by_default(client, admin, logs):
 _V2_LATENCY_P50 = 250.5
 _V2_LATENCY_P95 = 1300.5
 _V2_ERROR_COUNTS = {"DEFAULT": 90, "ERROR": 10}      # → 10% ，越过 5% 阈值
-_V2_TOKENS = 4321
+_V2_TOKENS_TOTAL = 4321          # = input + output（照实测的 10 = 7 + 3 同构）
+_V2_TOKENS_IN = 1234             # ⚠️ 刻意与总量不同：退化成副本（三字段同值）当场红
+_V2_TOKENS_OUT = 3087
 _V2_COST = 0.25
 _V2_NODE_P95 = {
     "node.rerank": 15000.0,        # > 10s 阈值 → firing
@@ -281,22 +283,24 @@ _V2_NODE_P95 = {
 
 
 def _v2_payload(request: httpx.Request) -> dict:
-    """按 `query` 参数里要的维度，回**实测形状**的 v2 响应体。"""
+    """按 `query` 参数里要的度量/维度，回**实测形状**的 v2 响应体。"""
     query = json.loads(request.url.params["query"])
+    measures = [m["measure"] for m in query["metrics"]]
     dims = [d["field"] for d in query.get("dimensions") or []]
+    if "totalTokens" in measures:
+        # ⚠️ 实测形状（2026-10-11 真项目查得）：**一行**，三个 measure 分列
+        #    （input 7 / output 3 / total 10）—— 拆 token 靠的是**分开的
+        #    measure**，不是 `usageType` 维度（那个只会把同一个总量回成三行）。
+        #    夹具照抄，且刻意让 input ≠ total：实现退化成副本当场红。
+        return {"data": [{"sum_inputTokens": _V2_TOKENS_IN,
+                          "sum_outputTokens": _V2_TOKENS_OUT,
+                          "sum_totalTokens": _V2_TOKENS_TOTAL,
+                          "sum_totalCost": _V2_COST}]}
     if dims == ["name"]:
         return {"data": [{"name": n, "p95_latency": v} for n, v in _V2_NODE_P95.items()]}
     if dims == ["level"]:
         return {"data": [{"level": k, "count_count": v}
                          for k, v in _V2_ERROR_COUNTS.items()]}
-    if dims == ["usageType"]:
-        # ⚠️ 实测形状（2026-10-11 真项目查得）：`total` / `input` / `output`
-        #    **三行，带的是同一个总量** —— 夹具照抄，好让「三行全加」当场红
-        #    （全加 = 3 倍）。成本实测三行都是 0，看不出差别，这里用非零同值
-        #    把同一种错法也钉住。
-        return {"data": [{"usageType": t, "sum_totalTokens": _V2_TOKENS,
-                          "sum_totalCost": _V2_COST}
-                         for t in ("total", "input", "output")]}
     # 不分组：延迟
     return {"data": [{"count_count": 100, "p50_latency": _V2_LATENCY_P50,
                       "p95_latency": _V2_LATENCY_P95}]}
@@ -349,7 +353,7 @@ async def test_retrieval_returns_metrics_when_langfuse_answers(client, admin,
     assert body["latency_p95"] == _V2_LATENCY_P95
     assert body["error_rate"] == pytest.approx(
         _V2_ERROR_COUNTS["ERROR"] / sum(_V2_ERROR_COUNTS.values()))   # ERROR 10/100
-    assert body["token_usage"] == _V2_TOKENS
+    assert body["token_usage"] == _V2_TOKENS_TOTAL
 
 
 async def test_retrieval_reports_firing_alerts(client, admin, monkeypatch):
@@ -385,27 +389,27 @@ async def test_retrieval_service_exposes_cost_and_node_latency(monkeypatch):
 
     body = await stats_service.retrieval_metrics()
 
-    assert body["cost"] == _V2_COST, "三行同值时取 total 行；全加会变成 3 倍"
+    assert body["cost"] == _V2_COST, "成本与 token 同一行：取该行的 sum_totalCost"
     assert body["node_latency"] == [{"node": "rerank", "p95": 15000.0},
                                     {"node": "retrieve", "p95": 120.0}]
 
 
-async def test_retrieval_service_splits_tokens_by_usage_type(monkeypatch):
-    """token 按 `usageType` 取（§8.2 的「拆输入/输出」）—— 在 service 层锁住。
+async def test_retrieval_service_splits_tokens_by_measure(monkeypatch):
+    """token 拆分走**三个独立 measure**（§8.2 的「拆输入/输出」）—— service 层锁住。
 
-    ⚠️ 夹具是**实测形状**：三行带同一个总量，所以这里三个数是相等的，**不是**
-       在宣称「输入=输出=总量」。这条锁的是**取哪一行**（全加会变成 3 倍）；
-       「input 行 → token_input」的映射由单测 `test_usage_tokens_falls_back_…`
-       用不同的两行值锁。本项目当前的真实数据里三行也确实同值（正因如此，
-       T12 面板上「输入/输出」要等有真流量后复核 —— 见任务报告 concern）。
+    ⚠️ 夹具是**实测形状**（一行三字段，见 `_v2_payload`），三个数**互不相同**：
+       实现若退化成「三个字段读同一个值」（`usageType` 时代那种副本），
+       `input != total` 当场红。历史坑：`dimensions=[usageType]` 回三行副本，
+       全加会变成 3 倍 —— 现在维度整个不用了。
     """
     _langfuse_answering(monkeypatch)
 
     body = await stats_service.retrieval_metrics()
 
-    assert body["token_usage"] == _V2_TOKENS, "三行同值时取 total 行；全加会变成 3 倍"
-    assert body["token_input"] == _V2_TOKENS
-    assert body["token_output"] == _V2_TOKENS
+    assert body["token_usage"] == _V2_TOKENS_TOTAL
+    assert body["token_input"] == _V2_TOKENS_IN
+    assert body["token_output"] == _V2_TOKENS_OUT
+    assert body["token_input"] != body["token_usage"], "拆分退化成副本必须红"
 
 
 async def test_retrieval_available_even_before_any_span(client, admin, monkeypatch):

@@ -54,31 +54,29 @@ def test_extract_scalar_keeps_real_zero():
 
 
 # ============================================================
-# 修复轮：`usageType` 分组会回**三行**（评审 2026-10-11 对真项目实测所得）
-# —— 以上是简报原文，以下是实测后追加（【方案 §8.2】的 token 拆输入/输出同批补上）
+# 修复轮：拆 token **不能靠 `usageType` 维度**（实测 2026-10-11，真项目）
+# —— `usageType` 分组回的三行只是**同一个 `totalTokens` 的副本**；
+#   真正的拆分是**三个 measure 一行**：inputTokens / outputTokens / totalTokens。
+#   以上是简报原文，以下是实测后追加（【方案 §8.2】的 token 拆输入/输出同批补上）。
 # ============================================================
 
-#: 实测原文（真项目查询返回的形状）：三行，带的是**同一个总量**。
-_USAGE_THREE_ROWS = {"data": [
-    {"usageType": "total", "sum_totalTokens": 10},
-    {"usageType": "input", "sum_totalTokens": 10},
-    {"usageType": "output", "sum_totalTokens": 10},
-]}
+#: 实测原文（真项目查询返回的形状）：**一行**，三个 measure 分列 —— 7 / 3 / 10。
+_USAGE_ONE_ROW = {"data": [{"sum_inputTokens": 7, "sum_outputTokens": 3,
+                            "sum_totalTokens": 10, "sum_totalCost": 0}]}
 
 
-def test_usage_tokens_does_not_sum_the_three_rows():
-    """★ 三行不能全加 —— 全加会把 token 用量报成 **3 倍**，而且看不出哪里不对。"""
-    total, inp, out = stats_service._usage_tokens(_USAGE_THREE_ROWS)
-    assert total == 10, f"有 total 行就用它，全加会变成 30（实得 {total}）"
-    assert inp == 10
-    assert out == 10
+def test_usage_tokens_reads_the_three_measures():
+    """★ 拆分是**真拆**：input/output 各有自己的字段，不是总量的副本。
 
-
-def test_usage_tokens_falls_back_to_input_plus_output():
-    """没有 `total` 行时才用 input+output 兜底（这里两行值不同，顺带锁住映射关系）。"""
-    payload = {"data": [{"usageType": "input", "sum_totalTokens": 4},
-                        {"usageType": "output", "sum_totalTokens": 6}]}
-    assert stats_service._usage_tokens(payload) == (10.0, 4.0, 6.0)
+    ⚠️ `input != total` / `output != total` 两条断言必须有：历史坑是
+       `dimensions=[usageType]` 把同一个总量回成三行（10/10/10）——
+       实现若退化成「三个字段读同一个数」，只断言 total 的用例不会红。
+    """
+    total, inp, out = stats_service._usage_tokens(_USAGE_ONE_ROW)
+    assert total == 10, f"总量取 sum_totalTokens（实得 {total}）"
+    assert inp == 7
+    assert out == 3
+    assert inp != total and out != total, "拆分退化成副本（==总量）必须红"
 
 
 def test_usage_tokens_handles_empty_and_null():
@@ -86,16 +84,6 @@ def test_usage_tokens_handles_empty_and_null():
     assert stats_service._usage_tokens(None) == (None, None, None)
     assert stats_service._usage_tokens({"data": []}) == (None, None, None)
     assert stats_service._usage_tokens(
-        {"data": [{"usageType": "total", "sum_totalTokens": None}]}
+        {"data": [{"sum_inputTokens": None, "sum_outputTokens": None,
+                   "sum_totalTokens": None}]}
     ) == (None, None, None)
-
-
-def test_usage_total_takes_the_total_row_not_the_sum():
-    """成本是**同一个陷阱**（实测三行都带同一个 `sum_totalCost`）：
-    取 `total` 行；只有 input/output 行时返回 None —— 宁可显示「—」，也不报 3 倍。"""
-    payload = {"data": [{"usageType": t, "sum_totalCost": 0.25}
-                        for t in ("total", "input", "output")]}
-    assert stats_service._usage_total(payload, "sum_totalCost") == 0.25
-    assert stats_service._usage_total(
-        {"data": [{"usageType": "input", "sum_totalCost": 0.25}]},
-        "sum_totalCost") is None

@@ -247,48 +247,21 @@ async def _lf_query(query_json: str) -> dict | None:
 
 
 def _usage_tokens(payload: dict | None) -> tuple[float | None, float | None, float | None]:
-    """按 usageType 拆 token。返回 (total, input, output)。
+    """拆 token 用量。返回 (total, input, output)。
 
-    ⚠️ **不能把所有行加起来**（实测，2026-10-11）：`dimensions=[usageType]` 会返回
-       **三行** —— `total` / `input` / `output`，三者都带同一个总量。
-       直接 `sum(rows)` 会把 token 用量报成 **3 倍**，而且看不出哪里不对。
-       有 `total` 行就用它；没有才用 input+output 兜底。
+    ⚠️ 拆分靠的是**三个独立 measure、一行返回**（实测，2026-10-11）：
+       查询 `metrics=[inputTokens, outputTokens, totalTokens]`（**不带维度**）
+       回一行 —— `sum_inputTokens` / `sum_outputTokens` / `sum_totalTokens`。
+       实测样本：input 7 / output 3 / total 10（真拆分，非副本）。
+
+    ⚠️ **别回头用 `dimensions=[usageType]`**（实测踩过）：它不是拆分 ——
+       把**同一个** `totalTokens` 按 usageType 回成 `total`/`input`/`output`
+       三行，三行同值（10/10/10）。按行累加会报成 **3 倍**；取 `total` 行
+       也只是运气对，input/output 仍全是总量的副本。
     """
-    rows = (payload or {}).get("data") or []
-    by_type = {r.get("usageType"): r.get("sum_totalTokens") for r in rows}
-    total = by_type.get("total")
-    inp = by_type.get("input")
-    out = by_type.get("output")
-    if total is None and (inp is not None or out is not None):
-        total = (inp or 0) + (out or 0)
-    def _f(x):
-        try:
-            return float(x) if x is not None else None
-        except (TypeError, ValueError):
-            return None
-    return _f(total), _f(inp), _f(out)
-
-
-def _usage_total(payload: dict | None, key: str) -> float | None:
-    """取按 `usageType` 分组结果里**总量行**（`total`）的某个标量。
-
-    ⚠️ 成本与 token 是**同一个陷阱**（实测 2026-10-11）：同一份 payload 里
-       `total` / `input` / `output` 三行的 `sum_totalCost` 也都是同一个总量
-       （实测三行都是 0，看不出差别，但形状与 token 完全一致）——
-       `sum(rows)` 会把成本同样报成 3 倍。
-
-    ⚠️ 没有 `total` 行时返回 None（面板显示「—」）：宁可空着，也不给一个
-       可能翻倍的数 —— token 那边有 input+output 兜底，成本没有可靠兜底。
-    """
-    rows = (payload or {}).get("data") or []
-    by_type = {r.get("usageType"): r.get(key) for r in rows}
-    value = by_type.get("total")
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return (_extract_scalar(payload, "sum_totalTokens"),
+            _extract_scalar(payload, "sum_inputTokens"),
+            _extract_scalar(payload, "sum_outputTokens"))
 
 
 def _error_rate_from_levels(payload: dict | None) -> float | None:
@@ -373,9 +346,12 @@ async def retrieval_metrics() -> dict:
     # 5xx 率：实测**没有 HTTP 状态码维度**，改用 level=ERROR（【方案 §8.3】）
     err = await _lf_query(_build_metrics_query(
         measures=[("count", "count")], dimensions=["level"], hours=hours))
+    # token 拆分靠**分开的 measure**（实测：`inputTokens`/`outputTokens` 才是真
+    # 拆分；`dimensions=[usageType]` 只会把同一个总量回成三行 —— 见 `_usage_tokens`）
     tok = await _lf_query(_build_metrics_query(
-        measures=[("totalTokens", "sum"), ("totalCost", "sum")],
-        dimensions=["usageType"], hours=hours))
+        measures=[("inputTokens", "sum"), ("outputTokens", "sum"),
+                  ("totalTokens", "sum"), ("totalCost", "sum")],
+        dimensions=None, hours=hours))
     nodes = await _lf_query(_build_metrics_query(
         measures=[("latency", "p95")], dimensions=["name"], hours=hours))
 
@@ -389,7 +365,10 @@ async def retrieval_metrics() -> dict:
         # 拆输入/输出（【方案 §8.2】，T12 面板按「输入 X / 输出 Y」渲染）
         "token_input": token_in,
         "token_output": token_out,
-        "cost": _usage_total(tok, "sum_totalCost"),
+        # ⚠️ 实测恒 0，**不是代码没取到**：项目里没给 `deepseek-flash` 配价
+        #    （models API 实测：50 条定价全是 Langfuse 内置、0 条 deepseek、
+        #    0 条自定义）。要有成本得先在 Langfuse UI 给该模型加自定义定价。
+        "cost": _extract_scalar(tok, "sum_totalCost"),
         "node_latency": _node_latency_rows(nodes),
     }
 
