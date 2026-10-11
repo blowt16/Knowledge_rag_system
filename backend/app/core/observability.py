@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -200,6 +201,19 @@ def node_context(name: str) -> Iterator[None]:
 # ---------------------------------------------------------------- 脱敏
 # 【方案 §7】：正文照传（保住 Langfuse 的价值），标识符在**导出前**打码。
 # 官方钩子 `mask_otel_spans` 在导出阶段跑，即「数据离开应用之前」。
+#
+# ⚠️⚠️ **匹配必须跑在「解码后的正文」上，不能在转义文本上跑**（A7 验收实测的
+#     隐私事故，2026-10-11）：SDK 序列化属性值时分两种形态 ——
+#       · **字符串原样**（`input="…"`）：中文是字面量，正则直接跑没问题；
+#       · **容器走 `json.dumps(..., ensure_ascii=True)`**（`input=[{...}]`、
+#         `metadata`）：中文变 `\uXXXX`，于是数字规则 `(?<!\d)` 的「前一个字符」
+#         成了**转义末位的十六进制字符** —— 是数字就静默卡掉打码：
+#         `是`=`\\u662f`（末位 f）能过，`号`=`\\u53f7`（末位 7）整条规则失效，
+#         而「学号2024001234」恰恰是最自然的写法。22 个常见前导字里 16 个如此。
+#     转义文本上匹配还会**跨转义边界**啃掉十六进制位：`\d{15}` 曾把
+#     `请拨打13800138000` 里的 `打`（`\\u6253`）连着电话号码一起替换掉，
+#     正文被改坏成 `请拨\u[REDACTED:id_card]`。
+#     故 `_redact_attr_value()` 先解码、再打码、最后按 SDK 同款参数编码回去。
 
 _REDACTED = "[REDACTED:{name}]"
 _patterns_cache: list[tuple[str, Any]] | None = None
@@ -226,6 +240,7 @@ def _compiled_patterns() -> list[tuple[str, Any]]:
 
 
 def _redact_text(text: str) -> str:
+    """纯文本脱敏：规则直接跑在字面文本上（调用方保证已解码）。"""
     for name, rx in _compiled_patterns():
         text = rx.sub(_REDACTED.format(name=name), text)
     return text
@@ -240,6 +255,44 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_redact_value(v) for v in value]
     return value
+
+
+def _looks_like_json(text: str) -> bool:
+    """SDK 的容器序列化只产生这几种开头（`{` / `[` / `"`）。
+
+    ⚠️ **不能**「`json.loads` 成功就当 JSON」：裸数字 `2024001234` 也是合法
+       JSON（int），那样会走容器分支、**跳过按字符串打码**，学号反而直发出去。
+    """
+    return text.strip()[:1] in ("{", "[", '"')
+
+
+def _redact_attr_value(value: Any) -> Any:
+    """属性值级脱敏入口：字符串先按 SDK 的序列化形态**解一层**再打码。
+
+    | 属性值形态 | 处理 |
+    |---|---|
+    | 容器序列化（`[{…}]`、`{…}`、`"…"`） | 解码 → 递归打码 → **同款参数**编码回去 |
+    | 纯文本 | 直接跑正则（中文是字面量，`(?<!\\d)` 语义本来就对） |
+    | 非字符串（bool/int/bytes…） | 原样返回（与改造前一致） |
+
+    ⚠️ 只在**真有命中**时才编码回去 —— 没命中就返回原文，避免把宿主 JSON
+       的形状无谓地改一遍（编码参数若与 SDK 不一致就是「另一种损坏」）。
+    """
+    if not isinstance(value, str):
+        return _redact_value(value)
+    if not _looks_like_json(value):
+        return _redact_text(value)
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        # 只是「看起来像」—— 退回纯文本路径（如用户正文以引号开头）
+        return _redact_text(value)
+    redacted = _redact_value(parsed)
+    if redacted == parsed:
+        return value
+    # 与 SDK 的 `json.dumps(obj, cls=EventSerializer)` 同款默认参数
+    # （`ensure_ascii=True` + 默认分隔符）—— 形状必须与原来一模一样
+    return json.dumps(redacted, ensure_ascii=True)
 
 
 def mask_otel_spans(*, params: Any):
@@ -258,7 +311,7 @@ def mask_otel_spans(*, params: Any):
     for identifier, span in (params.spans or {}).items():
         sets = {}
         for key, value in (span.attributes or {}).items():
-            redacted = _redact_value(value)
+            redacted = _redact_attr_value(value)
             if redacted != value:
                 sets[key] = redacted
         if sets:
