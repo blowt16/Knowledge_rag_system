@@ -24,6 +24,16 @@ EMAIL = "zhangsan@example.edu.cn"
 ID_CARD_FORMS = ["11010519491231002X", "110105491231002"]
 #: 8 位数字：**不在任何规则内**，用来钉住 `\d{10}` 的长度边界
 SHORT_NUMBER = "87654321"
+#: 邮箱（英文域名）
+TIGHT_EMAIL = "abc@example.com"
+#: ⚠️「中文紧贴标识符」——**这才是用户的自然写法**，历史漏网点。
+#:    原因：Python `re` 对 str 默认 Unicode，`\w` **包含中文**，
+#:    于是「中文字 + 数字」之间根本没有 `\b`，`\b` 版的规则整条失效。
+TIGHT_STUDENT_TEXT = f"我的学号是{STUDENT_ID}"
+TIGHT_PHONE_TEXT = f"联系方式{PHONE}"
+TIGHT_EMAIL_TEXT = f"邮箱{TIGHT_EMAIL}"
+#: 带国码的长数字串（13 位）：手机号规则**不许**从中间啃掉一段
+LONG_DIGIT_RUN = "8613800138000"
 
 
 @pytest.fixture()
@@ -97,6 +107,71 @@ def test_email_is_masked(capture):
     assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
     assert EMAIL not in body, "邮箱原样发出去了"
     assert "[REDACTED:email]" in body
+
+
+def test_student_id_masked_when_tight_against_chinese(capture):
+    """★ 中文紧贴数字时也必须打码（历史漏网点）。
+
+    `\\b` 在「中文字 + 数字」之间**不存在**（`\\w` 含中文），
+    所以 `\\b` 版的规则对「我的学号是2023123456」整条失效 ——
+    而这正是用户不带空格的日常写法。brief 的用例全带空格，故一直没暴露。
+    """
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=TIGHT_STUDENT_TEXT)
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert STUDENT_ID not in body, f"紧贴中文的学号原样发出去了：\n{body[:500]}"
+    assert "[REDACTED:student_id]" in body
+
+
+def test_phone_masked_when_tight_against_chinese(capture):
+    """同上学号：`联系方式13800138000` 不带空格也要挡住。"""
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=TIGHT_PHONE_TEXT)
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert PHONE not in body, f"紧贴中文的手机号原样发出去了：\n{body[:500]}"
+    assert "[REDACTED:phone]" in body
+
+
+def test_email_masked_without_eating_chinese_prefix(capture):
+    """邮箱：既打码，又**不许把前面的中文一起吞进替换串**。
+
+    `[\\w.+-]+` 里的 `\\w` 含中文，会把「邮箱」也算作邮箱地址的一部分 ——
+    打码虽然发生了，但正文被啃掉一块，等于另一种损坏。字符类必须写成显式 ASCII。
+    """
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=TIGHT_EMAIL_TEXT)
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert TIGHT_EMAIL not in body, "邮箱原样发出去了"
+    assert "[REDACTED:email]" in body
+    assert "邮箱" in body, "邮箱前面的中文被一起吞掉了 —— 字符类写太宽（\\w 含中文）"
+
+
+def test_longer_digit_run_is_not_partially_masked(capture):
+    """负控：带国码的长数字串，不许被手机号规则从**中间**啃掉一段。
+
+    放宽手机号规则（容忍分隔符）时最容易踩的坑：规则匹配到了 11 位数字，
+    但那其实是更长数字串的一部分 —— 打码后串就被截断了，比不打码更糟。
+    """
+    client = observability.get_client()
+    with client.start_as_current_observation(as_type="span", name="q") as s:
+        s.update(input=f"号码 {LONG_DIGIT_RUN}")
+    client.flush()
+
+    body = capture.body()
+    assert body, "本地捕获服务器没收到任何东西 —— 说明数据根本没发出来"
+    assert LONG_DIGIT_RUN in body, f"长数字串被啃掉了一段：\n{body[:500]}"
 
 
 def test_non_sensitive_text_survives(capture):
