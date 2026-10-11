@@ -246,10 +246,49 @@ async def _lf_query(query_json: str) -> dict | None:
         return None
 
 
-def _sum_rows(payload: dict | None, key: str) -> float | None:
+def _usage_tokens(payload: dict | None) -> tuple[float | None, float | None, float | None]:
+    """按 usageType 拆 token。返回 (total, input, output)。
+
+    ⚠️ **不能把所有行加起来**（实测，2026-10-11）：`dimensions=[usageType]` 会返回
+       **三行** —— `total` / `input` / `output`，三者都带同一个总量。
+       直接 `sum(rows)` 会把 token 用量报成 **3 倍**，而且看不出哪里不对。
+       有 `total` 行就用它；没有才用 input+output 兜底。
+    """
     rows = (payload or {}).get("data") or []
-    vals = [r.get(key) for r in rows if r.get(key) is not None]
-    return float(sum(vals)) if vals else None
+    by_type = {r.get("usageType"): r.get("sum_totalTokens") for r in rows}
+    total = by_type.get("total")
+    inp = by_type.get("input")
+    out = by_type.get("output")
+    if total is None and (inp is not None or out is not None):
+        total = (inp or 0) + (out or 0)
+    def _f(x):
+        try:
+            return float(x) if x is not None else None
+        except (TypeError, ValueError):
+            return None
+    return _f(total), _f(inp), _f(out)
+
+
+def _usage_total(payload: dict | None, key: str) -> float | None:
+    """取按 `usageType` 分组结果里**总量行**（`total`）的某个标量。
+
+    ⚠️ 成本与 token 是**同一个陷阱**（实测 2026-10-11）：同一份 payload 里
+       `total` / `input` / `output` 三行的 `sum_totalCost` 也都是同一个总量
+       （实测三行都是 0，看不出差别，但形状与 token 完全一致）——
+       `sum(rows)` 会把成本同样报成 3 倍。
+
+    ⚠️ 没有 `total` 行时返回 None（面板显示「—」）：宁可空着，也不给一个
+       可能翻倍的数 —— token 那边有 input+output 兜底，成本没有可靠兜底。
+    """
+    rows = (payload or {}).get("data") or []
+    by_type = {r.get("usageType"): r.get(key) for r in rows}
+    value = by_type.get("total")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _error_rate_from_levels(payload: dict | None) -> float | None:
@@ -340,12 +379,17 @@ async def retrieval_metrics() -> dict:
     nodes = await _lf_query(_build_metrics_query(
         measures=[("latency", "p95")], dimensions=["name"], hours=hours))
 
+    token_total, token_in, token_out = _usage_tokens(tok)
+
     values = {
         "latency_p50": _extract_scalar(lat, "p50_latency"),
         "latency_p95": _extract_scalar(lat, "p95_latency"),
         "error_rate": _error_rate_from_levels(err),
-        "token_usage": _sum_rows(tok, "sum_totalTokens"),
-        "cost": _sum_rows(tok, "sum_totalCost"),
+        "token_usage": token_total,
+        # 拆输入/输出（【方案 §8.2】，T12 面板按「输入 X / 输出 Y」渲染）
+        "token_input": token_in,
+        "token_output": token_out,
+        "cost": _usage_total(tok, "sum_totalCost"),
         "node_latency": _node_latency_rows(nodes),
     }
 

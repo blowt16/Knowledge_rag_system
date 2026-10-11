@@ -290,8 +290,13 @@ def _v2_payload(request: httpx.Request) -> dict:
         return {"data": [{"level": k, "count_count": v}
                          for k, v in _V2_ERROR_COUNTS.items()]}
     if dims == ["usageType"]:
-        return {"data": [{"usageType": "input", "sum_totalTokens": _V2_TOKENS,
-                          "sum_totalCost": _V2_COST}]}
+        # ⚠️ 实测形状（2026-10-11 真项目查得）：`total` / `input` / `output`
+        #    **三行，带的是同一个总量** —— 夹具照抄，好让「三行全加」当场红
+        #    （全加 = 3 倍）。成本实测三行都是 0，看不出差别，这里用非零同值
+        #    把同一种错法也钉住。
+        return {"data": [{"usageType": t, "sum_totalTokens": _V2_TOKENS,
+                          "sum_totalCost": _V2_COST}
+                         for t in ("total", "input", "output")]}
     # 不分组：延迟
     return {"data": [{"count_count": 100, "p50_latency": _V2_LATENCY_P50,
                       "p95_latency": _V2_LATENCY_P95}]}
@@ -380,9 +385,27 @@ async def test_retrieval_service_exposes_cost_and_node_latency(monkeypatch):
 
     body = await stats_service.retrieval_metrics()
 
-    assert body["cost"] == _V2_COST
+    assert body["cost"] == _V2_COST, "三行同值时取 total 行；全加会变成 3 倍"
     assert body["node_latency"] == [{"node": "rerank", "p95": 15000.0},
                                     {"node": "retrieve", "p95": 120.0}]
+
+
+async def test_retrieval_service_splits_tokens_by_usage_type(monkeypatch):
+    """token 按 `usageType` 取（§8.2 的「拆输入/输出」）—— 在 service 层锁住。
+
+    ⚠️ 夹具是**实测形状**：三行带同一个总量，所以这里三个数是相等的，**不是**
+       在宣称「输入=输出=总量」。这条锁的是**取哪一行**（全加会变成 3 倍）；
+       「input 行 → token_input」的映射由单测 `test_usage_tokens_falls_back_…`
+       用不同的两行值锁。本项目当前的真实数据里三行也确实同值（正因如此，
+       T12 面板上「输入/输出」要等有真流量后复核 —— 见任务报告 concern）。
+    """
+    _langfuse_answering(monkeypatch)
+
+    body = await stats_service.retrieval_metrics()
+
+    assert body["token_usage"] == _V2_TOKENS, "三行同值时取 total 行；全加会变成 3 倍"
+    assert body["token_input"] == _V2_TOKENS
+    assert body["token_output"] == _V2_TOKENS
 
 
 async def test_retrieval_available_even_before_any_span(client, admin, monkeypatch):
