@@ -17,6 +17,7 @@ import logging.handlers
 import sys
 from typing import Any
 
+from app.core import observability
 from app.core.config import cfg, env, repo_path
 
 # 这些字段名一旦出现在日志的 extra 里，一律替换成占位符。
@@ -60,18 +61,12 @@ class JsonFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        # trace_id / span_id 从 OTel 当前 span 取（没有则为全 0，格式仍合法）
-        trace_id = "0" * 32
-        span_id = "0" * 16
-        try:
-            from opentelemetry import trace as otel_trace
-
-            ctx = otel_trace.get_current_span().get_span_context()
-            if ctx.is_valid:
-                trace_id = format(ctx.trace_id, "032x")
-                span_id = format(ctx.span_id, "016x")
-        except Exception:  # noqa: BLE001 — 日志本身不能因为埋点故障而挂掉
-            pass
+        # trace_id / span_id 从 Langfuse 当前观测取
+        # （【方案 决策 4】trace_id 全面改用 Langfuse 的，不再碰 OTel）
+        # ⚠️ `current_trace_id()` 内部已做 try/except 与 None 兜底 ——
+        #    「日志本身不能因为埋点故障而挂掉」这条约束在 observability 里兑现
+        trace_id = observability.current_trace_id()
+        span_id = observability.current_span_id()
 
         payload: dict[str, Any] = {
             "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
