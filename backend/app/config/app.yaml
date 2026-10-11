@@ -262,17 +262,19 @@ mineru:
 
 # 可观测性（§3.2.3.3）—— 运行指标那一块
 observability:
-  # Prometheus 查询地址。后端在本机跑时是宿主端口；**部署进容器要改成
-  # http://prometheus:9090**（docker 内网 DNS）。留空则 stats/retrieval 恒返
-  # available:false（M4-D5 的口径：不可用不是错误，HTTP 仍 200）。
-  # 也可用环境变量 PROMETHEUS_URL 覆盖（优先级更高）。
-  prometheus_url: "http://127.0.0.1:9090"
-
   # 环境名（Langfuse 用来区分 development / production）
   environment: development
   # Langfuse 地址。⚠️ 必须显式配，SDK 缺省值是公有云（【方案 §10.2】）
   #    实际值走 security.yaml 的 langfuse_base_url → 环境变量
   langfuse_base_url: ""
+  # 运行指标窗口（小时）。⚠️ 一律用「相对当前时间」，不要配绝对日期
+  #    —— 实测传很久以前的绝对日期会被 API 拒（报错信息有误导性）
+  metrics_window_hours: 24
+  # 告警阈值（【方案 §8.3】方案 A：后端自算，不依赖 Langfuse Alerts API）
+  # ⚠️ 阈值是初值，M5 用真实流量标定后才作数
+  alert_thresholds:
+    node_p95_ms: 10000        # 单节点 p95 超过 10 秒
+    http_5xx_rate: 0.05       # 5xx 比例超过 5%
   # 脱敏规则（【方案 §7.3】）——**必须配置化**，不写死在代码里：
   #   校园场景的标识符会变（学号位数、新增证件类型），
   #   写死意味着每次都要改代码 + 重新部署 + 重跑测试。
