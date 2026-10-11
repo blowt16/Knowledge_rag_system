@@ -70,3 +70,26 @@ def test_extra_fields_still_scrubbed():
     payload = _format("q", query="学号2023123456", event="test")
     assert payload["event"] == "test"
     assert "2023123456" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_log_formatter_reads_from_observability_not_otel(monkeypatch):
+    """★ 锁住「换源」这件事本身。
+
+    ⚠️ 为什么需要这条：Langfuse SDK **本身建在 OTel 之上**，所以
+       `current_trace_id()` 与直接读 OTel 当前 span 返回的 id **逐字节相同** ——
+       上面那条 `test_trace_id_is_32_hex_when_enabled` 因此**区分不了数据来源**，
+       把 `logging.py` 改回直读 OTel 它照样绿。
+
+       这里用一个**不可能从 OTel 里读到的哨兵值**把来源钉死：
+       只要格式化器还走 observability，日志里就必须出现这个哨兵。
+    """
+    sentinel = "sentinel" + "0" * 24          # 32 位，形状合法但绝不可能是真 id
+    monkeypatch.setattr(observability, "current_trace_id", lambda: sentinel)
+    monkeypatch.setattr(observability, "current_span_id", lambda: "s" * 16)
+
+    payload = _format("hello")
+
+    assert payload["trace_id"] == sentinel, (
+        "日志没走 observability.current_trace_id() —— "
+        "多半是 logging.py 又回去直读 OTel 了"
+    )

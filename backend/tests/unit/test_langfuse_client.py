@@ -14,6 +14,7 @@ import os
 import pytest
 
 from app.core import observability
+from app.core.logging import JsonFormatter
 
 
 @pytest.fixture(autouse=True)
@@ -78,12 +79,10 @@ def test_enabling_client_does_not_recurse_through_logging(monkeypatch):
     root handler → format() → 递归。护栏没生效时这里会看到几十次调用
     （实测峰值 51，不含护栏则直到 RecursionError）。
 
-    ⚠️ 两点与「直接挂 JsonFormatter」不同，都是为了让用例真的能失败：
-      1. handler 必须**真的走 format()**。覆写 `emit` 成 `seen.append(record)`
-         会让 formatter 一次都不被调用，用例永远绿 —— 那是假凭据。
-      2. `JsonFormatter` 目前（Task 4 之前）是从 opentelemetry 直接取 id 的，
-         还没走 observability；故这里用等价 formatter 模拟 Task 4 之后的形态
-         （format() 里问 observability 要 trace/span id）。
+    ⚠️ handler 必须**真的走 format()**。覆写 `emit` 成 `seen.append(record)`
+       会让 formatter 一次都不被调用，用例永远绿 —— 那是假凭据。
+       （Task 4 换源前 `JsonFormatter` 直读 OTel，递归支路不在它身上，
+       这里挂的是等价模拟件；换源后挂的就是真的 `JsonFormatter`。）
     """
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-dummy")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-dummy")
@@ -93,14 +92,6 @@ def test_enabling_client_does_not_recurse_through_logging(monkeypatch):
     observability.setup("campus-rag")
 
     seen: list[logging.LogRecord] = []
-
-    class _ObservabilityFormatter(logging.Formatter):
-        """Task 4 之后 JsonFormatter 的样子：format() 里问 observability 要 id。"""
-
-        def format(self, record: logging.LogRecord) -> str:
-            observability.current_trace_id()
-            observability.current_span_id()
-            return record.getMessage()
 
     handler = logging.Handler()
 
@@ -112,7 +103,7 @@ def test_enabling_client_does_not_recurse_through_logging(monkeypatch):
             handler.format(record)
 
     handler.emit = _emit  # type: ignore[method-assign]
-    handler.setFormatter(_ObservabilityFormatter())
+    handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.addHandler(handler)
     try:
