@@ -199,6 +199,73 @@ async def test_generate_node_degrades_instead_of_refusing(monkeypatch):
     assert out["trace"][0]["degraded"] == "unavailable"
 
 
+async def test_tail_read_failure_after_a_complete_answer_is_not_a_degradation(monkeypatch):
+    """★ 答案已完整之后的读取失败，只该丢 usage —— 不能把这一轮降级。
+
+    ⚠️ 这个窗口是 A4/C3 的修复带来的：要拿到尾部那个带 `usage` 的 chunk
+       （`choices` 是空数组，见 `llm.stream_raw`），消费方必须把流**读完**，
+       于是读循环会越过答案的收尾 `}`。上游偏偏在这之后断流时，异常就落在
+       「用户早已拿到完整答案」的时刻 —— 再补一个「生成中断，请重试」
+       会把一条好答案打成降级（终审发现的收尾读取缺陷）。
+
+    判据用解析器自己的 `answer_done`（它只表示答案正文已收尾），不另造信号。
+    走**真实消费方**（`generate_node` → `_stream_generate` → `llm.stream_raw`），
+    断流点就在尾部 usage chunk 之后。
+    """
+    import json
+
+    import httpx
+
+    content = '{"decision":"ANSWERED","answer":"图书馆每天 8:00 至 22:00 开放[1]。"}'
+    lines = (
+        [f'data: {json.dumps({"choices": [{"delta": {"content": c}}]})}'
+         for c in [content[i:i + 7] for i in range(0, len(content), 7)]]
+        # 与真实上游同款：带 usage 的 chunk 在内容**之后**，`choices` 为空数组
+        + [f'data: {json.dumps({"choices": [], "usage": _USAGE})}']
+    )
+
+    class _SSE:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in lines:
+                yield line
+            raise RuntimeError("上游在答案之后断流")
+
+        async def aread(self):
+            return b""
+
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        def stream(self, *a, **k):
+            class _Ctx:
+                async def __aenter__(self_inner): return _SSE()
+                async def __aexit__(self_inner, *a): return False
+            return _Ctx()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: _Client())
+
+    events: list[dict] = []
+    monkeypatch.setattr(GEN, "_stream_writer", lambda: events.append)
+
+    out = await GEN.generate_node(new_state(
+        query="图书馆几点开门？", resolved_query="图书馆几点开门？",
+        context="[1] 图书馆每天 8:00 至 22:00 开放。", evidence=_evidence(),
+    ))
+
+    assert out["answer"] == "图书馆每天 8:00 至 22:00 开放[1]。", "完整的答案被收尾失败吃掉了"
+    assert out["decision"] == "ANSWERED"
+    assert out["refused"] is False
+    assert out["trace"][0]["degraded"] is None, "答案早已完整，这一轮不该被标降级"
+    assert not [e for e in events if e["type"] == "error"], "不该给用户弹「生成中断，请重试」"
+    assert "".join(e["text"] for e in events if e["type"] == "token") == out["answer"]
+
+
+#: 尾部 usage chunk 的形状（与 `test_langfuse_generation.py` 同款）
+_USAGE = {"prompt_tokens": 54, "completion_tokens": 12}
+
+
 # ============================================================
 # 节点级：拒答路径与标记校验（未改动的既有行为，一并钉住）
 # ============================================================

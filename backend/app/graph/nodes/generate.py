@@ -410,12 +410,22 @@ async def _stream_generate(prompt: str, writer, timeout: float) -> tuple[str, st
                 #    （模型收尾后立刻断流，2026-10-11 真实 API 计时）。
                 continue
     except Exception as e:  # noqa: BLE001
-        logger.warning("流式生成中断：%s", e, extra={"event": "generate.stream_failed",
-                                                "node": "generate"})
-        # ⚠️ 不发 refused —— 这是上游格式错误，不是拒答；保留已流出的 token
-        writer({"type": "error", "code": "upstream_error",
-                "message": "生成中断，请重试"})
-        return "", parser.answer_text, str(e)
+        if parser.state.answer_done:
+            # ⚠️ 答案正文**已经完整**（`answer_done` 只表示正文收尾，不表示流结束）：
+            #    读循环越过收尾 `}` 只是为了尾部的 usage chunk（见上面的 `continue`），
+            #    此时断流只损失 token 用量 —— 用户手上的答案是对的，
+            #    不能把它降级、更不能弹「生成中断」（终审发现的收尾读取缺陷）。
+            #    落回下面的 finish() 收尾，由它判定 decision 缺失之类的真问题。
+            logger.warning("流式收尾读取失败（答案已完整，仅丢 usage）：%s", e,
+                           extra={"event": "generate.stream_tail_failed",
+                                  "node": "generate"})
+        else:
+            logger.warning("流式生成中断：%s", e, extra={"event": "generate.stream_failed",
+                                                    "node": "generate"})
+            # ⚠️ 不发 refused —— 这是上游格式错误，不是拒答；保留已流出的 token
+            writer({"type": "error", "code": "upstream_error",
+                    "message": "生成中断，请重试"})
+            return "", parser.answer_text, str(e)
 
     decision, answer, error = parser.finish()
     if error:
