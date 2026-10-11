@@ -197,17 +197,22 @@ def test_setup_without_credentials_does_not_raise():
     observability.setup("campus-rag")      # 不抛即通过
 
 
-def test_base_url_never_falls_back_to_cloud(monkeypatch):
-    """★ 关键：配了 key 但没配地址时，**不得**落到公有云默认值。"""
+def test_missing_base_url_disables_instead_of_falling_back(monkeypatch):
+    """★ 关键：配了 key 但**没配地址**时，宁可不启用，也**不得**落到公有云默认值。
+
+    SDK 源码的解析顺序是
+        base_url or LANGFUSE_BASE_URL or host or LANGFUSE_HOST or "https://cloud.langfuse.com"
+    —— 落在最后一档就是把数据发去公有云。「不启用」才是安全的那条路。
+    """
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-dummy")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-dummy")
+    # 故意不设 LANGFUSE_BASE_URL
 
     observability.setup("campus-rag")
-    url = observability.resolved_base_url()
 
-    assert url is not None, "应解析出地址（来自配置的默认值），而不是 None"
-    assert "cloud.langfuse.com" not in url, (
-        f"落到了公有云默认地址：{url}。必须显式配置 LANGFUSE_BASE_URL。"
+    assert observability.resolved_base_url() is None
+    assert observability.get_client() is None, (
+        "没配地址时必须走「不启用」分支 —— 否则 SDK 会用缺省的公有云地址"
     )
 
 
@@ -703,6 +708,17 @@ def mask_otel_spans(*, params: Any):
     return MaskOtelSpansResult(span_patches=patches) if patches else None
 ```
 
+同时更新 `_reset_for_test()`，把脱敏缓存也清掉（否则跨用例串味）：
+
+```python
+def _reset_for_test() -> None:
+    """测试用：清掉单例与脱敏规则缓存。**不要在生产代码里调**。"""
+    global _client, _enabled, _patterns_cache
+    _client = None
+    _enabled = False
+    _patterns_cache = None
+```
+
 并在 `setup()` 里把钩子接上 —— 将 `_client = Langfuse(...)` 那段改为：
 
 ```python
@@ -965,7 +981,10 @@ def test_node_span_records_metadata(capture):
 
     body = capture.body()
     assert "node.retrieve" in body, "节点名没进 span"
-    assert "42" in body, "rag.duration_ms 没进 span"
+    # ⚠️ 断言键名而不只是数字 —— 单断言 `"42" in body` 会命中 trace id / 时间戳，
+    #    那是「其实什么都没记」也能通过的假绿。
+    assert "rag.duration_ms" in body, "耗时字段键名没进 span"
+    assert "rag.recalled" in body, "召回数字段键名没进 span"
 
 
 def test_current_node_is_visible_inside_node(capture):
@@ -1077,7 +1096,13 @@ def traced(node_name: str, fn):
     return _wrapper
 ```
 
-并在文件顶部把 `from app.core import telemetry` 改成 `from app.core import observability`（先确认 `telemetry` 在本文件还有没有别的用处）。
+并改文件顶部的 import：
+
+- `from app.core import telemetry` → `from app.core import observability`
+- **删掉** `from opentelemetry.trace import Status, StatusCode`（L42）—— 新实现不再用它。
+  ⚠️ 不删就违反 Global Constraints #2，且 T9 之后它会成为全仓唯一残留的 OTel import。
+
+改完用 `grep -n "opentelemetry\|telemetry" backend/app/graph/builder.py` 确认**两样都没了**。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -1196,7 +1221,9 @@ def test_non_stream_records_generation_with_usage(capture, monkeypatch):
 
     body = capture.body()
     assert "deepseek-flash" in body, "model 没进观测"
-    assert "11" in body and "22" in body, "usage 没进观测"
+    # ⚠️ 断言 usage 结构而不只是数字 —— `"11" in body` 会命中 trace id / 时间戳
+    assert "usage_details" in body or "usageDetails" in body, "usage 结构没进观测"
+    assert "input" in body and "output" in body, "输入/输出没分开记"
 
 
 def test_stream_generation_is_ended_even_on_error(capture, monkeypatch):
@@ -1260,7 +1287,11 @@ def test_generation_records_node_name(capture, monkeypatch):
     asyncio.run(traced("generate", _node)({}))
     observability.get_client().flush()
 
-    assert "generate" in capture.body(), "节点名没进 generation"
+    # ⚠️ 断言 `rag.node` 标签键，而不是裸的 "generate" ——
+    #    节点 span 本身就叫 `node.generate`，裸断言不加这段代码也照样过。
+    body = capture.body()
+    assert "rag.node" in body, "rag.node 标签没进 generation"
+    assert "node.generate" in body, "节点 span 缺失"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1642,68 +1673,96 @@ git commit -m "[refactor] HTTP 中间件换 Langfuse；5xx 标 level=ERROR 供�
 
 ---
 
-## Task 8: 后台任务续接
+## Task 8: 全部 telemetry 引用换源（6 个文件）
+
+> ⚠️ **任务边界由 pre-flight 扫描纠正过**：计划初稿只列了 2 个文件，实际 grep 出
+> **6 个**引用 `core.telemetry` 的文件。不全部改完，Task 9 删 `telemetry.py` 会直接 import 崩。
+> 这 6 个里有 4 个是**同形状的机械替换**（`current_trace_id()` 消费），按 skill 的
+> 「batch small same-shape work」一次派发。
 
 **Files:**
-- Modify: `backend/app/api/chat.py:17,34`
-- Modify: `backend/app/services/document_service.py:26,151`
+- Modify: `backend/app/api/chat.py:17,34`（`reattach` → `attach_trace`）
+- Modify: `backend/app/services/document_service.py:26,151`（`reattach` → `attach_trace`）
+- Modify: `backend/app/api/documents.py:14,35`（纯 `current_trace_id/span_id`）
+- Modify: `backend/app/api/document_access.py:37,96`（纯 `current_trace_id`）
+- Modify: `backend/app/core/exceptions.py:66,76,87,99,113`（纯 `current_trace_id`）
+- Modify: `backend/app/services/chat_service.py:38,389`（纯 `current_trace_id`）
 
 **Interfaces:**
-- Consumes: Task 2 的 `observability.attach_trace()`
-- Produces: SSE 流与文档解析任务的观测挂回原 trace
+- Consumes: Task 2 的 `observability.attach_trace()` / `current_trace_id()` / `current_span_id()`
+- Produces: 全仓不再有 `core.telemetry` 引用（Task 9 的删除前提）
 
-- [ ] **Step 1: 改 `chat.py`**
+- [ ] **Step 1: 先看清全部引用点**
 
 ```bash
-# 先看现在的引用
-grep -n "telemetry" backend/app/api/chat.py
+grep -rn "core.telemetry\|core import telemetry" backend/ --include="*.py"
 ```
 
-把 `from app.core.telemetry import current_span_id, current_trace_id, reattach`
-改为 `from app.core import observability`，并把 `generator()` 改为：
+Expected: 恰好 6 个文件（chat.py / document_service.py / documents.py /
+document_access.py / exceptions.py / chat_service.py）+ 1 个待删的旧测试。
+**若多出别的文件，一并按同样方式改掉，并在报告里说明。**
+
+- [ ] **Step 2: 改两处 `reattach`（机制不同，要改调用方式）**
+
+`backend/app/api/chat.py`：import 改为 `from app.core import observability`，然后
 
 ```python
+    trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
+
     async def generator():
         with observability.attach_trace(trace_id, span_id):
             async for frame in chat_service.stream_chat(
 ```
 
-其中 `trace_id, span_id = current_trace_id(), current_span_id()` 那行改为：
+`backend/app/services/document_service.py`：import 改为 `from app.core import observability`，然后
 
 ```python
-    trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
-```
-
-- [ ] **Step 2: 改 `document_service.py`**
-
-同样把 `from app.core.telemetry import reattach` 改为 `from app.core import observability`，
-`schedule_ingest` 里的 `with reattach(trace_id, span_id):` 改为：
-
-```python
+    async def _run() -> None:
         with observability.attach_trace(trace_id, span_id):
 ```
 
-- [ ] **Step 3: 确认没有别处还在引用 telemetry**
+- [ ] **Step 3: 改四个纯消费点（同形状，机械替换）**
+
+这四处的用法完全一样：把 `from app.core.telemetry import current_trace_id`
+（或含 `current_span_id`）换成 `from app.core import observability`，
+再把调用点加上 `observability.` 前缀。
+
+| 文件 | 调用点 |
+|---|---|
+| `api/documents.py` | L35 `trace_id, span_id = current_trace_id(), current_span_id()` |
+| `api/document_access.py` | L96 `"trace_id": current_trace_id(),` |
+| `core/exceptions.py` | L76/87/99/113 四处 `"trace_id": current_trace_id(),`（**注意 L66 是函数内 import**，也要改） |
+| `services/chat_service.py` | L389 `trace_id=current_trace_id(),` |
+
+> ⚠️ `exceptions.py` 的 import 在 `install_handlers()` **函数体内**（L66），不是文件顶部 —— 别只改顶部。
+
+- [ ] **Step 4: 确认换干净了**
 
 ```bash
-grep -rn "core.telemetry\|core import telemetry\|from app.core.metrics\|core\.metrics" backend/app/ backend/tests/
+grep -rn "core.telemetry\|core import telemetry" backend/app/ --include="*.py"
 ```
 
-Expected: 无输出（有的话逐个改掉）
-
-- [ ] **Step 4: 跑相关回归**
+Expected: **无输出**
 
 ```bash
-.venv/Scripts/python.exe -m pytest backend/tests/integration/test_stage_events.py backend/tests/integration/test_session_lock.py backend/tests/integration/test_pipeline.py -v
+grep -rn "current_trace_id\|current_span_id" backend/app/ --include="*.py"
+```
+
+Expected: 只剩 `core/observability.py` 里的定义，以及各调用点的 `observability.xxx` 形式。
+
+- [ ] **Step 5: 跑相关回归**
+
+```bash
+.venv/Scripts/python.exe -m pytest backend/tests/integration/test_stage_events.py backend/tests/integration/test_session_lock.py backend/tests/integration/test_pipeline.py backend/tests/integration/test_document_access_acl.py -v
 ```
 
 Expected: 全 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/api/chat.py backend/app/services/document_service.py
-git commit -m "[refactor] SSE 与后台解析任务改用 Langfuse trace_context 续接"
+git add backend/app/api/chat.py backend/app/services/document_service.py backend/app/api/documents.py backend/app/api/document_access.py backend/app/core/exceptions.py backend/app/services/chat_service.py
+git commit -m "[refactor] 全部 telemetry 引用换源（6 文件）：SSE/后台任务走 trace_context，其余走 observability"
 ```
 
 ---
@@ -2040,6 +2099,48 @@ def _node_latency_rows(payload: dict | None) -> list[dict]:
         if name.startswith("node.") and val is not None:
             out.append({"node": name[len("node."):], "p95": float(val)})
     return sorted(out, key=lambda x: x["p95"], reverse=True)
+
+
+def _evaluate_alerts(values: dict) -> dict:
+    """告警后端自算（【方案 §8.3】方案 A）。
+
+    ⚠️ **不用 Langfuse Alerts**：实测告警没有公开 API（6 个候选端点全 404），
+       「后端读告警状态」这条路走不通。改为后端拿指标自己比阈值。
+
+    ⚠️ 返回形状与改造前**保持一致**（`{firing, pending, rules:[{name,state}]}`），
+       前端告警卡不用改。
+
+    ⚠️ 值为 None（无数据）时**不触发** —— 刚起服务、还没有流量是正常状态，
+       误报会让人把「已接好、只是还没流量」当成故障。
+
+    阈值取自 `observability.alert_thresholds`（Task 11 加进 app.yaml）。
+    """
+    thresholds = cfg("observability.alert_thresholds", {}) or {}
+    node_p95_ms = float(thresholds.get("node_p95_ms", 10000))
+    err_threshold = float(thresholds.get("http_5xx_rate", 0.05))
+
+    rules: list[dict] = []
+
+    # 规则一：按节点的 p95 越限（原 prometheus-rules.yml 的 RAGNodeP95High，
+    # 那条因为指标名对不上而**从来没触发过**，【方案 §1.1】）
+    for row in values.get("node_latency") or []:
+        state = "firing" if row["p95"] > node_p95_ms else "inactive"
+        rules.append({"name": f"RAGNodeP95High[{row['node']}]", "state": state})
+
+    # 规则二：5xx 比例（原按 http_status_code 过滤；现靠 level=ERROR，
+    # 因为实测 Metrics API **没有 HTTP 状态码维度**）
+    rate = values.get("error_rate")
+    rules.append({
+        "name": "RAGHttp5xxRate",
+        "state": ("firing" if rate is not None and rate > err_threshold
+                  else "inactive"),
+    })
+
+    return {
+        "firing": sum(1 for r in rules if r["state"] == "firing"),
+        "pending": 0,          # 自算没有 pending 态（原 Prometheus 的 for: 5m 概念）
+        "rules": rules,
+    }
 ```
 
 文件顶部 import 补：`import json`、`from datetime import timezone`（`timedelta` 已有）。
@@ -2145,50 +2246,17 @@ Expected: FAIL — `_evaluate_alerts` 不存在
     http_5xx_rate: 0.05       # 5xx 比例超过 5%
 ```
 
-- [ ] **Step 4: 实现 `_evaluate_alerts`**
+- [ ] **Step 4: 确认 `_prom_rules` 已删干净**
 
-在 `stats_service.py` 里删掉 `_prom_rules()`，替换为：
+> **注意**：`_evaluate_alerts()` 的**实现已经在 Task 10 里写好了**（本任务只负责
+> 阈值配置与专项测试）。之所以这样切分：Task 10 的 `retrieval_metrics()` 会调用它，
+> 若定义留到本任务，Task 10 交付的就是个「测试全绿但一调用就 NameError」的函数。
 
-```python
-def _evaluate_alerts(values: dict) -> dict:
-    """告警后端自算（【方案 §8.3】方案 A）。
-
-    ⚠️ **不用 Langfuse Alerts**：实测告警没有公开 API（6 个候选端点全 404），
-       「后端读告警状态」走不通。改为后端拿指标自己比阈值，阈值配在 app.yaml。
-
-    ⚠️ 返回形状与改造前**保持一致**（`{firing, pending, rules:[{name,state}]}`），
-       前端告警卡不用改。
-
-    ⚠️ 值为 None（无数据）时**不触发** —— 刚起服务、还没有流量是正常状态，
-       误报会让人把「已接好、只是还没流量」当成故障。
-    """
-    thresholds = cfg("observability.alert_thresholds", {}) or {}
-    node_p95_ms = float(thresholds.get("node_p95_ms", 10000))
-    err_threshold = float(thresholds.get("http_5xx_rate", 0.05))
-
-    rules: list[dict] = []
-
-    # 规则一：按节点的 p95 越限（原来 prometheus-rules.yml 的 RAGNodeP95High，
-    # 那条因为指标名对不上而**从来没触发过**，【方案 §1.1】）
-    for row in values.get("node_latency") or []:
-        state = "firing" if row["p95"] > node_p95_ms else "inactive"
-        rules.append({"name": f"RAGNodeP95High[{row['node']}]", "state": state})
-
-    # 规则二：5xx 比例（原来按 http_status_code 过滤；现在靠 level=ERROR，
-    # 因为实测 Metrics API 没有 HTTP 状态码维度）
-    rate = values.get("error_rate")
-    rules.append({
-        "name": "RAGHttp5xxRate",
-        "state": ("firing" if rate is not None and rate > err_threshold
-                  else "inactive"),
-    })
-
-    return {
-        "firing": sum(1 for r in rules if r["state"] == "firing"),
-        "pending": 0,          # 自算没有 pending 态（原 Prometheus 的 for: 5m 概念）
-        "rules": rules,
-    }
+```bash
+grep -n "_prom_rules\|prometheus\|Prometheus" backend/app/services/stats_service.py
 ```
+
+Expected: **无输出**。有残留就删掉 —— `_prom_rules()` 读 `/api/v1/rules` 的整段都不再需要。
 
 - [ ] **Step 5: 跑测试确认通过**
 
