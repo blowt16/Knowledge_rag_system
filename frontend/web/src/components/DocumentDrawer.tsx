@@ -183,11 +183,12 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
 
   const onDragStart = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
-    // ⚠️ 指针捕获：拖快时指针会跑出这条 6px 的分隔条，
-    //    不捕获的话拖到一半就断（pointermove 不再落到它身上）
-    event.currentTarget.setPointerCapture(event.pointerId)
+    // ⚠️ 指针捕获只是「拖出元素范围后仍能收到事件」的**优化**，不是正确性的前提 ——
+    //    所以先立好拖动状态，捕获再单独包 try。它对「不是活动指针」的 id 会抛，
+    //    抛在 handler 里会把后面整段带崩，而拖动本身其实还能正常走。
     dragRef.current = { startX: event.clientX, startWidth: width }
     setDragging(true)
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* 见上 */ }
   }
 
   const onDragMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -206,7 +207,8 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
     if (!dragRef.current) return
     dragRef.current = null
     setDragging(false)
-    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    // 这里同理包 try：没捕获成功时 release 会抛「不是活动指针」
+    try { event.currentTarget.releasePointerCapture(event.pointerId) } catch { /* 没捕获过就算了 */ }
     saveWidth(widthRef.current) // ⚠️ 用 ref，不是闭包里的 width
   }
 

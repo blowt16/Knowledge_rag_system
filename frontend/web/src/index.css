@@ -377,16 +377,15 @@ input, textarea { font: inherit; }
   min-width: 0; animation: drawer-in .22s cubic-bezier(.32, .72, 0, 1);
 }
 /* 拖拽分隔条：本体只有 6px，但用伪元素把可抓区域扩到 14px ——
-   6px 的命中区在鼠标上很难精准抓住 */
+   6px 的命中区在鼠标上很难精准抓住。
+   ⚠️ 刻意**不给任何视觉高亮**（不描边、不变色）—— 悬停/拖拽时出现一条亮线
+      比抽屉自己的边框还显眼。可发现性靠 `col-resize` 光标，已经够了。 */
 .drawer-resizer {
   position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
   cursor: col-resize; z-index: 2; touch-action: none;
 }
 .drawer-resizer::before {
   content: ''; position: absolute; left: -4px; right: -4px; top: 0; bottom: 0;
-}
-.drawer-resizer:hover::before, .drawer.dragging .drawer-resizer::before {
-  background: var(--brand); opacity: .5;
 }
 /* 拖拽中锁掉选中，否则会一路把文字选蓝 */
 .drawer.dragging { user-select: none; }
