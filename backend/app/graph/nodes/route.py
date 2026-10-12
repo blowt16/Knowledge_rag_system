@@ -52,6 +52,10 @@ def _system_meta_words() -> list[str]:
     return cfg("rules.system_meta_words", []) or []
 
 
+def _system_self_words() -> list[str]:
+    return cfg("rules.system_self_words", []) or []
+
+
 def rule_classify(query: str) -> str | None:
     """规则层。只吃**明确的**意图，零成本跳过 LLM 调用。
 
@@ -108,6 +112,14 @@ def _should_clarify(state: RAGState) -> bool:
     #    而 chat 分支不检索不引用 —— 信号误命中（比如把某条带「怎么用」的制度
     #    问题判成闲聊）就是直接答非所问。放行给 LLM，它还能纠回来。
     if any(w in resolved for w in _system_meta_words()):
+        return False
+    # 「主语是系统自身」同样算能定位主题（主题就是系统）。
+    #
+    # ⚠️ 2026-10-12 实测补漏：先前的词表是**按说法枚举**的（怎么用 / 如何使用），
+    #    而用户问的是「你怎么使用」—— 「怎么」与「使用」中间隔着一个「使」，
+    #    两条都没匹配上，5 个字又被反问一次。**按说法枚举必然漏**，
+    #    改按**主语**判：说法千变万化，主语不变。
+    if any(w in resolved for w in _system_self_words()):
         return False
     pattern = cfg("rules.doc_number_pattern", "")
     if pattern and re.search(pattern, resolved):

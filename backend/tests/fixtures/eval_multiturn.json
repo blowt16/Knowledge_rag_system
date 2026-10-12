@@ -154,7 +154,8 @@
       "note": "能力问询（问系统自身）：**不得澄清、不得落进检索** —— 两个轮次各锁一层缺陷（2026-10-12 实测缺口）",
       "turns": [
         {"question": "你可以干什么", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（qa_logs 2026-10-12 08:34:23，route_source=rule）：6 字且不含制度名词 → 踩中澄清触发条件二，LLM 连复核机会都没有。锁的是**规则层**：澄清判据要认得「问系统自身」也算能定位主题"},
-        {"question": "如何向你提问才能得到有效回答", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（08:36:02，route_source=llm）：够长不触发澄清，规则层判 None → 交给 LLM，而 LLM 把它判成了 knowledge。锁的是**提示词**：route 的 chat 定义必须覆盖能力问询（设计文档原名「闲聊/能力问询」，v2 明写 NO_RAG 含「询问系统能力」）"}
+        {"question": "如何向你提问才能得到有效回答", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（08:36:02，route_source=llm）：够长不触发澄清，规则层判 None → 交给 LLM，而 LLM 把它判成了 knowledge。锁的是**提示词**：route 的 chat 定义必须覆盖能力问询（设计文档原名「闲聊/能力问询」，v2 明写 NO_RAG 含「询问系统能力」）"},
+        {"question": "你怎么使用", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（09:28:03，route_source=rule，用户换了一种说法又问）：**按说法枚举的词表会漏** —— 「怎么」与「使用」中间隔着一个「使」，既不含「怎么用」也不含「如何使用」，5 字又被反问一次。锁的是「按**主语**（你/您/系统/助手）判」这条修法；同批实测的「你咋用」「怎么用你」「这个系统怎么用」「您怎么操作」也都转 chat"}
       ]
     }
   ]

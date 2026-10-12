@@ -256,6 +256,27 @@ def test_no_clarify_when_asking_about_the_system_itself():
         assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"
 
 
+def test_no_clarify_for_other_phrasings_of_system_questions():
+    """★ 按**说法**枚举词表必然漏 —— 换一种说法就漏一次（用户实测第二次就漏了）。
+
+    ⚠️ 实测现场（qa_logs 2026-10-12 09:28:03，route_source=rule）：
+       问「你怎么使用」被澄清。它既不含「怎么用」也不含「如何使用」
+       （「怎么」和「使用」中间隔着一个「使」），5 个字 → 照样中招。
+
+    ⚠️ 所以修法**不是再加一条短语** —— 那只会等下一次换说法。
+       换成换判据：**消息的主语是系统自身（你 / 您 / 系统 / 助手 / 平台）
+       就算「能定位主题」**。主题就是系统本身，不模糊。
+    """
+    for q in ["你怎么使用", "你咋用", "怎么用你", "这个系统怎么用", "您怎么操作"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is False, f"{q} 不该触发澄清"
+
+    # 反向锁照旧：既不是系统自身、也不是用法短语的短问句**仍然**要澄清
+    for q in ["怎么办", "还有吗", "那个呢"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"
+
+
 async def test_capability_question_reaches_llm_and_is_chat(monkeypatch):
     """★ 能力问询必须**走到 LLM**（由它定 chat），而不是在规则层被拦成 clarify。
 
