@@ -15,6 +15,10 @@ import { StreamingAnswer } from '../../markdown/StreamingAnswer'
 import { CitationImages, DocumentDrawer } from '../../components/DocumentDrawer'
 import { AssistantAvatar, UserAvatar } from '../../components/Avatar'
 import { useTheme } from '../../stores/theme'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 interface Turn {
   id: string
@@ -91,6 +95,12 @@ export default function ChatPage() {
   // 重命名中的会话 id（内联编辑）
   const [renaming, setRenaming] = useState<string | null>(null)
   const [renameText, setRenameText] = useState('')
+  //: 待删除的会话；非空即弹确认框。
+  //: ⚠️ **不用 `window.confirm`** —— 与管理端保持一致（那边的删除/停用一律走
+  //: `AlertDialog`）：原生框样式不可控、在嵌入式/无头环境里会被直接拦掉，
+  //: 而且「删了什么、能不能撤销」这类话原生框里根本写不下。这里还要显示会话标题。
+  const [pendingDelete, setPendingDelete] = useState<ConversationItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const { user, logout } = useAuth()
   const { theme, toggle: toggleTheme } = useTheme()
@@ -276,10 +286,9 @@ export default function ChatPage() {
     setOpened(null)
   }
 
-  /** 删除会话：不可撤销，先确认。删的是当前会话就顺带清空对话区。 */
-  async function removeConversation(id: string, title: string) {
-    if (busy) return
-    if (!window.confirm(`删除会话「${title || '（无标题）'}」？此操作不可撤销。`)) return
+  /** 真正执行删除。确认那一步由下面的 AlertDialog 负责（不用原生 confirm）。 */
+  async function removeConversation(id: string) {
+    setDeleting(true)
     try {
       await deleteConversation(id)
       if (id === sessionId) { setSessionId(null); setTurns([]); setOpened(null) }
@@ -289,6 +298,9 @@ export default function ChatPage() {
       void loadConversations(true)
     } catch (e) {
       console.warn('删除会话失败', e)
+    } finally {
+      setDeleting(false)
+      setPendingDelete(null)
     }
   }
 
@@ -385,7 +397,7 @@ export default function ChatPage() {
                     ✎
                   </button>
                   <button className="icon-btn danger" title="删除"
-                          onClick={() => void removeConversation(c.id, c.title)}>
+                          onClick={() => setPendingDelete(c)}>
                     <X size={14} />
                   </button>
                 </div>
@@ -560,6 +572,34 @@ export default function ChatPage() {
           </div>
         </footer>
       </div>
+
+      {/* 删除会话的确认框 —— 刻意不用 `window.confirm`（见 pendingDelete 的注释）。
+          删了不可撤销，所以标题里带上会话名，正文说清楚「什么没了、什么还在」 */}
+      <AlertDialog open={!!pendingDelete} onOpenChange={(o) => { if (!o) setPendingDelete(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              删除会话「{pendingDelete?.title || '（无标题）'}」？
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              这个会话和里面的消息会一起删掉，且不可撤销。文档与评测数据不受影响。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={deleting}
+              onClick={() => {
+                const target = pendingDelete
+                if (target) void removeConversation(target.id)
+              }}
+            >
+              {deleting ? '删除中…' : '删除'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {opened && (
         // ⚠️ key 带上引用：换引用时**整只抽屉重建**。
