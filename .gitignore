@@ -7,20 +7,24 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# ⚠️ 这些是 Python 的构建产物目录。GitHub 的 Python 模板把它们写成**不带斜杠前缀**，
+#    于是会在**任意层级**匹配 —— 实测 `lib/` 把 `frontend/web/src/lib/`（前端源码！）
+#    整个忽略掉了，`dist/` 也吃掉 `frontend/web/dist`。
+#    加前导 `/` 锚到仓库根：既保住 Python 侧的意图，又不误伤前端目录。
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg

@@ -8,9 +8,11 @@
  */
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Moon, Sun } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/stores/auth'
+import { useTheme } from '@/stores/theme'
 
 const NAV = [
   { to: '/admin', label: '仪表盘', end: true },
@@ -36,6 +38,8 @@ const linkClass = (isActive: boolean, extra = '') =>
 
 export default function AdminLayout() {
   const { user, logout } = useAuth()
+  // 与管理端/登录页共用同一个主题 store：一处切换，三处一致（都落在 html 的 dark 类上）
+  const { theme, toggle: toggleTheme } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
   // 默认展开；折叠状态只活在这一次会话里（刷新回到展开 —— 折叠是临时收纳，不是配置）
@@ -88,9 +92,17 @@ export default function AdminLayout() {
           )}
         </nav>
         <div className="border-t border-border p-3">
-          <p className="mb-2 truncate text-xs text-muted-foreground">
-            {user?.username}（{user?.role}）
-          </p>
+          <div className="mb-2 flex items-center gap-2">
+            <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+              {user?.username}（{user?.role}）
+            </p>
+            <Button variant="ghost" size="icon" className="size-7 shrink-0"
+                    title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+                    aria-label={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+                    onClick={toggleTheme}>
+              {theme === 'dark' ? <Sun /> : <Moon />}
+            </Button>
+          </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" className="flex-1"
                     onClick={() => navigate('/chat')}>

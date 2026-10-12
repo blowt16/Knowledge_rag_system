@@ -132,6 +132,17 @@ input, textarea { font: inherit; }
 .login-alt a { color: var(--brand); text-decoration: none; }
 .login-alt a:hover { text-decoration: underline; }
 
+/* 「记住账号和口令」：复选框要和文字排成一行（.login-card label 默认是竖排的） */
+.login-card label.remember-row {
+  flex-direction: row; align-items: center; gap: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.login-card label.remember-row input { width: auto; padding: 0; margin: 0; }
+.remember-hint { margin: -6px 0 0; line-height: 1.5; }
+
+/* 登录页右上角的主题开关 —— 浮在卡片外，不占表单布局 */
+.theme-fab { position: fixed; top: 16px; right: 16px; width: 32px; height: 32px; }
+
 /* ==========================================================================
    会话页（§4.2.4.3）—— 布局：sidebar | chat-area | drawer 三个兄弟节点
    ⚠️ 抽屉也参与 flex 排布（推拉式），不是浮层。
