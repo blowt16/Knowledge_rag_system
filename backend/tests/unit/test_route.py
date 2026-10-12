@@ -277,6 +277,27 @@ def test_no_clarify_for_other_phrasings_of_system_questions():
         assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"
 
 
+def test_no_clarify_for_subjectless_usage_phrasings():
+    """没有主语的用法问法也要认（「怎么操作」「咋用」）。
+
+    ⚠️ 这是同一类漏判的**另一半**：主语判据管住了「你怎么使用」，
+       管不住「怎么操作」——它没有主语。实测列出来的漏网说法：
+       怎么操作 / 咋用 / 这咋用 / 怎么问 / 这个怎么玩。
+
+    ⚠️ 所以判据再换一次，换成**「疑问词 + 用法动词」的模式**，而不是继续
+       枚举整句：整句说法的组合是开集，动词却是封闭的一小撮。
+    """
+    for q in ["怎么操作", "咋用", "这咋用", "怎么问", "怎么使用"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is False, f"{q} 不该触发澄清"
+
+    # 反向锁：疑问词 + **非**用法动词，仍然该澄清 —— 模式不能放太宽。
+    # 「怎么弄」「咋办」是典型的真·模糊，放过去就会拿去检索、答非所问。
+    for q in ["怎么办", "怎么弄", "咋办"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"
+
+
 async def test_capability_question_reaches_llm_and_is_chat(monkeypatch):
     """★ 能力问询必须**走到 LLM**（由它定 chat），而不是在规则层被拦成 clarify。
 

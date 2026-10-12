@@ -121,6 +121,15 @@ def _should_clarify(state: RAGState) -> bool:
     #    改按**主语**判：说法千变万化，主语不变。
     if any(w in resolved for w in _system_self_words()):
         return False
+    # 「疑问词 + 用法动词」＝ 在问怎么用（怎么用 / 如何使用 / 怎么操作 / 咋用）。
+    #
+    # ⚠️ 实测补漏第二回（2026-10-12）：主语判据管得住「你怎么使用」，
+    #    管不住**没有主语**的「怎么操作」「咋用」—— 那几条照样被反问。
+    #    所以这里不再枚举整句说法（开集），改按**动词**收（封闭的一小撮）。
+    #    ⚠️ 动词表刻意不收「办 / 弄 / 搞」——「怎么办」是**真模糊**，该澄清。
+    usage_pat = cfg("rules.usage_question_pattern", "")
+    if usage_pat and re.search(usage_pat, resolved):
+        return False
     pattern = cfg("rules.doc_number_pattern", "")
     if pattern and re.search(pattern, resolved):
         return False
