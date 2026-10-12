@@ -562,7 +562,15 @@ export default function ChatPage() {
       </div>
 
       {opened && (
+        // ⚠️ key 带上引用：换引用时**整只抽屉重建**。
+        //    同一份文档里换引用时 `documentId` 没变，blob 不复取、`PdfLoader`
+        //    不重挂，`PdfHighlighter` 只会收到新的 `highlights` prop ——
+        //    而它给每一页各建了独立 `createRoot` 画高亮层，那条「只换 props」的路径
+        //    实测清不掉旧高亮（点第 4 页的引用，页面跳过去了，高亮还留在第 2 页）。
+        //    带 key 走的是「换文档」那条已验证的路径。代价是重放一次 PDF，
+        //    但 blob URL 在缓存里，实测可接受。
         <DocumentDrawer
+          key={`${opened.jump_target?.document_id ?? ''}-${opened.marker}`}
           citation={opened}
           includeRestricted={user?.role === 'admin' && escalate}
           onClose={() => setOpened(null)}

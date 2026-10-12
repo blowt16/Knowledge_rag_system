@@ -387,7 +387,24 @@ input, textarea { font: inherit; }
 .drawer-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drawer-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .pdf-viewport { height: 100%; }
-.drawer-body { flex: 1; min-height: 0; position: relative; }
+.drawer-body { flex: 1; min-height: 0; position: relative; overflow: auto; }
+.zoom-value { min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
+.pdf-loading { padding: 14px 16px; }
+
+/* 原文单页渲染：canvas + 按比例叠的高亮框 */
+.pdf-scroll { padding: 14px; }
+.pdf-page {
+  position: relative; margin: 0 auto; background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, .12); border-radius: 3px; overflow: hidden;
+}
+.pdf-canvas { display: block; }
+.pdf-highlight {
+  position: absolute; pointer-events: none; border-radius: 2px;
+  background: rgba(250, 204, 21, .38);
+  box-shadow: 0 0 0 1px rgba(202, 138, 4, .55) inset;
+}
+/* ⚠️ 原文页是**白纸黑字**，深色模式下不能跟着变成深底 —— 否则对比全反了 */
+.dark .pdf-page { background: #fff; }
 .drawer-error { padding: 10px 16px; color: var(--danger); font-size: 13px; }
 .locate-note {
   padding: 6px 16px; font-size: 12px; color: var(--app-muted);

@@ -19,25 +19,33 @@
  * ⚠️ **偏移不做高亮**：规范化文本的偏移**无法直接**映射到阅读器坐标
  *    （清洗会删页眉页脚，两者坐标系对不上）。所以「坐标优先、文本兜底」。
  *
- * ⚠️ 三个实测坑（spike 记录 + 本轮验收）：
- *    ① highlights 必须在**挂载之前**备齐 —— 挂载后再喂会读到一个还没初始化的
- *       viewer，直接崩
- *    ② 库的默认 worker 是 CDN 地址，取不到时**静默退回主线程假 worker**，
- *       页面照常渲染但只有翻 performance 列表才看得出来 —— 必须显式指本地 worker
- *    ③ **容器必须在挂载前清空**（见 `PdfViewport`）—— 否则页数翻倍
+ * ⚠️ 渲染**直接用 pdf.js**，不再用 `react-pdf-highlighter`。
+ *    原先那套（`PdfHighlighter` + `PdfLoader`）实测有一串治不好的毛病：
+ *      · pdf.js 的 `PDFViewer.setDocument()` 只在**容器里已经有文档**时才
+ *        `_resetView()` 清空容器，而库每次都在全新 viewer 上调它 —— 容器从来不清，
+ *        StrictMode 把挂载跑两遍就**每页渲染两遍**（实测 20 页 → 40 个 `.page`）；
+ *      · 库又给每一页各建一个 `createRoot` 画高亮层，和 React 的挂载/卸载交错，
+ *        实测持续报「同一容器二次 createRoot」「render 期间同步卸载 root」，
+ *        而它**不弹到界面上** —— 症状是整份文本层缺失、页面只画出一页、其余空白，
+ *        且时好时坏（撞不撞上取决于 StrictMode 的时序）。
+ *    用最小探针（只用 pdf.js，不经过库、不经过 React）验证过：取文件、载入、
+ *    渲染到 canvas、取文本层、坐标映射**全部正常**。所以问题在库的 React 集成层，
+ *    而这里要的只是「显示引用的那一页 + 叠高亮框」—— 一个完整翻页阅读器是杀鸡用牛刀。
+ *
+ *    顺带的好处：不再需要挂载前清容器、不再需要和 StrictMode 抢 DOM，
+ *    整个「容器生命周期」问题类别直接消失。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createRoot } from 'react-dom/client'
-import type { Root } from 'react-dom/client'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import * as pdfjs from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { Highlight, PdfHighlighter, PdfLoader } from 'react-pdf-highlighter'
-import type { IHighlight } from 'react-pdf-highlighter'
-import 'react-pdf-highlighter/dist/style.css'
-import { X } from 'lucide-react'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { Minus, Plus, X } from 'lucide-react'
 import { request, requestBlob } from '../api/client'
 import type { Box, Citation } from '../api/types'
+
+// ⚠️ 默认 worker 是 CDN 地址，取不到时会**静默退回主线程假 worker** —— 必须显式指本地
+pdfjs.GlobalWorkerOptions.workerSrc = workerSrc
 
 type Level = 'L1' | 'L2' | 'L3' | 'L4'
 
@@ -47,6 +55,11 @@ interface Located {
   note: string
   /** PDF 用户空间坐标（左下角原点） */
   rects: Array<{ x1: number; y1: number; x2: number; y2: number }>
+}
+
+/** 相对页面尺寸的比例框（0-1）—— 用比例而不是像素，缩放时不必重算 */
+interface Ratio extends Record<string, number> {
+  left: number; top: number; width: number; height: number
 }
 
 export interface DrawerProps {
@@ -59,14 +72,19 @@ export interface DrawerProps {
 export function DocumentDrawer({ citation, includeRestricted = false, onClose }: DrawerProps) {
   const target = citation.jump_target
   const documentId = target?.document_id ?? ''
-  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const pageNumber = Math.max(1, target?.page ?? 1)
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [located, setLocated] = useState<Located | null>(null)
+  const [zoom, setZoom] = useState(1)
+  // 实测出来的页面比例基准（1:1 视口下的宽 / 高）——**不用 A4 去猜**，
+  // 这份文档的第 1 页就是非标准尺寸（595×358pt），猜了高亮框会整体偏
+  const [pageSize, setPageSize] = useState<{ w: number; h: number } | null>(null)
 
   useEffect(() => {
-    let revoked: string | null = null
     let cancelled = false
-    setBlobUrl(null); setError(null); setLocated(null)
+    let loaded: PDFDocumentProxy | null = null
+    setPdf(null); setError(null); setLocated(null)
 
     void (async () => {
       try {
@@ -74,8 +92,11 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
           `/documents/${documentId}/file${includeRestricted ? '?include_restricted=true' : ''}`,
         )
         if (cancelled) return
-        revoked = URL.createObjectURL(blob)
-        setBlobUrl(revoked)
+        // 用 arrayBuffer 而不是 blob URL：这里自己管生命周期，不需要 revoke 那套
+        const doc = await pdfjs.getDocument({ data: await blob.arrayBuffer() }).promise
+        if (cancelled) { void doc.destroy(); return }
+        loaded = doc
+        setPdf(doc)
       } catch (e) {
         if (!cancelled) setError((e as Error).message || '原文打开失败')
       }
@@ -83,9 +104,23 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
 
     return () => {
       cancelled = true
-      if (revoked) URL.revokeObjectURL(revoked)
+      void loaded?.destroy()
     }
   }, [documentId, includeRestricted])
+
+  // 定位（四级）—— pdf 就绪后跑一次
+  useEffect(() => {
+    if (!pdf) return
+    let cancelled = false
+    void (async () => {
+      const result = await locate(pdf, citation)
+      if (cancelled) return
+      setLocated(result)
+      const vp = (await pdf.getPage(result.page)).getViewport({ scale: 1 })
+      if (!cancelled) setPageSize({ w: vp.width, h: vp.height })
+    })()
+    return () => { cancelled = true }
+  }, [pdf, citation])
 
   // Esc 关闭（§4.2.2.1）
   useEffect(() => {
@@ -119,6 +154,11 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
           </div>
         </div>
         <div className="drawer-actions">
+          <button className="icon-btn" onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))}
+                  title="缩小" aria-label="缩小"><Minus size={16} /></button>
+          <span className="muted small zoom-value">{Math.round(zoom * 100)}%</span>
+          <button className="icon-btn" onClick={() => setZoom((z) => Math.min(3, z + 0.25))}
+                  title="放大" aria-label="放大"><Plus size={16} /></button>
           <button className="link small" onClick={() => void openInNewTab()}>下载原文</button>
           <button className="icon-btn" onClick={onClose} title="关闭（Esc）" aria-label="关闭">
             <X size={17} />
@@ -134,154 +174,116 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
       {error && <div className="drawer-error">{error}</div>}
 
       <div className="drawer-body">
-        {blobUrl && (
-          <PdfLoader url={blobUrl} workerSrc={workerSrc}
-                     beforeLoad={<div className="muted small">加载原文…</div>}>
-            {(pdfDocument) => (
-              <LocatedPdf pdfDocument={pdfDocument} citation={citation}
-                          onLocated={setLocated} />
-            )}
-          </PdfLoader>
+        {pdf && pageSize && located ? (
+          <PageCanvas pdf={pdf} pageNumber={located.page}
+                      rects={located.rects} zoom={zoom} pageSize={pageSize} />
+        ) : (
+          !error && <div className="muted small pdf-loading">加载原文…</div>
         )}
       </div>
     </aside>
   )
 }
 
-// ---- PDF 渲染 + 四级定位 ---------------------------------------------------
+// ---- 单页渲染 + 高亮叠加 ---------------------------------------------------
 
 /**
- * PDF 视口 —— **挂载前先清空容器**。
+ * 把**目标页**画进 canvas，按**比例**叠加高亮框。
  *
- * ⚠️ 实测（本轮验收踩到）：`react-pdf-highlighter` 用的 pdf.js 里，
- *    `PDFViewer.setDocument()` **只在容器里已经有文档时才清空**：
- *
- *    ```js
- *    if (this.pdfDocument) { this._resetView(); }   // 只有这里才 textContent = ""
- *    ```
- *
- *    而 `PdfHighlighter.init()` 每次都在**全新 viewer**（`pdfDocument === null`）
- *    上调用 `setDocument` —— 于是容器**从来不清空**。
- *    React 19 的 `StrictMode` 在开发模式把挂载跑两遍，两次初始化抢同一个容器，
- *    结果是**每一页都渲染两遍**（实测：20 页的 PDF → DOM 里 40 个 `.page`，
- *    滚动时同一份内容会再出现一遍）。
- *
- *    对照实验：关掉 StrictMode → 20 个；恢复 → 又变 40 个。根因确凿。
- *
- * ⚠️ 清空必须在**子组件挂载之前**（`useLayoutEffect` 在 DOM 提交后、绘制前跑，
- *    早于 `PdfHighlighter` 的 `componentDidMount`）。写在子组件的 effect 里就晚了。
+ * 高亮用百分比定位（相对画布容器），所以缩放/窗口变化只需要重画 canvas，
+ * 框会自己跟着走 —— 不必重算每个框的像素值。
  */
-function PdfViewport({ children, docKey }: {
-  children: React.ReactNode; docKey: string
+function PageCanvas({ pdf, pageNumber, rects, zoom, pageSize }: {
+  pdf: PDFDocumentProxy
+  pageNumber: number
+  rects: Located['rects']
+  zoom: number
+  pageSize: { w: number; h: number }
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
-  const rootRef = useRef<Root | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [hostWidth, setHostWidth] = useState(0)
 
-  // ⚠️ 必须用 **portal + 独立 root**，不能直接渲染进这个 div 再用
-  //    `textContent = ''` 清空 —— 那样是**从 React 手里抢 DOM**：
-  //    React 仍然以为那些节点还在（fiber 上挂着），后续 reconciler 找不到节点就
-  //    静默停更，实测表现为**整个 PDF 白屏**（`data-ready=true` 但子树空的）。
+  // 容器宽度 → 决定渲染分辨率（跟随推拉动画与窗口变化）
   //
-  //  ⚠️ 又不能只靠 React 卸载来清空：`PdfHighlighter.init()` 每次都在
-  //     **全新 viewer**（`pdfDocument === null`）上调用 `setDocument`，而 pdf.js 的
-  //     `setDocument` **只在容器里已经有文档时才 `_resetView()` 清空容器** ——
-  //     于是容器从来不清。StrictMode 把挂载跑两遍，两次初始化抢同一个容器，
-  //     **每一页渲染两遍**（实测 20 页 → 40 个 `.page`）。
-  //
-  //  portal 两头都满足：容器归 React 管（reconciler 不会被抢），
-  //  而里面的 PDF 子树由我们自己的 root 完整卸载（节点一次性删干净）。
-  useEffect(() => {
+  // ⚠️ **必须直接量 getBoundingClientRect，不能只信 ResizeObserver 给的值**。
+  //    实测踩到：只挂 RO 时回调要么没来、要么给的宽度是 0，`hostWidth` 永远是 0，
+  //    渲染 effect 直接 early-return —— 结果 canvas 保持默认的 300×150，
+  //    肉眼看着就是「预览一片空白」，而高亮框还在（它们是按比例定位的）。
+  //    先同步量一次，RO 只用来触发「再量一次」。
+  // ⚠️ 用 useLayoutEffect 而不是 useEffect：要在浏览器绘制**之前**把尺寸量出来。
+  //    实测：放在 useEffect 里时，首次渲染量到的是抽屉展开动画前/布局未稳定时的宽度，
+  //    于是第一次打开会留一个默认尺寸（300×150）的空 canvas。
+  useLayoutEffect(() => {
     const host = hostRef.current
     if (!host) return
-    const root = createRoot(host)
-    rootRef.current = root
-    root.render(children)
-    return () => {
-      root.unmount()
-      rootRef.current = null
+    let last = 0
+    const measure = () => {
+      const w = Math.round(host.getBoundingClientRect().width)
+      if (w > 0 && w !== last) { last = w; setHostWidth(w) }
     }
-    // children 每次渲染都是新对象，依赖里放它会让 PDF 反复重建 ——
-    // 只认 docKey：同一份文档换引用不重建（靠 highlights 更新即可）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docKey])
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(host)
+    return () => ro.disconnect()
+  }, [])
 
-  return <div className="pdf-viewport" ref={hostRef} />
-}
-
-function LocatedPdf({ pdfDocument, citation, onLocated }: {
-  pdfDocument: PDFDocumentProxy
-  citation: Citation
-  onLocated: (located: Located | null) => void
-}) {
-  const [highlights, setHighlights] = useState<IHighlight[]>([])
-  const [ready, setReady] = useState(false)
-  const scrollTo = useRef<((highlight: IHighlight) => void) | null>(null)
-  // 同一份文档换引用时不该重建 viewer；只有换文档才换 key
-  const docKey = citation.jump_target?.document_id ?? ''
-
-  const handleLocated = useCallback(
-    (located: Located | null) => onLocated(located),
-    [onLocated],
-  )
+  // 比例框：PDF 用户空间（左下原点、pt）→ 0-1 比例（左上原点）。
+  // ⚠️ 用**实测的**页宽页高（同一页的 viewport），不要按 A4 猜 —— 这份文档第 1 页
+  //    就是 595×358pt 的非标准页，猜出来的框会整体偏离。
+  const boxes: Ratio[] = useMemo(() => rects.map((r) => ({
+    left: r.x1 / pageSize.w,
+    top: 1 - r.y2 / pageSize.h,
+    width: (r.x2 - r.x1) / pageSize.w,
+    height: (r.y2 - r.y1) / pageSize.h,
+  })), [rects, pageSize])
 
   useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || hostWidth <= 0) return
     let cancelled = false
+    let task: { cancel: () => void } | null = null
+
     void (async () => {
-      const located = await locate(pdfDocument, citation)
+      const page = await pdf.getPage(pageNumber)
       if (cancelled) return
-
-      const highlight: IHighlight | null = located.rects.length
-        ? {
-            id: `cite-${citation.marker}`,
-            position: {
-              pageNumber: located.page,
-              boundingRect: rect(located.rects[0], located.page),
-              rects: located.rects.map((r) => rect(r, located.page)),
-              usePdfCoordinates: true,
-            },
-            content: { text: citation.snippet },
-            comment: { text: '', emoji: '' },
-          }
-        : null
-
-      setHighlights(highlight ? [highlight] : [])
-      setReady(true)
-      handleLocated(located)
-      // 跳到目标页（L4 也跳）。页面是异步渲染的，布局稳定前后各滚一次，
-      // 否则会停在「第一次滚动时还没渲染完」的位置上。
-      if (highlight) {
-        for (const delay of [150, 700]) {
-          setTimeout(() => scrollTo.current?.(highlight), delay)
-        }
-      }
+      const base = page.getViewport({ scale: 1 })
+      // 页面 CSS 宽 = 容器宽 × 缩放；渲染分辨率再乘 dpr
+      const cssWidth = hostWidth * zoom
+      const scale = cssWidth / base.width
+      const vp = page.getViewport({ scale })
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = Math.floor(vp.width * dpr)
+      canvas.height = Math.floor(vp.height * dpr)
+      canvas.style.width = `${vp.width}px`
+      canvas.style.height = `${vp.height}px`
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.scale(dpr, dpr)
+      task = page.render({ canvasContext: ctx, viewport: vp })
+      await (task as unknown as { promise: Promise<void> }).promise
     })()
-    return () => { cancelled = true }
-  }, [pdfDocument, citation, handleLocated])
 
-  // ⚠️ 必须等高亮备齐再挂载（见文件头「实测坑」①）
-  if (!ready) return <div className="muted small">正在定位…</div>
+    return () => { cancelled = true; task?.cancel() }
+  }, [pdf, pageNumber, hostWidth, zoom])
+
+  // 容器占位比例：用实测页尺寸，避免 canvas 渲染完成前高度塌成 0
+  const aspect = pageSize.h / pageSize.w
 
   return (
-    <PdfViewport docKey={docKey}>
-      <PdfHighlighter
-        pdfDocument={pdfDocument}
-        highlights={highlights}
-        pdfScaleValue="auto"
-        enableAreaSelection={() => false}
-        onSelectionFinished={() => null}
-        onScrollChange={() => {}}
-        scrollRef={(fn) => { scrollTo.current = fn }}
-        highlightTransform={(highlight, _index, _setTip, _hideTip, _v2s, _shot, isScrolledTo) => (
-          <Highlight isScrolledTo={isScrolledTo} position={highlight.position}
-                     comment={highlight.comment} />
-        )}
-      />
-    </PdfViewport>
+    <div className="pdf-scroll">
+      <div className="pdf-page" ref={hostRef}
+           style={{ width: `${zoom * 100}%`, aspectRatio: `1 / ${aspect}` }}>
+        <canvas ref={canvasRef} className="pdf-canvas" />
+        {boxes.map((b, i) => (
+          <span key={i} className="pdf-highlight" style={{
+            left: `${b.left * 100}%`, top: `${b.top * 100}%`,
+            width: `${b.width * 100}%`, height: `${b.height * 100}%`,
+          }} />
+        ))}
+      </div>
+    </div>
   )
-}
-
-function rect(r: { x1: number; y1: number; x2: number; y2: number }, page: number) {
-  return { x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2, width: 0, height: 0, pageNumber: page }
 }
 
 /** 把 PyMuPDF 的框（左上角原点、y 向下）换成 PDF 用户空间（左下角原点、y 向上）。 */
