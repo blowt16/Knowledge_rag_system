@@ -36,7 +36,7 @@
  *    整个「容器生命周期」问题类别直接消失。
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as pdfjs from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
@@ -46,6 +46,31 @@ import type { Box, Citation } from '../api/types'
 
 // ⚠️ 默认 worker 是 CDN 地址，取不到时会**静默退回主线程假 worker** —— 必须显式指本地
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc
+
+/** 抽屉宽度（px）与钳制范围 —— 拖拽分栏用，存 localStorage 记住用户选择。 */
+const MIN_WIDTH = 360
+/** 对话区至少留这么多，别让用户把对话区拖没了 */
+const CHAT_MIN_WIDTH = 420
+const WIDTH_KEY = 'campus-rag-drawer-width'
+
+/** 钳到 [MIN_WIDTH, 窗口宽 − 对话区保底] —— 拖拽、读存档、窗口变化都走这一个口子。 */
+function clampWidth(px: number): number {
+  const max = Math.max(MIN_WIDTH, Math.round(window.innerWidth - CHAT_MIN_WIDTH))
+  return Math.min(max, Math.max(MIN_WIDTH, Math.round(px)))
+}
+
+function readSavedWidth(): number {
+  // ⚠️ 包 try：隐私模式 / 禁用存储时 localStorage 会直接抛
+  try {
+    const raw = Number(localStorage.getItem(WIDTH_KEY))
+    if (Number.isFinite(raw) && raw > 0) return clampWidth(raw)
+  } catch { /* 取不到就用默认 */ }
+  return clampWidth(Math.min(720, window.innerWidth * 0.46))
+}
+
+function saveWidth(px: number): void {
+  try { localStorage.setItem(WIDTH_KEY, String(px)) } catch { /* 存不了就存不了 */ }
+}
 
 type Level = 'L1' | 'L2' | 'L3' | 'L4'
 
@@ -80,6 +105,10 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
   // 实测出来的页面比例基准（1:1 视口下的宽 / 高）——**不用 A4 去猜**，
   // 这份文档的第 1 页就是非标准尺寸（595×358pt），猜了高亮框会整体偏
   const [pageSize, setPageSize] = useState<{ w: number; h: number } | null>(null)
+  // 拖拽分栏
+  const [width, setWidth] = useState(() => readSavedWidth())
+  const [dragging, setDragging] = useState(false)
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -114,13 +143,16 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
     let cancelled = false
     void (async () => {
       const result = await locate(pdf, citation)
-      if (cancelled) return
-      setLocated(result)
-      const vp = (await pdf.getPage(result.page)).getViewport({ scale: 1 })
-      if (!cancelled) setPageSize({ w: vp.width, h: vp.height })
+      if (!cancelled) setLocated(result)
     })()
     return () => { cancelled = true }
   }, [pdf, citation])
+
+  // 页面尺寸由渲染层量完回报（那里本来就为撑高度逐页量过一遍，不重复量）
+  const handlePageSize = useCallback(
+    (size: { w: number; h: number }) => setPageSize(size),
+    [],
+  )
 
   // Esc 关闭（§4.2.2.1）
   useEffect(() => {
@@ -128,6 +160,55 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  // ---- 拖拽分栏：宽度由用户定，记住选择 ----
+  //
+  // ⚠️ 抽屉贴在**右边缘**，所以往左拖是变宽：新宽 = 起始宽 + (起点 x − 当前 x)。
+  //    写成「加上差值」是最容易搞反的一步（第一版就反了）。
+  //
+  // ⚠️ 当前宽度除了 state 还存一份 ref：`onDragEnd` 里读 `width` 会读到
+  //    **闭包生成那一刻的旧值**（拖完存进去的还是拖动前的宽度 —— 实测到过）。
+  const widthRef = useRef(width)
+  widthRef.current = width
+
+  // 窗口变窄时把抽屉收回来，别把对话区挤没了（只加不减的话，在宽屏拖大、
+  // 换到窄屏就再也回不来）
+  useEffect(() => {
+    const onResize = () => {
+      setWidth((w) => clampWidth(w))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const onDragStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    // ⚠️ 指针捕获：拖快时指针会跑出这条 6px 的分隔条，
+    //    不捕获的话拖到一半就断（pointermove 不再落到它身上）
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragRef.current = { startX: event.clientX, startWidth: width }
+    setDragging(true)
+  }
+
+  const onDragMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const next = clampWidth(drag.startWidth + (drag.startX - event.clientX))
+    // ⚠️ 这里必须**同步**写 ref，不能只靠渲染时那句 `widthRef.current = width`：
+    //    React 会把这些 pointer 事件里的 setState 一起批处理，拖动全程可能不发生
+    //    渲染 —— 于是 onDragEnd 读到的还是拖动**之前**的宽度，存进 localStorage 的
+    //    也就是旧值（实测：拖到 880 却存了 720，下次打开又弹回去）。
+    widthRef.current = next
+    setWidth(next)
+  }
+
+  const onDragEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    dragRef.current = null
+    setDragging(false)
+    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    saveWidth(widthRef.current) // ⚠️ 用 ref，不是闭包里的 width
+  }
 
   const openInNewTab = async () => {
     // pptx 等不做在线预览的格式：给「下载原文 + 提示」（§4.2.2.6）
@@ -144,7 +225,16 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
   return (
     // ⚠️ 抽屉是 **flex 兄弟节点**，不再是 `position: fixed` 的浮层 ——
     //    浮层会盖住对话区，而这里要的是「把对话区挤窄」（推拉式）。
-    <aside className="drawer" role="dialog" aria-label="原文">
+    //    ⚠️ 宽度由用户拖拽决定（flex-basis + flex:none），所以这里要显式给宽度，
+    //       不能再由 CSS 里的 width 规则说了算。
+    <aside className={`drawer${dragging ? ' dragging' : ''}`} role="dialog" aria-label="原文"
+           style={{ flexBasis: width, width }}>
+      {/* 拖拽分隔条：贴左边缘 —— 往左拖 = 预览变宽 */}
+      <div className="drawer-resizer" role="separator" aria-orientation="vertical"
+           aria-label="拖动调整预览宽度" title="拖动调整宽度"
+           onPointerDown={onDragStart} onPointerMove={onDragMove}
+           onPointerUp={onDragEnd} onPointerCancel={onDragEnd} />
+
       <header className="drawer-head">
         <div className="drawer-title">
           <strong>{citation.document_name}</strong>
@@ -174,9 +264,9 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
       {error && <div className="drawer-error">{error}</div>}
 
       <div className="drawer-body">
-        {pdf && pageSize && located ? (
-          <PageCanvas pdf={pdf} pageNumber={located.page}
-                      rects={located.rects} zoom={zoom} pageSize={pageSize} />
+        {pdf && located ? (
+          <PdfPages pdf={pdf} initialPage={located.page} rects={located.rects}
+                    zoom={zoom} onRendered={handlePageSize} />
         ) : (
           !error && <div className="muted small pdf-loading">加载原文…</div>
         )}
@@ -185,37 +275,43 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
   )
 }
 
-// ---- 单页渲染 + 高亮叠加 ---------------------------------------------------
+// ---- 整份原文渲染 + 高亮叠加 -----------------------------------------------
 
 /**
- * 把**目标页**画进 canvas，按**比例**叠加高亮框。
+ * 把**整份 PDF** 按页连续渲染成一块可滚动的阅读区，并按**比例**叠加高亮框。
  *
- * 高亮用百分比定位（相对画布容器），所以缩放/窗口变化只需要重画 canvas，
- * 框会自己跟着走 —— 不必重算每个框的像素值。
+ * ⚠️ 高亮框用百分比定位（相对页容器），所以缩放 / 容器拖拽 / 窗口变化都只需要
+ *    重画 canvas，框自己跟着走 —— 不必重算每个框的像素值。
+ *
+ * ⚠️ **页面容器先全部建出来、canvas 再按需渲染**：整份一次画完，遇到几十页的
+ *    文件会明显卡（每页都要解码 + 渲染）。所以先用 `aspect-ratio` 占好位、
+ *    把滚动高度撑对，再用 IntersectionObserver 只画视口附近的页 —— 滚动条
+ *    从一开始就是准的，不会边滚边跳。
  */
-function PageCanvas({ pdf, pageNumber, rects, zoom, pageSize }: {
+function PdfPages({ pdf, initialPage, rects, zoom, onRendered }: {
   pdf: PDFDocumentProxy
-  pageNumber: number
+  /** 引用所在页 —— 打开时滚过去 */
+  initialPage: number
+  /** 该页要高亮的框（比例换算需要它所在页的尺寸） */
   rects: Located['rects']
   zoom: number
-  pageSize: { w: number; h: number }
+  onRendered: (pageSize: { w: number; h: number }) => void
 }) {
-  const hostRef = useRef<HTMLDivElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const innerRef = useRef<HTMLDivElement>(null)
+  const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map())
   const [hostWidth, setHostWidth] = useState(0)
+  // 每个页面容器的高度 / 宽度比（逐页量，因为**同一份文件里页尺寸可以不同** ——
+  // 实测这份文档第 1 页是 595×358pt，其余是 595×842pt）
+  const [ratios, setRatios] = useState<Record<number, number>>({})
+  // 引用页的真实尺寸（高亮框换算的比例基准），由下面量比例的循环回填
+  const [citedSize, setCitedSize] = useState<{ w: number; h: number } | null>(null)
 
-  // 容器宽度 → 决定渲染分辨率（跟随推拉动画与窗口变化）
-  //
-  // ⚠️ **必须直接量 getBoundingClientRect，不能只信 ResizeObserver 给的值**。
-  //    实测踩到：只挂 RO 时回调要么没来、要么给的宽度是 0，`hostWidth` 永远是 0，
-  //    渲染 effect 直接 early-return —— 结果 canvas 保持默认的 300×150，
-  //    肉眼看着就是「预览一片空白」，而高亮框还在（它们是按比例定位的）。
-  //    先同步量一次，RO 只用来触发「再量一次」。
-  // ⚠️ 用 useLayoutEffect 而不是 useEffect：要在浏览器绘制**之前**把尺寸量出来。
-  //    实测：放在 useEffect 里时，首次渲染量到的是抽屉展开动画前/布局未稳定时的宽度，
-  //    于是第一次打开会留一个默认尺寸（300×150）的空 canvas。
+  // 容器宽度 → 渲染分辨率。⚠️ 直接量 getBoundingClientRect，不要只信 RO ——
+  //    实测只挂 RO 时拿到的是 0，canvas 会停在默认 300×150 一片空白。
+  //    用 useLayoutEffect：要在绘制前量出来，否则首次会留一帧空 canvas。
   useLayoutEffect(() => {
-    const host = hostRef.current
+    const host = innerRef.current
     if (!host) return
     let last = 0
     const measure = () => {
@@ -228,19 +324,157 @@ function PageCanvas({ pdf, pageNumber, rects, zoom, pageSize }: {
     return () => ro.disconnect()
   }, [])
 
+  // 逐页量比例（撑高度用），并把引用所在页的尺寸回报给上层（高亮框换算要用）
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const next: Record<number, number> = {}
+      for (let n = 1; n <= pdf.numPages; n += 1) {
+        const vp = (await pdf.getPage(n)).getViewport({ scale: 1 })
+        if (cancelled) return
+        next[n] = vp.height / vp.width
+        if (n === initialPage) {
+          setCitedSize({ w: vp.width, h: vp.height })
+          onRendered({ w: vp.width, h: vp.height })
+        }
+      }
+      if (!cancelled) setRatios(next)
+    })()
+    return () => { cancelled = true }
+  }, [pdf, initialPage, onRendered])
+
+  // 只画视口附近的页（前后各一页的余量）。
+  //
+  // ⚠️ 这里**不用 IntersectionObserver** —— 实测它在这个抽屉里一次回调都不触发
+  //    （20 个节点都 observe 上了，回调却始终不来），而且不报错、查不出原因。
+  //    滚动事件 + 量位置虽然土，但行为确定、能测、不依赖浏览器的隐性前提
+  //    （根元素是不是真的滚动祖先、回调会不会被节流）。
+  //
+  //    页数只有几十，每次滚动量一遍它们的相对位置，代价可以忽略。
+  const [visible, setVisible] = useState<number[]>([1])
+  useEffect(() => {
+    const root = scrollRef.current
+    if (!root) return
+    let frame = 0
+    const measure = () => {
+      const rootTop = root.getBoundingClientRect().top
+      const hits: number[] = []
+      pageRefs.current.forEach((el, n) => {
+        const rel = el.getBoundingClientRect().top - rootTop
+        // 视口上下各留一页的余量
+        if (rel < root.clientHeight * 2 && rel + el.offsetHeight > -root.clientHeight) {
+          hits.push(n)
+        }
+      })
+      hits.sort((a, b) => a - b)
+      setVisible((prev) =>
+        prev.length === hits.length && prev.every((n, i) => n === hits[i]) ? prev : hits)
+    }
+    const onScroll = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    }
+    // ⚠️ 只在比例就位后才量：比例没到时所有页高都是 0，会被一次性判成「全都可见」，
+    //    懒渲染直接失效（实测 20 页全渲染）。
+    if (Object.keys(ratios).length === 0) return
+    measure()
+    root.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      cancelAnimationFrame(frame)
+      root.removeEventListener('scroll', onScroll)
+    }
+    // ratios 就位后页面才有高度，那时再量一次
+  }, [ratios])
+
+  // 打开就滚到引用页。
+  useEffect(() => {
+    const root = scrollRef.current
+    const el = pageRefs.current.get(initialPage)
+    if (!root || !el) return
+    // ⚠️ 必须等 `ratios` 就位（页高定下来）再滚：之前页高是 0，滚完布局一变
+    //    位置全错（实测引用页停在下方 1500~2400px 处，等于没跳）。
+    if (Object.keys(ratios).length === 0) return
+    const go = () => {
+      // ⚠️ 用相对 rect 算，不要用 offsetTop —— 页容器的 offsetParent 是它自己
+      //    （position: relative），offsetTop 拿到的是错的数
+      const delta = el.getBoundingClientRect().top - root.getBoundingClientRect().top
+      root.scrollTop += delta - 8
+    }
+    const raf = requestAnimationFrame(go)
+    // 抽屉展开动画（~220ms）期间布局还在位移，落定后再校一次
+    const timer = setTimeout(go, 320)
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer) }
+    // ⚠️ 依赖里**不能放 `visible`** —— 滚动会改变 visible，那就是「滚完再滚」的死循环。
+    //    它只该在「布局定下来」或「换了引用页」时跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPage, ratios])
+
+  // 该画哪些页 = 可见的 ± 1
+  const rendered = useMemo(() => {
+    const set = new Set<number>()
+    for (const n of visible) { set.add(n); set.add(n - 1); set.add(n + 1) }
+    return set
+  }, [visible])
+
+  const cssWidth = hostWidth * zoom
   // 比例框：PDF 用户空间（左下原点、pt）→ 0-1 比例（左上原点）。
-  // ⚠️ 用**实测的**页宽页高（同一页的 viewport），不要按 A4 猜 —— 这份文档第 1 页
-  //    就是 595×358pt 的非标准页，猜出来的框会整体偏离。
-  const boxes: Ratio[] = useMemo(() => rects.map((r) => ({
-    left: r.x1 / pageSize.w,
-    top: 1 - r.y2 / pageSize.h,
-    width: (r.x2 - r.x1) / pageSize.w,
-    height: (r.y2 - r.y1) / pageSize.h,
-  })), [rects, pageSize])
+  // ⚠️ 基准是**实测的**引用页宽高，不按 A4 猜 —— 这份文档第 1 页就是 595×358pt，
+  //    猜出来的框会整体偏。
+  const boxes: Ratio[] = useMemo(() => {
+    if (!citedSize) return []
+    return rects.map((r) => ({
+      left: r.x1 / citedSize.w,
+      top: 1 - r.y2 / citedSize.h,
+      width: (r.x2 - r.x1) / citedSize.w,
+      height: (r.y2 - r.y1) / citedSize.h,
+    }))
+  }, [rects, citedSize])
+
+  return (
+    <div className="pdf-scroll" ref={scrollRef}>
+      <div className="pdf-inner" ref={innerRef} style={{ width: `${zoom * 100}%` }}>
+        {Array.from({ length: pdf.numPages }, (_, i) => i + 1).map((n) => (
+          <div
+            key={n}
+            data-page={n}
+            ref={(el) => { if (el) pageRefs.current.set(n, el) }}
+            className={`pdf-page${n === initialPage ? ' cited' : ''}`}
+            style={ratios[n] ? { aspectRatio: `1 / ${ratios[n]}` } : undefined}
+          >
+            <PageCanvas pdf={pdf} pageNumber={n} cssWidth={cssWidth} enabled={rendered.has(n)} />
+            {n === initialPage && boxes.map((b, i) => (
+              <span key={i} className="pdf-highlight" style={{
+                left: `${b.left * 100}%`, top: `${b.top * 100}%`,
+                width: `${b.width * 100}%`, height: `${b.height * 100}%`,
+              }} />
+            ))}
+            <span className="pdf-page-no">{n}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** 单页 canvas。`enabled` 为假时只占位不渲染（等滚到附近再画）。 */
+function PageCanvas({ pdf, pageNumber, cssWidth, enabled }: {
+  pdf: PDFDocumentProxy
+  pageNumber: number
+  cssWidth: number
+  enabled: boolean
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || hostWidth <= 0) return
+    if (!canvas) return
+    // 滚远了的页把画布放掉：几十页的位图留着是白占内存
+    // （canvas 宽高变 0 时浏览器会释放后备位图；display:block + 100% 让它不占位）
+    if (!enabled || cssWidth <= 0) {
+      canvas.width = 0
+      canvas.height = 0
+      return
+    }
     let cancelled = false
     let task: { cancel: () => void } | null = null
 
@@ -248,15 +482,12 @@ function PageCanvas({ pdf, pageNumber, rects, zoom, pageSize }: {
       const page = await pdf.getPage(pageNumber)
       if (cancelled) return
       const base = page.getViewport({ scale: 1 })
-      // 页面 CSS 宽 = 容器宽 × 缩放；渲染分辨率再乘 dpr
-      const cssWidth = hostWidth * zoom
-      const scale = cssWidth / base.width
-      const vp = page.getViewport({ scale })
+      const vp = page.getViewport({ scale: cssWidth / base.width })
       const dpr = window.devicePixelRatio || 1
       canvas.width = Math.floor(vp.width * dpr)
       canvas.height = Math.floor(vp.height * dpr)
-      canvas.style.width = `${vp.width}px`
-      canvas.style.height = `${vp.height}px`
+      canvas.style.width = '100%'
+      canvas.style.height = '100%'
       const ctx = canvas.getContext('2d')
       if (!ctx) return
       ctx.scale(dpr, dpr)
@@ -265,33 +496,19 @@ function PageCanvas({ pdf, pageNumber, rects, zoom, pageSize }: {
     })()
 
     return () => { cancelled = true; task?.cancel() }
-  }, [pdf, pageNumber, hostWidth, zoom])
+  }, [pdf, pageNumber, cssWidth, enabled])
 
-  // 容器占位比例：用实测页尺寸，避免 canvas 渲染完成前高度塌成 0
-  const aspect = pageSize.h / pageSize.w
-
-  return (
-    <div className="pdf-scroll">
-      <div className="pdf-page" ref={hostRef}
-           style={{ width: `${zoom * 100}%`, aspectRatio: `1 / ${aspect}` }}>
-        <canvas ref={canvasRef} className="pdf-canvas" />
-        {boxes.map((b, i) => (
-          <span key={i} className="pdf-highlight" style={{
-            left: `${b.left * 100}%`, top: `${b.top * 100}%`,
-            width: `${b.width * 100}%`, height: `${b.height * 100}%`,
-          }} />
-        ))}
-      </div>
-    </div>
-  )
+  return <canvas ref={canvasRef} className="pdf-canvas" />
 }
+
+// ---- 四级定位（§4.2.2.4）----------------------------------------------------
 
 /** 把 PyMuPDF 的框（左上角原点、y 向下）换成 PDF 用户空间（左下角原点、y 向上）。 */
 function boxToPdf(box: Box, pageHeight: number) {
   return { x1: box.x0, y1: pageHeight - box.bottom, x2: box.x1, y2: pageHeight - box.top }
 }
 
-/** 四级定位（§4.2.2.4）。**每一级都可能失败，L4 是常态兜底**。 */
+/** 四级定位。**每一级都可能失败，L4 是常态兜底**。 */
 export async function locate(pdfDocument: PDFDocumentProxy, citation: Citation): Promise<Located> {
   const target = citation.jump_target
   const page = Math.max(1, target?.page ?? 1)

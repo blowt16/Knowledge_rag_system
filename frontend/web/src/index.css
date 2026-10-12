@@ -370,11 +370,26 @@ input, textarea { font: inherit; }
 /* ---- 原文抽屉（§4.2.2.1）----
    ⚠️ 推拉式：抽屉是 flex 兄弟节点，展开会把对话区**挤窄**，而不是盖在上面。
       用 `position: fixed` 覆盖会让用户看不见自己引用的上下文。 */
+/* ⚠️ 宽度由 JS 拖拽控制（见 DocumentDrawer 的 flexBasis），CSS 只兜底不给死值 */
 .drawer {
-  flex: none; width: min(46vw, 720px); display: flex; flex-direction: column;
+  flex: none; position: relative; display: flex; flex-direction: column;
   background: var(--app-card); border-left: 1px solid var(--line);
   min-width: 0; animation: drawer-in .22s cubic-bezier(.32, .72, 0, 1);
 }
+/* 拖拽分隔条：本体只有 6px，但用伪元素把可抓区域扩到 14px ——
+   6px 的命中区在鼠标上很难精准抓住 */
+.drawer-resizer {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
+  cursor: col-resize; z-index: 2; touch-action: none;
+}
+.drawer-resizer::before {
+  content: ''; position: absolute; left: -4px; right: -4px; top: 0; bottom: 0;
+}
+.drawer-resizer:hover::before, .drawer.dragging .drawer-resizer::before {
+  background: var(--brand); opacity: .5;
+}
+/* 拖拽中锁掉选中，否则会一路把文字选蓝 */
+.drawer.dragging { user-select: none; }
 @keyframes drawer-in {
   from { transform: translateX(28px); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
@@ -391,13 +406,26 @@ input, textarea { font: inherit; }
 .zoom-value { min-width: 38px; text-align: center; font-variant-numeric: tabular-nums; }
 .pdf-loading { padding: 14px 16px; }
 
-/* 原文单页渲染：canvas + 按比例叠的高亮框 */
-.pdf-scroll { padding: 14px; }
+/* 原文整份渲染：连续多页 + 按比例叠的高亮框 */
+/* ⚠️ 这里是**真正的滚动容器**，必须显式撑满 + 自己滚：
+   只写 padding 的话它会跟着内容一起长高（实测 clientHeight = scrollHeight = 23387px），
+   结果整个抽屉一起变长、根本滚不动 —— 而「滚不动」又连带让懒渲染失效
+   （所有页永远都在视口里，于是全被渲染）。 */
+.pdf-scroll { height: 100%; overflow-y: auto; padding: 14px; }
+.pdf-inner { margin: 0 auto; }
 .pdf-page {
-  position: relative; margin: 0 auto; background: #fff;
+  position: relative; margin: 0 auto 12px; background: #fff;
   box-shadow: 0 1px 6px rgba(0, 0, 0, .12); border-radius: 3px; overflow: hidden;
 }
-.pdf-canvas { display: block; }
+.pdf-canvas { display: block; width: 100%; height: 100%; }
+/* 页码角标：整份滚动时才分得清翻到第几页 */
+.pdf-page-no {
+  position: absolute; right: 6px; bottom: 4px;
+  font-size: 11px; color: #9aa3af; background: rgba(255, 255, 255, .82);
+  padding: 0 5px; border-radius: 4px; pointer-events: none;
+}
+/* 引用所在页给个左边条，一眼看出「跳到了哪一页」 */
+.pdf-page.cited { box-shadow: 0 1px 6px rgba(0, 0, 0, .12), 0 0 0 2px var(--brand); }
 .pdf-highlight {
   position: absolute; pointer-events: none; border-radius: 2px;
   background: rgba(250, 204, 21, .38);
