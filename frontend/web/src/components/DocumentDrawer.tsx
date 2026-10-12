@@ -19,19 +19,23 @@
  * ⚠️ **偏移不做高亮**：规范化文本的偏移**无法直接**映射到阅读器坐标
  *    （清洗会删页眉页脚，两者坐标系对不上）。所以「坐标优先、文本兜底」。
  *
- * ⚠️ 两个实测坑（spike 记录）：
+ * ⚠️ 三个实测坑（spike 记录 + 本轮验收）：
  *    ① highlights 必须在**挂载之前**备齐 —— 挂载后再喂会读到一个还没初始化的
  *       viewer，直接崩
  *    ② 库的默认 worker 是 CDN 地址，取不到时**静默退回主线程假 worker**，
  *       页面照常渲染但只有翻 performance 列表才看得出来 —— 必须显式指本地 worker
+ *    ③ **容器必须在挂载前清空**（见 `PdfViewport`）—— 否则页数翻倍
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import type { Root } from 'react-dom/client'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { Highlight, PdfHighlighter, PdfLoader } from 'react-pdf-highlighter'
 import type { IHighlight } from 'react-pdf-highlighter'
 import 'react-pdf-highlighter/dist/style.css'
+import { X } from 'lucide-react'
 import { request, requestBlob } from '../api/client'
 import type { Box, Citation } from '../api/types'
 
@@ -103,9 +107,11 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
   }
 
   return (
+    // ⚠️ 抽屉是 **flex 兄弟节点**，不再是 `position: fixed` 的浮层 ——
+    //    浮层会盖住对话区，而这里要的是「把对话区挤窄」（推拉式）。
     <aside className="drawer" role="dialog" aria-label="原文">
       <header className="drawer-head">
-        <div>
+        <div className="drawer-title">
           <strong>{citation.document_name}</strong>
           <div className="muted small">
             第 {citation.page} 页{citation.chapter ? ` · ${citation.chapter}` : ''}
@@ -113,8 +119,10 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
           </div>
         </div>
         <div className="drawer-actions">
-          <button className="link" onClick={() => void openInNewTab()}>下载原文</button>
-          <button className="link" onClick={onClose}>关闭</button>
+          <button className="link small" onClick={() => void openInNewTab()}>下载原文</button>
+          <button className="icon-btn" onClick={onClose} title="关闭（Esc）" aria-label="关闭">
+            <X size={17} />
+          </button>
         </div>
       </header>
 
@@ -142,6 +150,64 @@ export function DocumentDrawer({ citation, includeRestricted = false, onClose }:
 
 // ---- PDF 渲染 + 四级定位 ---------------------------------------------------
 
+/**
+ * PDF 视口 —— **挂载前先清空容器**。
+ *
+ * ⚠️ 实测（本轮验收踩到）：`react-pdf-highlighter` 用的 pdf.js 里，
+ *    `PDFViewer.setDocument()` **只在容器里已经有文档时才清空**：
+ *
+ *    ```js
+ *    if (this.pdfDocument) { this._resetView(); }   // 只有这里才 textContent = ""
+ *    ```
+ *
+ *    而 `PdfHighlighter.init()` 每次都在**全新 viewer**（`pdfDocument === null`）
+ *    上调用 `setDocument` —— 于是容器**从来不清空**。
+ *    React 19 的 `StrictMode` 在开发模式把挂载跑两遍，两次初始化抢同一个容器，
+ *    结果是**每一页都渲染两遍**（实测：20 页的 PDF → DOM 里 40 个 `.page`，
+ *    滚动时同一份内容会再出现一遍）。
+ *
+ *    对照实验：关掉 StrictMode → 20 个；恢复 → 又变 40 个。根因确凿。
+ *
+ * ⚠️ 清空必须在**子组件挂载之前**（`useLayoutEffect` 在 DOM 提交后、绘制前跑，
+ *    早于 `PdfHighlighter` 的 `componentDidMount`）。写在子组件的 effect 里就晚了。
+ */
+function PdfViewport({ children, docKey }: {
+  children: React.ReactNode; docKey: string
+}) {
+  const hostRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<Root | null>(null)
+
+  // ⚠️ 必须用 **portal + 独立 root**，不能直接渲染进这个 div 再用
+  //    `textContent = ''` 清空 —— 那样是**从 React 手里抢 DOM**：
+  //    React 仍然以为那些节点还在（fiber 上挂着），后续 reconciler 找不到节点就
+  //    静默停更，实测表现为**整个 PDF 白屏**（`data-ready=true` 但子树空的）。
+  //
+  //  ⚠️ 又不能只靠 React 卸载来清空：`PdfHighlighter.init()` 每次都在
+  //     **全新 viewer**（`pdfDocument === null`）上调用 `setDocument`，而 pdf.js 的
+  //     `setDocument` **只在容器里已经有文档时才 `_resetView()` 清空容器** ——
+  //     于是容器从来不清。StrictMode 把挂载跑两遍，两次初始化抢同一个容器，
+  //     **每一页渲染两遍**（实测 20 页 → 40 个 `.page`）。
+  //
+  //  portal 两头都满足：容器归 React 管（reconciler 不会被抢），
+  //  而里面的 PDF 子树由我们自己的 root 完整卸载（节点一次性删干净）。
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const root = createRoot(host)
+    rootRef.current = root
+    root.render(children)
+    return () => {
+      root.unmount()
+      rootRef.current = null
+    }
+    // children 每次渲染都是新对象，依赖里放它会让 PDF 反复重建 ——
+    // 只认 docKey：同一份文档换引用不重建（靠 highlights 更新即可）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docKey])
+
+  return <div className="pdf-viewport" ref={hostRef} />
+}
+
 function LocatedPdf({ pdfDocument, citation, onLocated }: {
   pdfDocument: PDFDocumentProxy
   citation: Citation
@@ -150,6 +216,13 @@ function LocatedPdf({ pdfDocument, citation, onLocated }: {
   const [highlights, setHighlights] = useState<IHighlight[]>([])
   const [ready, setReady] = useState(false)
   const scrollTo = useRef<((highlight: IHighlight) => void) | null>(null)
+  // 同一份文档换引用时不该重建 viewer；只有换文档才换 key
+  const docKey = citation.jump_target?.document_id ?? ''
+
+  const handleLocated = useCallback(
+    (located: Located | null) => onLocated(located),
+    [onLocated],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -173,7 +246,7 @@ function LocatedPdf({ pdfDocument, citation, onLocated }: {
 
       setHighlights(highlight ? [highlight] : [])
       setReady(true)
-      onLocated(located)
+      handleLocated(located)
       // 跳到目标页（L4 也跳）。页面是异步渲染的，布局稳定前后各滚一次，
       // 否则会停在「第一次滚动时还没渲染完」的位置上。
       if (highlight) {
@@ -183,25 +256,27 @@ function LocatedPdf({ pdfDocument, citation, onLocated }: {
       }
     })()
     return () => { cancelled = true }
-  }, [pdfDocument, citation, onLocated])
+  }, [pdfDocument, citation, handleLocated])
 
-  // ⚠️ 必须等高亮备齐再挂载（见文件头「两个实测坑」①）
+  // ⚠️ 必须等高亮备齐再挂载（见文件头「实测坑」①）
   if (!ready) return <div className="muted small">正在定位…</div>
 
   return (
-    <PdfHighlighter
-      pdfDocument={pdfDocument}
-      highlights={highlights}
-      pdfScaleValue="auto"
-      enableAreaSelection={() => false}
-      onSelectionFinished={() => null}
-      onScrollChange={() => {}}
-      scrollRef={(fn) => { scrollTo.current = fn }}
-      highlightTransform={(highlight, _index, _setTip, _hideTip, _v2s, _shot, isScrolledTo) => (
-        <Highlight isScrolledTo={isScrolledTo} position={highlight.position}
-                   comment={highlight.comment} />
-      )}
-    />
+    <PdfViewport docKey={docKey}>
+      <PdfHighlighter
+        pdfDocument={pdfDocument}
+        highlights={highlights}
+        pdfScaleValue="auto"
+        enableAreaSelection={() => false}
+        onSelectionFinished={() => null}
+        onScrollChange={() => {}}
+        scrollRef={(fn) => { scrollTo.current = fn }}
+        highlightTransform={(highlight, _index, _setTip, _hideTip, _v2s, _shot, isScrolledTo) => (
+          <Highlight isScrolledTo={isScrolledTo} position={highlight.position}
+                     comment={highlight.comment} />
+        )}
+      />
+    </PdfViewport>
   )
 }
 

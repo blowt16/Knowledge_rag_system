@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { Moon, MoreHorizontal, Plus, Search, Sun, X } from 'lucide-react'
 import { streamSse } from '../../api/sse'
 import { getAccessToken } from '../../api/client'
-import { listConversations, getMessages } from '../../api/conversations'
+import {
+  deleteConversation, getMessages, listConversations,
+  patchConversation,
+} from '../../api/conversations'
 import type { ConversationItem, MessageItem } from '../../api/conversations'
 import { useAuth } from '../../stores/auth'
 import type { AssistantDraft, Citation } from '../../api/types'
 import { MarkdownAnswer } from '../../markdown/MarkdownAnswer'
 import { StreamingAnswer } from '../../markdown/StreamingAnswer'
 import { CitationImages, DocumentDrawer } from '../../components/DocumentDrawer'
+import { AssistantAvatar, UserAvatar } from '../../components/Avatar'
+import { useTheme } from '../../stores/theme'
 
 interface Turn {
   id: string
@@ -82,11 +87,24 @@ export default function ChatPage() {
   const [convs, setConvs] = useState<ConversationItem[]>([])
   const [convTotal, setConvTotal] = useState(0)
   const [convLoading, setConvLoading] = useState(false)
+  const [convSearch, setConvSearch] = useState('')
+  // 重命名中的会话 id（内联编辑）
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [renameText, setRenameText] = useState('')
   const abortRef = useRef<(() => void) | null>(null)
   const { user, logout } = useAuth()
+  const { theme, toggle: toggleTheme } = useTheme()
   const openCitation = useCallback((citation: Citation) => setOpened(citation), [])
 
   // ---- 滚动：贴底 + 用户上翻后不再被拉回（§4.2.4.3 的必须项）--------
+  //
+  // ⚠️ 这里曾经挂 `@tanstack/react-virtual`，**已拆除** —— 实测根因：
+  //    首轮在「正在检索…」时高度只有 125px，虚拟滚动把它当成最终高度缓存住，
+  //    答案进来后那一轮实际长到 315px，但虚拟滚动不再重量 →
+  //    撑高的容器 `scrollHeight === clientHeight`，**整个对话区一点都滚不动**
+  //    （实测 `scrollTop = 99999` 后仍为 0），长答案被画在滚动容器外面。
+  //    收益本就不成立：一轮会话撑死几十轮，几十个 DOM 节点对浏览器不构成压力，
+  //    而流式渲染的性能问题已经由 `StreamingAnswer` 的分块渲染解决了。
   const mainRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
 
@@ -102,14 +120,6 @@ export default function ChatPage() {
   useEffect(() => {
     const el = mainRef.current
     if (el && stickRef.current) el.scrollTop = el.scrollHeight
-  })
-
-  // ---- 消息流虚拟滚动（§4.2.4.3）：长会话不全量挂 DOM ----
-  const virtualizer = useVirtualizer({
-    count: turns.length,
-    getScrollElement: () => mainRef.current,
-    estimateSize: () => 200,
-    overscan: 4,
   })
 
   const loadConversations = useCallback(async (reset: boolean) => {
@@ -249,6 +259,7 @@ export default function ChatPage() {
       const r = await getMessages(id)
       setSessionId(id)
       setTurns(toTurns(r.messages ?? []))
+      setOpened(null)
       stickRef.current = true
     } catch (e) {
       // 越权 / 已删会话在这里是 404（M4-D4）
@@ -256,44 +267,157 @@ export default function ChatPage() {
     }
   }
 
+  /** 新建对话只是清空本地 session_id —— 不调 POST /api/conversations，
+   *  否则会话列表里会堆积没有消息的空会话（§3.7.2）。 */
+  function newConversation() {
+    if (busy) return
+    setSessionId(null)
+    setTurns([])
+    setOpened(null)
+  }
+
+  /** 删除会话：不可撤销，先确认。删的是当前会话就顺带清空对话区。 */
+  async function removeConversation(id: string, title: string) {
+    if (busy) return
+    if (!window.confirm(`删除会话「${title || '（无标题）'}」？此操作不可撤销。`)) return
+    try {
+      await deleteConversation(id)
+      if (id === sessionId) { setSessionId(null); setTurns([]); setOpened(null) }
+      // 本地先摘掉，再整体重拉（删除会让分页偏移错位）
+      setConvs((prev) => prev.filter((c) => c.id !== id))
+      setConvTotal((n) => Math.max(0, n - 1))
+      void loadConversations(true)
+    } catch (e) {
+      console.warn('删除会话失败', e)
+    }
+  }
+
+  /** 置顶 / 取消置顶。排序由服务端按 `is_top DESC` 决定，改完重拉第一页。 */
+  async function toggleTop(id: string, isTop: boolean) {
+    try {
+      await patchConversation(id, { is_top: isTop ? 0 : 1 })
+      void loadConversations(true)
+    } catch (e) {
+      console.warn('置顶失败', e)
+    }
+  }
+
+  async function commitRename(id: string) {
+    const title = renameText.trim()
+    setRenaming(null)
+    if (!title) return
+    try {
+      await patchConversation(id, { title })
+      setConvs((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)))
+    } catch (e) {
+      console.warn('重命名失败', e)
+    }
+  }
+
+  const shown = convSearch.trim()
+    ? convs.filter((c) => (c.title || '').toLowerCase().includes(convSearch.trim().toLowerCase()))
+    : convs
+
   return (
-    <div className="chat-layout">
-      {/* ---- 会话列表（§4.2.4.3）：分页 + 滚动到底加载下一页 ---- */}
-      <aside className="conv-sidebar">
-        <div className="conv-head">
-          <strong>会话</strong>
-          <span className="muted small">共 {convTotal} 条</span>
+    <div className="app">
+      {/* ---- 侧栏（§4.2.4.3）：新建对话 + 列表 + 逐条管理 ---- */}
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <span className="brand">校园 RAG</span>
+          <button className="btn-new" onClick={newConversation}
+                  disabled={busy} title="新建对话">
+            <Plus size={16} /> 新建对话
+          </button>
         </div>
+
+        <div className="conv-search">
+          <Search size={14} />
+          <input value={convSearch} placeholder="搜索会话"
+                 onChange={(e) => setConvSearch(e.target.value)} />
+          {convSearch && (
+            <button className="icon-btn" onClick={() => setConvSearch('')} title="清除">
+              <X size={13} />
+            </button>
+          )}
+        </div>
+
         <div
           className="conv-list"
           onScroll={(e) => {
             const el = e.currentTarget
             if (el.scrollHeight - el.scrollTop - el.clientHeight < 40
-                && !convLoading && convs.length < convTotal) {
+                && !convLoading && !convSearch && convs.length < convTotal) {
               void loadConversations(false)
             }
           }}
         >
-          {convs.map((c) => (
-            <button
-              key={c.id}
-              className={`conv-item${c.id === sessionId ? ' active' : ''}`}
-              onClick={() => void openConversation(c.id)}
-            >
-              {c.is_top ? '📌 ' : ''}{c.title || '（无标题）'}
-            </button>
+          {shown.map((c) => (
+            <div key={c.id}
+                 className={`conv-item${c.id === sessionId ? ' active' : ''}`}>
+              {renaming === c.id ? (
+                <input
+                  className="conv-rename"
+                  autoFocus
+                  value={renameText}
+                  onChange={(e) => setRenameText(e.target.value)}
+                  onBlur={() => void commitRename(c.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitRename(c.id)
+                    if (e.key === 'Escape') setRenaming(null)
+                  }}
+                />
+              ) : (
+                <button className="conv-open" onClick={() => void openConversation(c.id)}
+                        title={c.title || '（无标题）'}>
+                  {c.is_top ? <span className="pin">📌</span> : null}
+                  <span className="conv-title">{c.title || '（无标题）'}</span>
+                </button>
+              )}
+
+              {renaming !== c.id && (
+                <div className="conv-actions">
+                  <button className="icon-btn" title={c.is_top ? '取消置顶' : '置顶'}
+                          onClick={() => void toggleTop(c.id, Boolean(c.is_top))}>
+                    <MoreHorizontal size={14} />
+                  </button>
+                  <button className="icon-btn" title="重命名"
+                          onClick={() => { setRenaming(c.id); setRenameText(c.title || '') }}>
+                    ✎
+                  </button>
+                  <button className="icon-btn danger" title="删除"
+                          onClick={() => void removeConversation(c.id, c.title)}>
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
+            </div>
           ))}
-          {convs.length === 0 && <p className="muted small center">还没有会话</p>}
-          {convs.length < convTotal && <p className="muted small center">滚动加载更多…</p>}
+          {shown.length === 0 && (
+            <p className="muted small center">
+              {convSearch ? '没有匹配的会话' : '还没有会话'}
+            </p>
+          )}
+          {!convSearch && convs.length < convTotal && (
+            <p className="muted small center">滚动加载更多…</p>
+          )}
+        </div>
+
+        <div className="sidebar-foot">
+          <UserAvatar name={user?.username} size={26} />
+          <span className="who">{user?.username}</span>
+          <span className="muted small">{user?.role}</span>
+          <button className="icon-btn" onClick={toggleTheme}
+                  title={theme === 'dark' ? '切换到浅色' : '切换到深色'}>
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+          {user?.role === 'admin' && <Link className="link small" to="/admin">管理后台</Link>}
+          <button className="link small" onClick={() => void logout()}>退出</button>
         </div>
       </aside>
 
       <div className="chat-area">
         <header className="chat-header">
           <strong>校园 RAG 检索问答</strong>
-          <span className="muted">
-            {user?.username}（{user?.role}）
-          </span>
           {user?.role === 'admin' && (
             <label className="escalate-toggle"
                    title="越权检索受限文档，引用会标记「越权查看」">
@@ -302,52 +426,38 @@ export default function ChatPage() {
               提权检索
             </label>
           )}
-          {user?.role === 'admin' && (
-            // 管理端的「去问答」是单向的 —— 这里补上反向入口，
-            // 否则管理员进管理端之后就只能靠手敲地址回来
-            <Link className="link" to="/admin">管理后台</Link>
-          )}
-          <button
-            className="link"
-            onClick={() => {
-              // 新建对话只是清空本地 session_id —— 不调 POST /api/conversations，
-              // 否则会话列表里会堆积没有消息的空会话（§3.7.2）
-              setSessionId(null)
-              setTurns([])
-            }}
-          >
-            新建对话
-          </button>
-          <button className="link" onClick={() => void logout()}>
-            退出
-          </button>
+          <span className="muted small">
+            {sessionId ? '已保存的会话' : '新对话'}
+          </span>
         </header>
 
-        <main className="chat-main" ref={mainRef} onScroll={onStreamScroll}>
-          {turns.length === 0 && (
-            <p className="muted center">
-              试着问：「应届毕业班学生参军入伍有什么优待政策？」
-            </p>
-          )}
+        {/* ⚠️ 滚动容器与「限宽内容列」必须**分成两层**：
+            合在一起时 `max-width: 860px` 会把滚动条拉到 860px 的右边缘
+            （页面中间），而不是窗口最右侧。 */}
+        <main className="chat-scroll" ref={mainRef} onScroll={onStreamScroll}>
+          <div className="chat-col">
+            {turns.length === 0 && (
+              <div className="empty">
+                <div className="empty-logo"><AssistantAvatar size={44} /></div>
+                <h2>有什么可以帮你？</h2>
+                <p className="muted">试着问：「应届毕业班学生参军入伍有什么优待政策？」</p>
+              </div>
+            )}
 
-          {/* 虚拟滚动：只挂视口内 + overscan 的轮次（§4.2.4.3） */}
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
-            {virtualizer.getVirtualItems().map((item) => {
-              const turn = turns[item.index]
-              return (
-                <div
-                  key={turn.id}
-                  data-index={item.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute', top: 0, left: 0, width: '100%',
-                    transform: `translateY(${item.start}px)`,
-                  }}
-                >
-                  <div className="turn">
-                    <div className="bubble user">{turn.question}</div>
+            {turns.map((turn) => (
+              <div className="turn" key={turn.id}>
+                {/* 问句：头像在右 */}
+                <div className="msg user">
+                  <div className="bubble user">{turn.question}</div>
+                  <UserAvatar name={user?.username} size={30} />
+                </div>
 
-                    {turn.draft.resolvedQuery && turn.draft.resolvedQuery !== turn.question && (
+                {/* 答句：头像在左 */}
+                <div className="msg assistant">
+                  <AssistantAvatar size={30} />
+                  <div className="bubble assistant">
+                    {turn.draft.resolvedQuery
+                      && turn.draft.resolvedQuery !== turn.question && (
                       <div className="resolved">我理解你在问：{turn.draft.resolvedQuery}</div>
                     )}
 
@@ -355,92 +465,99 @@ export default function ChatPage() {
                       <div className="resolved">{turn.draft.clarifySkippedText}</div>
                     )}
 
-                    <div className="bubble assistant">
-                      {turn.draft.text && (
-                        // 偏移的参照系是**原始文本** —— 传进去的必须是未渲染的 draft.text
-                        //
-                        // ⚠️ 流式进行中走按块渲染（每个 token 只重渲染尾部那一块），
-                        //    收尾后再整段渲染一次 —— 因为置灰标注的偏移是相对**整段**
-                        //    原始答案的，按块渲染就得逐块平移偏移，而那种映射错一格
-                        //    只会「标歪」，肉眼极难发现（§4.2.1.2）。
-                        //    流式期间 verify 还没到，本来就没有偏移可错。
-                        turn.draft.done ? (
-                          <MarkdownAnswer
-                            text={turn.draft.text}
-                            citations={turn.draft.citations}
-                            verify={turn.draft.verify}
-                            onCitationClick={openCitation}
-                          />
-                        ) : (
-                          <StreamingAnswer
-                            text={turn.draft.text}
-                            citations={turn.draft.citations}
-                            verify={turn.draft.verify}
-                            onCitationClick={openCitation}
-                          />
-                        )
-                      )}
+                    {turn.draft.text && (
+                      // 偏移的参照系是**原始文本** —— 传进去的必须是未渲染的 draft.text
+                      //
+                      // ⚠️ 流式进行中走按块渲染（每个 token 只重渲染尾部那一块），
+                      //    收尾后再整段渲染一次 —— 因为置灰标注的偏移是相对**整段**
+                      //    原始答案的，按块渲染就得逐块平移偏移，而那种映射错一格
+                      //    只会「标歪」，肉眼极难发现（§4.2.1.2）。
+                      //    流式期间 verify 还没到，本来就没有偏移可错。
+                      turn.draft.done ? (
+                        <MarkdownAnswer
+                          text={turn.draft.text}
+                          citations={turn.draft.citations}
+                          verify={turn.draft.verify}
+                          onCitationClick={openCitation}
+                        />
+                      ) : (
+                        <StreamingAnswer
+                          text={turn.draft.text}
+                          citations={turn.draft.citations}
+                          verify={turn.draft.verify}
+                          onCitationClick={openCitation}
+                        />
+                      )
+                    )}
 
-                      {!turn.draft.text && !turn.draft.done && (
-                        <span className="muted">{turn.draft.stageHint || '正在检索…'}</span>
-                      )}
+                    {!turn.draft.text && !turn.draft.done && (
+                      <span className="thinking">
+                        <span className="dot" /><span className="dot" /><span className="dot" />
+                        {turn.draft.stageHint || '正在检索…'}
+                      </span>
+                    )}
 
-                      {turn.draft.refusedText && (
-                        <div className="refused">
-                          {turn.draft.refusedText}
-                          {turn.draft.refusedHint && (
-                            <div className="muted">{turn.draft.refusedHint}</div>
-                          )}
-                        </div>
-                      )}
+                    {turn.draft.refusedText && (
+                      <div className="refused">
+                        {turn.draft.refusedText}
+                        {turn.draft.refusedHint && (
+                          <div className="muted">{turn.draft.refusedHint}</div>
+                        )}
+                      </div>
+                    )}
 
-                      {turn.draft.clarifyFacets.length > 0 && (
-                        <div className="facets">
-                          {turn.draft.clarifyFacets.map((f) => (
-                            <button key={f} className="facet" onClick={() => send(f)}>
-                              {f}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                    {turn.draft.clarifyFacets.length > 0 && (
+                      <div className="facets">
+                        {turn.draft.clarifyFacets.map((f) => (
+                          <button key={f} className="facet" onClick={() => send(f)}>
+                            {f}
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
-                      {turn.draft.error && (
-                        <div className="error">
-                          {turn.draft.error.message}
-                          {turn.draft.error.code === 'session_busy' && '（本会话正在生成中）'}
-                        </div>
-                      )}
+                    {turn.draft.error && (
+                      <div className="error">
+                        {turn.draft.error.message}
+                        {turn.draft.error.code === 'session_busy' && '（本会话正在生成中）'}
+                      </div>
+                    )}
 
-                      <Citations citations={turn.draft.citations} onOpen={openCitation} />
+                    <Citations citations={turn.draft.citations} onOpen={openCitation} />
 
-                      {turn.draft.done && turn.draft.latencyMs != null && (
-                        <div className="muted small">{turn.draft.latencyMs} ms</div>
-                      )}
-                    </div>
+                    {turn.draft.done && turn.draft.latencyMs != null && (
+                      <div className="muted small">{turn.draft.latencyMs} ms</div>
+                    )}
                   </div>
                 </div>
-              )
-            })}
+              </div>
+            ))}
           </div>
         </main>
 
         <footer className="chat-input">
-          <input
-            value={input}
-            placeholder={busy ? '正在生成中…' : '输入你的问题，回车发送'}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                send(input)
-              }
-            }}
-            // ⚠️ 同一会话同时只允许一个请求：前端禁用发送按钮（§3.2.4）
-            disabled={busy}
-          />
-          <button onClick={() => send(input)} disabled={busy || !input.trim()}>
-            发送
-          </button>
+          <div className="chat-col">
+            <div className="input-row">
+              <textarea
+                rows={1}
+                value={input}
+                placeholder={busy ? '正在生成中…' : '输入你的问题，回车发送'}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    send(input)
+                  }
+                }}
+                // ⚠️ 同一会话同时只允许一个请求：前端禁用发送按钮（§3.2.4）
+                disabled={busy}
+              />
+              <button className="send" onClick={() => send(input)}
+                      disabled={busy || !input.trim()}>
+                发送
+              </button>
+            </div>
+          </div>
         </footer>
       </div>
 

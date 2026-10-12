@@ -35,8 +35,12 @@ export const createConversation = (title?: string) =>
     body: JSON.stringify(title ? { title } : {}),
   })
 
+/**
+ * ⚠️ `is_top` 是 **0/1 的整数**（见 `schema.d.ts` 的 `ConversationItem`），
+ *    不是布尔 —— 这里原先手写成 `boolean`，接前端置顶功能时才暴露出来。
+ */
 export const patchConversation = (sessionId: string,
-                                  body: { title?: string; is_top?: boolean }) =>
+                                  body: { title?: string; is_top?: 0 | 1 }) =>
   request<ConversationItem>(`/conversations/${sessionId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

@@ -1,7 +1,10 @@
 /* ⚠️ Tailwind v4（M4-D1）：只给**管理端**用。
    下面这套手写 CSS 是登录页/聊天页的既有样式，两者并存。
    ⚠️ preflight 是**全局重置**，会波及登录页/聊天页 ——
-      接入后必须用 bsk 在真实浏览器里回归这两页，确认没跑版。 */
+      接入后必须用 bsk 在真实浏览器里回归这两页，确认没跑版。
+
+   ⚠️ 聊天页的颜色**必须全部走变量**：深色模式（`.dark`）靠的就是换一组变量值。
+      规则里写死 `#fff` 之类的字面量，深色下就是一块白板。 */
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -15,131 +18,383 @@
   /* ⚠️ 这两个是**本应用**的变量，故意加 app- 前缀避开 shadcn 的同名 token：
      shadcn 的 --muted 是浅灰**背景色**，我们的 --muted 是灰色**文字色** ——
      同名会被 shadcn 的初始化覆盖成近白色，页面上灰字直接看不见。 */
-  --app-card: #fff; --app-muted: #6b7280; --brand: #2563eb; --danger: #b42318; --background: oklch(1 0 0); --foreground: oklch(0.145 0 0); --card-foreground: oklch(0.145 0 0); --popover: oklch(1 0 0); --popover-foreground: oklch(0.145 0 0); --primary: oklch(0.205 0 0); --primary-foreground: oklch(0.985 0 0); --secondary: oklch(0.97 0 0); --secondary-foreground: oklch(0.205 0 0); --muted-foreground: oklch(0.556 0 0); --accent: oklch(0.97 0 0); --accent-foreground: oklch(0.205 0 0); --destructive: oklch(0.577 0.245 27.325); --success: oklch(0.55 0.15 150); --success-foreground: oklch(0.985 0 0); --border: oklch(0.922 0 0); --input: oklch(0.922 0 0); --ring: oklch(0.708 0 0); --chart-1: oklch(0.87 0 0); --chart-2: oklch(0.556 0 0); --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0); --chart-5: oklch(0.269 0 0); --radius: 0.625rem; --sidebar: oklch(0.985 0 0); --sidebar-foreground: oklch(0.145 0 0); --sidebar-primary: oklch(0.205 0 0); --sidebar-primary-foreground: oklch(0.985 0 0); --sidebar-accent: oklch(0.97 0 0); --sidebar-accent-foreground: oklch(0.205 0 0); --sidebar-border: oklch(0.922 0 0); --sidebar-ring: oklch(0.708 0 0);
+  --app-card: #fff; --app-muted: #6b7280; --brand: #2563eb; --danger: #b42318;
+  --background: oklch(1 0 0); --foreground: oklch(0.145 0 0); --card-foreground: oklch(0.145 0 0); --popover: oklch(1 0 0); --popover-foreground: oklch(0.145 0 0); --primary: oklch(0.205 0 0); --primary-foreground: oklch(0.985 0 0); --secondary: oklch(0.97 0 0); --secondary-foreground: oklch(0.205 0 0); --muted-foreground: oklch(0.556 0 0); --accent: oklch(0.97 0 0); --accent-foreground: oklch(0.205 0 0); --destructive: oklch(0.577 0.245 27.325); --success: oklch(0.55 0.15 150); --success-foreground: oklch(0.985 0 0); --border: oklch(0.922 0 0); --input: oklch(0.922 0 0); --ring: oklch(0.708 0 0); --chart-1: oklch(0.87 0 0); --chart-2: oklch(0.556 0 0); --chart-3: oklch(0.439 0 0); --chart-4: oklch(0.371 0 0); --chart-5: oklch(0.269 0 0); --radius: 0.625rem; --sidebar: oklch(0.985 0 0); --sidebar-foreground: oklch(0.145 0 0); --sidebar-primary: oklch(0.205 0 0); --sidebar-primary-foreground: oklch(0.985 0 0); --sidebar-accent: oklch(0.97 0 0); --sidebar-accent-foreground: oklch(0.205 0 0); --sidebar-border: oklch(0.922 0 0); --sidebar-ring: oklch(0.708 0 0);
+
+  /* ---- 聊天页专用变量（浅色）---- */
+  --c-sidebar: #fbfbfc;      /* 侧栏底色，比内容区略深一档 */
+  --c-hover: #f1f3f7;        /* 行 hover */
+  --c-active: #e8efff;       /* 当前会话 */
+  --c-user-bubble: #eaf0ff;  /* 用户气泡 */
+  --c-code-bg: #f6f8fa;      /* 行内代码 / 代码块 */
+  --c-quote: #f9fafb;        /* 引用块、定位提示条 */
+  --c-warn-bg: #fffbeb;      /* 灰标、兜底提示 */
+  --c-warn-fg: #92400e;
+  --c-scroll-thumb: #cbd2dc;
+  --c-scroll-thumb-hover: #aab4c2;
 }
+
+/* ⚠️ 深色只换变量，不另写一套规则 —— 两套规则必然漂移。
+   ⚠️ 这几个 shadcn token 的深色值沿用管理端原样（改颜色会连带改管理端外观）。 */
+.dark {
+  --bg: #17181b; --fg: #e8eaed; --line: #2e3238;
+  --app-card: #202225; --app-muted: #9aa3af; --brand: #7aa2ff; --danger: #f97066;
+
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+
+  /* ---- 聊天页专用变量（深色）---- */
+  --c-sidebar: #1b1c1f;
+  --c-hover: #26282c;
+  --c-active: #2a3550;
+  --c-user-bubble: #26314d;
+  --c-code-bg: #1a1c1f;
+  --c-quote: #212326;
+  --c-warn-bg: #33291a;
+  --c-warn-fg: #f5c47c;
+  --c-scroll-thumb: #3a3f46;
+  --c-scroll-thumb-hover: #4d545d;
+}
+
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
-  font: 15px/1.65 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font: 15px/1.7 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 button { font: inherit; cursor: pointer; }
-input { font: inherit; }
+input, textarea { font: inherit; }
 .muted { color: var(--app-muted); }
 .small { font-size: 12px; }
 .center { text-align: center; }
 .error { color: var(--danger); font-size: 13px; }
+
+/* 通用链接按钮（聊天页与登录页共用；管理端只走 Tailwind，不碰这个类） */
+.link { background: none; border: 0; color: var(--brand); padding: 0; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+
+/* 图标按钮：抽屉关闭、侧栏行操作都用它 —— 40px 的点击区，图标本体小 */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; flex: none; padding: 0;
+  border: 0; border-radius: 6px; background: none; color: var(--app-muted);
+}
+.icon-btn:hover { background: var(--c-hover); color: var(--fg); }
+.icon-btn.danger:hover { color: var(--danger); }
+
+/* 滚动条：默认样式在深色下是一条刺眼的白槽 */
+* { scrollbar-width: thin; scrollbar-color: var(--c-scroll-thumb) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--c-scroll-thumb); border-radius: 8px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--c-scroll-thumb-hover); background-clip: content-box; }
 
 .center-page { min-height: 100vh; display: grid; place-items: center; }
 .card { background: var(--app-card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
 .login-card { width: 360px; display: flex; flex-direction: column; gap: 14px; }
 .login-card h1 { font-size: 18px; margin: 0; }
 .login-card label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
-.login-card input { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; }
+.login-card input { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+                    background: var(--bg); color: var(--fg); }
 .login-card button { padding: 10px; border: 0; border-radius: 8px; background: var(--brand); color: #fff; }
 .login-card button:disabled { opacity: .5; cursor: not-allowed; }
+.login-alt a { color: var(--brand); text-decoration: none; }
+.login-alt a:hover { text-decoration: underline; }
 
-.chat-layout { display: flex; flex-direction: column; height: 100vh; }
-.chat-header {
-  display: flex; align-items: center; gap: 14px;
-  padding: 12px 18px; background: var(--app-card); border-bottom: 1px solid var(--line);
+/* ==========================================================================
+   会话页（§4.2.4.3）—— 布局：sidebar | chat-area | drawer 三个兄弟节点
+   ⚠️ 抽屉也参与 flex 排布（推拉式），不是浮层。
+   ========================================================================== */
+
+.app { display: flex; height: 100vh; overflow: hidden; }
+
+/* ---- 侧栏：新建 + 搜索 + 列表 + 底部用户条 ---- */
+.sidebar {
+  width: 264px; flex: none; display: flex; flex-direction: column;
+  background: var(--c-sidebar); border-right: 1px solid var(--line);
+  min-height: 0;
 }
-.chat-header .link { margin-left: auto; background: none; border: 0; color: var(--brand); }
-.chat-header .link + .link { margin-left: 0; }
-.chat-main { flex: 1; overflow-y: auto; padding: 20px; max-width: 860px; width: 100%; margin: 0 auto; }
-.turn { margin-bottom: 22px; }
-.bubble { padding: 11px 15px; border-radius: 12px; margin-bottom: 8px; }
-.bubble.user { background: #e8efff; margin-left: auto; max-width: 76%; width: fit-content; }
-.bubble.assistant { background: var(--app-card); border: 1px solid var(--line); }
+.sidebar-head { padding: 14px 12px 10px; display: flex; flex-direction: column; gap: 10px; }
+.brand { font-size: 15px; font-weight: 650; letter-spacing: .2px; padding-left: 4px; }
+.btn-new {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--app-card); color: var(--fg); font-size: 13.5px;
+}
+.btn-new:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+.btn-new:disabled { opacity: .5; cursor: not-allowed; }
+
+.conv-search {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 12px 8px; padding: 6px 9px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--app-card); color: var(--app-muted);
+}
+.conv-search input {
+  flex: 1; min-width: 0; border: 0; outline: none; background: none;
+  color: var(--fg); font-size: 13px;
+}
+
+.conv-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; min-height: 0; }
+.conv-item {
+  display: flex; align-items: center; gap: 2px;
+  border-radius: 8px; margin-bottom: 2px;
+}
+.conv-item:hover { background: var(--c-hover); }
+.conv-item.active { background: var(--c-active); }
+.conv-open {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px;
+  text-align: left; border: 0; background: none; color: var(--fg);
+  padding: 9px 10px; border-radius: 8px; font-size: 13.5px;
+}
+.conv-item.active .conv-open { color: var(--brand); font-weight: 550; }
+.conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin { font-size: 11px; flex: none; }
+/* 行操作默认不占位，hover / 键盘聚焦时才浮出来 */
+.conv-actions { display: none; align-items: center; gap: 1px; padding-right: 5px; }
+.conv-item:hover .conv-actions,
+.conv-item:focus-within .conv-actions { display: flex; }
+.conv-rename {
+  flex: 1; min-width: 0; margin: 3px; padding: 6px 8px;
+  border: 1px solid var(--brand); border-radius: 7px;
+  background: var(--app-card); color: var(--fg); font-size: 13.5px;
+}
+
+.sidebar-foot {
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12px;
+}
+.sidebar-foot .who {
+  font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sidebar-foot .icon-btn { margin-left: auto; }
+
+/* ---- 对话区 ---- */
+.chat-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-header {
+  display: flex; align-items: center; gap: 12px; flex: none;
+  padding: 11px 18px; background: var(--app-card); border-bottom: 1px solid var(--line);
+}
+.escalate-toggle {
+  display: flex; align-items: center; gap: 5px; font-size: 13px;
+  color: var(--app-muted); margin-left: 4px;
+}
+
+/* ⚠️ 滚动容器与「限宽内容列」必须**分成两层**：
+   合在一起时 `max-width: 860px` 会把滚动条拉到 860px 的右边缘（页面中间），
+   而不是窗口最右侧 —— 这正是改造前的毛病。 */
+.chat-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+.chat-col { max-width: 860px; width: 100%; margin: 0 auto; padding: 22px 24px; }
+
+.empty { text-align: center; padding: 14vh 0 0; }
+.empty-logo { display: flex; justify-content: center; margin-bottom: 14px; }
+.empty h2 { font-size: 21px; margin: 0 0 8px; font-weight: 600; }
+
+.turn { margin-bottom: 26px; }
+.msg { display: flex; gap: 10px; align-items: flex-start; }
+.msg.user { justify-content: flex-end; margin-bottom: 12px; }
+.msg.assistant { margin-bottom: 4px; }
+.msg .bubble { min-width: 0; }
+
+.avatar {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; user-select: none;
+}
+.avatar-user { background: var(--brand); color: #fff; font-weight: 600; line-height: 1; }
+.avatar-assistant {
+  background: var(--c-active); color: var(--brand);
+  border: 1px solid var(--line);
+}
+
+.bubble { padding: 11px 15px; border-radius: 12px; }
+.bubble.user { background: var(--c-user-bubble); max-width: 76%; width: fit-content; }
+.bubble.assistant { flex: 1; }
+
 /* 答案走 Markdown 渲染 —— 不能再 pre-wrap（换行由块级元素表达，pre-wrap 会翻倍） */
 .answer { word-break: break-word; }
 .answer > :first-child { margin-top: 0; }
 .answer > :last-child { margin-bottom: 0; }
-.answer p { margin: .5em 0; }
-.answer ul, .answer ol { padding-left: 1.4em; }
+
+/* ---- Markdown 排版（§4.2.1）----------------------------------------------
+   ⚠️ 以前这里只写了 p / ul / ol —— 表格、代码块、标题、引用块全落到浏览器默认样式，
+      检索类答案里的表格和代码就是那个「没按 Markdown 输出」的样子。 */
+.answer p { margin: .55em 0; }
+.answer h1, .answer h2, .answer h3, .answer h4 {
+  margin: 1.1em 0 .5em; line-height: 1.35; font-weight: 650;
+}
+.answer h1 { font-size: 1.4em; }
+.answer h2 { font-size: 1.22em; }
+.answer h3 { font-size: 1.08em; }
+.answer h4 { font-size: 1em; }
+/* ⚠️ `list-style` 必须显式写回：Tailwind v4 的 preflight 是**全局重置**，
+   把 `ul/ol` 的 `list-style-type` 置成了 `none`（数字/圆点全没了）。
+   只写 padding 是不够的 —— 实测列表渲染出来一行行排着、前面什么都没有。 */
+.answer ul, .answer ol { padding-left: 1.5em; margin: .55em 0; }
+.answer ul { list-style: disc; }
+.answer ol { list-style: decimal; }
+.answer li { margin: .22em 0; display: list-item; }
+.answer li::marker { color: var(--app-muted); }
+.answer li > ul, .answer li > ol { margin: .22em 0; }
+.answer a { color: var(--brand); }
+
+/* 引用块：检索答案里的原文摘录 */
+.answer blockquote {
+  margin: .7em 0; padding: .5em .9em;
+  border-left: 3px solid var(--line); background: var(--c-quote);
+  border-radius: 0 6px 6px 0; color: var(--app-muted);
+}
+.answer blockquote > :first-child { margin-top: 0; }
+.answer blockquote > :last-child { margin-bottom: 0; }
+
+.answer code {
+  background: var(--c-code-bg); border: 1px solid var(--line);
+  border-radius: 5px; padding: .1em .35em;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: .89em;
+}
+.answer pre {
+  margin: .7em 0; padding: 11px 13px; overflow-x: auto;
+  background: var(--c-code-bg); border: 1px solid var(--line); border-radius: 9px;
+}
+.answer pre code { background: none; border: 0; padding: 0; font-size: .87em; line-height: 1.6; }
+
+/* 表格：校园规章里的条款表是主要答案形态之一，必须能读 */
+.answer table {
+  border-collapse: collapse; margin: .75em 0; display: block;
+  max-width: 100%; overflow-x: auto; font-size: .94em;
+}
+.answer thead { background: var(--c-quote); }
+.answer th, .answer td {
+  border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top;
+}
+.answer th { font-weight: 650; white-space: nowrap; }
+.answer hr { border: 0; border-top: 1px solid var(--line); margin: 1.1em 0; }
+.answer img { max-width: 100%; border-radius: 6px; }
 
 /* 行内引用角标（§4.2.3 第一层入口） */
 .cite-badge {
-  border: 0; background: #eef2ff; color: var(--brand);
+  border: 0; background: var(--c-active); color: var(--brand);
   border-radius: 5px; padding: 0 5px; margin: 0 1px;
   font-size: 12px; line-height: 1.5; vertical-align: 1px;
 }
-.cite-badge:hover { background: #dbe4ff; }
+.cite-badge:hover { filter: brightness(.94); }
 .cite-badge.invalid { background: #fee4e2; color: var(--danger); text-decoration: line-through; }
 
 /* 置灰标注（§4.2.1）—— 提示，不是断言 */
 .uncited {
-  background: #f3f4f6; color: #6b7280;
-  border-bottom: 1px dashed #d1d5db;
+  background: var(--c-code-bg); color: var(--app-muted);
+  border-bottom: 1px dashed var(--line);
 }
 .uncited-summary {
-  margin-top: 8px; font-size: 13px; color: #92400e;
-  background: #fffbeb; padding: 7px 11px; border-radius: 6px;
+  margin-top: 8px; font-size: 13px; color: var(--c-warn-fg);
+  background: var(--c-warn-bg); padding: 7px 11px; border-radius: 6px;
 }
 .uncited-list { margin: 6px 0 0; padding-left: 1.2em; }
+
+/* 检索中：三点跳动，比一行静态文字更像「在做事」 */
+.thinking { display: inline-flex; align-items: center; gap: 7px; color: var(--app-muted); font-size: 14px; }
+.thinking .dot {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--app-muted);
+  animation: blink 1.2s infinite ease-in-out;
+}
+.thinking .dot:nth-child(2) { animation-delay: .18s; }
+.thinking .dot:nth-child(3) { animation-delay: .36s; }
+@keyframes blink { 0%, 80%, 100% { opacity: .25 } 40% { opacity: 1 } }
+
+.resolved { font-size: 13px; color: var(--app-muted); margin: 0 0 8px; }
+.refused { background: var(--c-warn-bg); border-left: 3px solid #f59e0b; padding: 9px 12px; border-radius: 6px; }
+.facets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.facet {
+  border: 1px solid var(--brand); color: var(--brand); background: var(--app-card);
+  border-radius: 999px; padding: 5px 13px; font-size: 13px;
+}
+.facet:hover { background: var(--c-active); }
+.citations { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.citation-group { margin-top: 6px; }
+.escalated { color: var(--danger); font-size: 12px; margin-left: 6px; }
 
 /* 引用缩略图（§4.2.3.3）：按 name 现取签名 URL */
 .thumbs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .thumbs img { width: 92px; border: 1px solid var(--line); border-radius: 6px; }
 
-/* 原文抽屉（§4.2.2.1）—— 抽屉展开后对话区仍可见可滚动 */
+/* ---- 输入区：与消息列同宽居中 ---- */
+.chat-input { flex: none; border-top: 1px solid var(--line); background: var(--app-card); }
+.chat-input .chat-col { padding: 12px 24px 16px; }
+.input-row { display: flex; gap: 10px; align-items: flex-end; }
+.input-row textarea {
+  flex: 1; resize: none; padding: 11px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); color: var(--fg);
+  line-height: 1.6; max-height: 180px; outline: none;
+}
+.input-row textarea:focus { border-color: var(--brand); }
+.input-row textarea:disabled { opacity: .6; }
+.input-row .send {
+  flex: none; padding: 11px 22px; border: 0; border-radius: 10px;
+  background: var(--brand); color: #fff; font-weight: 550;
+}
+.input-row .send:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ---- 原文抽屉（§4.2.2.1）----
+   ⚠️ 推拉式：抽屉是 flex 兄弟节点，展开会把对话区**挤窄**，而不是盖在上面。
+      用 `position: fixed` 覆盖会让用户看不见自己引用的上下文。 */
 .drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 62vw);
+  flex: none; width: min(46vw, 720px); display: flex; flex-direction: column;
   background: var(--app-card); border-left: 1px solid var(--line);
-  display: flex; flex-direction: column; z-index: 20;
-  box-shadow: -6px 0 24px rgba(0, 0, 0, .08);
+  min-width: 0; animation: drawer-in .22s cubic-bezier(.32, .72, 0, 1);
+}
+@keyframes drawer-in {
+  from { transform: translateX(28px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 .drawer-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
   padding: 12px 16px; border-bottom: 1px solid var(--line);
 }
-.drawer-actions { display: flex; gap: 10px; flex: none; }
-.drawer-actions .link, .citation-group .link {
-  background: none; border: 0; color: var(--brand); padding: 0;
-}
+.drawer-title { min-width: 0; }
+.drawer-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.pdf-viewport { height: 100%; }
 .drawer-body { flex: 1; min-height: 0; position: relative; }
 .drawer-error { padding: 10px 16px; color: var(--danger); font-size: 13px; }
 .locate-note {
   padding: 6px 16px; font-size: 12px; color: var(--app-muted);
-  background: #f9fafb; border-bottom: 1px solid var(--line);
+  background: var(--c-quote); border-bottom: 1px solid var(--line);
 }
-.locate-note.level-L4 { color: #92400e; background: #fffbeb; }
-.resolved { font-size: 13px; color: var(--app-muted); margin: 4px 0 8px; }
-.refused { background: #fff7ed; border-left: 3px solid #f59e0b; padding: 9px 12px; border-radius: 6px; }
-.facets { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.facet { border: 1px solid var(--brand); color: var(--brand); background: #fff; border-radius: 999px; padding: 5px 13px; font-size: 13px; }
-.citations { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
-.citation-group { margin-top: 6px; }
-.escalated { color: var(--danger); font-size: 12px; margin-left: 6px; }
-.verify { margin-top: 8px; font-size: 13px; color: #92400e; background: #fffbeb; padding: 7px 11px; border-radius: 6px; }
-.chat-input { display: flex; gap: 10px; padding: 14px 18px; background: var(--app-card); border-top: 1px solid var(--line); }
-.chat-input input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; }
-.chat-input button { padding: 0 22px; border: 0; border-radius: 10px; background: var(--brand); color: #fff; }
-.chat-input button:disabled { opacity: .5; cursor: not-allowed; }
+.locate-note.level-L4 { color: var(--c-warn-fg); background: var(--c-warn-bg); }
 
-/* ---- M4：会话侧栏 + 提权开关（§4.2.4.3）---- */
-.chat-layout { flex-direction: row; align-items: stretch; }
-.conv-sidebar {
-  width: 232px; flex: none; display: flex; flex-direction: column;
-  background: var(--app-card); border-right: 1px solid var(--line);
-}
-.conv-head {
-  display: flex; align-items: baseline; gap: 8px;
-  padding: 12px 14px; border-bottom: 1px solid var(--line);
-}
-.conv-list { flex: 1; overflow-y: auto; padding: 6px; }
-.conv-item {
-  display: block; width: 100%; text-align: left; border: 0; background: none;
-  color: var(--fg); border-radius: 8px; padding: 8px 10px; font-size: 13px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.conv-item:hover { background: #f1f3f7; }
-.conv-item.active { background: #e8efff; color: var(--brand); }
-.chat-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.escalate-toggle {
-  display: flex; align-items: center; gap: 5px; font-size: 13px;
-  color: var(--muted); margin-left: 8px;
-}.login-alt a { color: var(--brand); text-decoration: none; }
-.login-alt a:hover { text-decoration: underline; }
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: 'Geist Variable', sans-serif;
@@ -183,40 +438,6 @@ input { font: inherit; }
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
 }
 
 @layer base {
