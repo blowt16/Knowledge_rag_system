@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from app.core import llm
+from app.core.prompts import load_prompt
 from app.graph.nodes import route as RT
 from app.graph.state import Message, new_state
 
@@ -226,3 +227,76 @@ async def test_rule_hit_has_no_degradation(no_llm):
     """反向锁：规则层命中是**正常路径**，不能标成降级（否则护栏永远在拦）。"""
     out = await RT.route_node(new_state(query="缓考", resolved_query="缓考"))
     assert out["trace"][0]["degraded"] is None
+
+
+# ============================================================
+# 实测缺口（2026-10-12）：问「系统自身」被误判 —— 两层各一处，都要堵
+# ============================================================
+
+def test_no_clarify_when_asking_about_the_system_itself():
+    """「你可以干什么」这类**问系统自身**的消息不得触发澄清。
+
+    ⚠️ 实测现场（qa_logs 08:34:23，route_source=rule）：6 个字、不含制度名词
+       → 正好踩中澄清触发条件二，被判「意图模糊」。**可它一点都不模糊。**
+
+    ⚠️ 更要命的是位置：`route_node` 的顺序是**闸门 → 澄清 → 规则层 → LLM**，
+       澄清判真就**直接 return**，LLM 连复核的机会都没有（`route.py` 顶部注释
+       把「规则层没有 LLM 复核机会」称为全文档最危险的一条 —— 那次删掉的是
+       「短句 → 闲聊」，**同一个毛病在澄清这条判据上一直还在**）。
+       用户问「你能干什么」，系统回「你想问的是哪一项？」，是纯噪声。
+    """
+    for q in ["你可以干什么", "你能做什么", "你会什么", "你是谁", "怎么用"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is False, f"{q} 不该触发澄清"
+
+    # 反向锁：与系统无关的短问句**仍然**要澄清 —— 边界不能放宽，
+    # 放宽了就会把「怎么办」这类真·模糊问句放进检索，答非所问。
+    for q in ["怎么办", "还有吗", "那个呢"]:
+        s = new_state(query=q, resolved_query=q, history=HISTORY)
+        assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"
+
+
+async def test_capability_question_reaches_llm_and_is_chat(monkeypatch):
+    """★ 能力问询必须**走到 LLM**（由它定 chat），而不是在规则层被拦成 clarify。
+
+    ⚠️ 这条是上面那条的端到端版本，也是本次 bug 的主回归锁：修复前
+       `_should_clarify` 为真 → 直接 return clarify 且 `route_source=rule`，
+       LLM 根本不被调用。
+    """
+    async def fake(messages, **kw):
+        return {"route": "chat"}
+
+    monkeypatch.setattr(llm, "complete_json", fake)
+
+    out = await RT.route_node(
+        new_state(query="你可以干什么", resolved_query="你可以干什么"))
+    assert out["route"] == "chat"
+    assert out["route_source"] == "llm", "能力问询该由 LLM 判定，不是规则层直接定"
+
+
+def test_route_prompt_chat_definition_covers_capability_inquiry():
+    """`route` 提示词里 chat 的定义必须覆盖「问系统自身能力/用法」。
+
+    ⚠️ 设计文档里这一类叫「闲聊/**能力问询**」（`intent-recognition-plan.md:422`，
+       v2 明写 NO_RAG 含「询问系统能力」），而实现只写了「闲聊」——
+       于是 LLM 面对「你的功能范围」时：不是寒暄 → 不是 chat；字面沾
+       「校园规章制度」→ 落到 knowledge（qa_logs 08:34:43，route_source=llm）。
+    """
+    text = load_prompt("route").template
+    # 取**整条要点**（从 `- chat` 到下一条 `- xxx` 之前）—— 定义会换行，
+    # 只取第一行会把换行后的「有哪些功能」漏掉（写窄了这条测试就成了摆设）。
+    bullet = next((b for b in text.split("\n- ") if b.startswith("chat")), "")
+    assert bullet, "route 提示词里找不到 chat 的定义"
+    assert ("能力" in bullet) or ("功能" in bullet), (
+        f"chat 的定义没覆盖能力问询 —— LLM 只能把「你的功能范围」判成 knowledge：{bullet!r}")
+
+
+def test_chat_prompt_introduces_features_and_guides_asking():
+    """`chat` 提示词要**介绍功能**并**引导用户怎么提问**（负责人 2026-10-12 定的口径）。
+
+    只把 chat 当寒暄回应的话，用户问「你能干什么」得不到任何指路，
+    等于问了白问 —— 而这条路径的全部价值就是引导。
+    """
+    text = load_prompt("chat").template
+    assert ("功能" in text) or ("能力" in text), "chat 提示词没写「介绍功能/能力」"
+    assert "提问" in text, "chat 提示词没写「引导用户怎么提问」"

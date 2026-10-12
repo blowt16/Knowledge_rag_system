@@ -48,6 +48,10 @@ def _question_words() -> list[str]:
     return cfg("rules.question_words", []) or []
 
 
+def _system_meta_words() -> list[str]:
+    return cfg("rules.system_meta_words", []) or []
+
+
 def rule_classify(query: str) -> str | None:
     """规则层。只吃**明确的**意图，零成本跳过 LLM 调用。
 
@@ -93,6 +97,17 @@ def _should_clarify(state: RAGState) -> bool:
         return False
     # 「无法定位主题」：规则层未命中任何制度名词 / 文号 / 实体（与规则层共用词表）
     if any(n in resolved for n in _policy_nouns()):
+        return False
+    # 「问系统自身」也**算能定位主题** —— 主题就是系统本身，一点都不模糊。
+    #
+    # ⚠️ 实测缺口（2026-10-12，qa_logs 08:34:23）：「你可以干什么」6 个字、
+    #    不含制度名词，正好踩中上面那条判据被判「意图模糊」。可它清清楚楚。
+    #    而澄清判真就**直接 return**，LLM 连复核的机会都没有。
+    #
+    # ⚠️ 这里刻意**只解除误判，不直接判 chat**：规则层判 chat 同样没有 LLM 复核，
+    #    而 chat 分支不检索不引用 —— 信号误命中（比如把某条带「怎么用」的制度
+    #    问题判成闲聊）就是直接答非所问。放行给 LLM，它还能纠回来。
+    if any(w in resolved for w in _system_meta_words()):
         return False
     pattern = cfg("rules.doc_number_pattern", "")
     if pattern and re.search(pattern, resolved):

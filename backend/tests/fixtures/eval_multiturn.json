@@ -147,6 +147,15 @@
       "turns": [
         {"question": "违规使用手机有什么后果？", "expected_route": "knowledge", "should_clarify": 0, "expected_document": "05_考试管理规定_桂电教2020-15号", "resolved_must_contain_any": null, "note": "「违规」「手机」都不在制度名词表 → 规则层判 None。实测探针：检索 top1/top2 都是 05（「违规」在该文档出现 14 次）"}
       ]
+    },
+    {
+      "id": "mt-16",
+      "type": "route_negative",
+      "note": "能力问询（问系统自身）：**不得澄清、不得落进检索** —— 两个轮次各锁一层缺陷（2026-10-12 实测缺口）",
+      "turns": [
+        {"question": "你可以干什么", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（qa_logs 2026-10-12 08:34:23，route_source=rule）：6 字且不含制度名词 → 踩中澄清触发条件二，LLM 连复核机会都没有。锁的是**规则层**：澄清判据要认得「问系统自身」也算能定位主题"},
+        {"question": "如何向你提问才能得到有效回答", "expected_route": "chat", "should_clarify": 0, "expected_document": null, "resolved_must_contain_any": null, "note": "实测现场（08:36:02，route_source=llm）：够长不触发澄清，规则层判 None → 交给 LLM，而 LLM 把它判成了 knowledge。锁的是**提示词**：route 的 chat 定义必须覆盖能力问询（设计文档原名「闲聊/能力问询」，v2 明写 NO_RAG 含「询问系统能力」）"}
+      ]
     }
   ]
 }
