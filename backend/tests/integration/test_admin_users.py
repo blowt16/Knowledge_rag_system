@@ -10,6 +10,10 @@
    `users` 表没有可用性字段。本任务加 `is_active`（002 迁移），
    并且**在校验口令之后**才判停用：口令错的人拿到的仍是同一条
    「用户名或口令不正确」，不泄露账号是否存在。
+
+⚠️ **删除用户**（§4.3 用户管理）是这里**唯一不自增 `token_version` 的写操作**：
+   行都没了，自增无处可增，令牌靠 `deps.current_user` 查库查不到来作废。
+   别照抄上面那条「三处写操作都要自增」的规矩往上套。
 """
 
 from __future__ import annotations
@@ -55,6 +59,72 @@ def _h(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _seed_conversation(user_id: str, *, messages: int = 2) -> str:
+    """给用户造一个会话 + 若干消息，返回会话 id。
+
+    删除用户绕不开这一层：`conversations.user_id` 是 **NOT NULL 外键**，
+    没有历史的空壳账号怎么删都成，有历史才是真难点。
+    """
+    conv_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            "INSERT INTO conversations (id, user_id, title) VALUES ($1, $2, '测试会话')",
+            conv_id, user_id)
+        for i in range(messages):
+            await conn.execute(
+                """INSERT INTO messages (id, conversation_id, role, content)
+                   VALUES ($1, $2, $3, $4)""",
+                uuid.uuid4().hex, conv_id,
+                "user" if i % 2 == 0 else "assistant", f"第 {i + 1} 条")
+    return conv_id
+
+
+async def _seed_document(uploader_id: str) -> str:
+    """直接插一行 `documents`，**不走 `ingest()`**。
+
+    删用户要验的是外键归属，不是入库流程。走真入库会往真实 Chroma /
+    BM25 里写字，而测试清理那套的坑见 `tests/support.py` 顶部。
+
+    ⚠️ 状态用 `disabled` 而**不是** `active`：`active` 意味着正文已落盘
+       （`normalized_text_path` 非空），而这里只插一行、那个字段是 NULL。
+       插成 active 会凭空多出一个「没有正文的生效文档」——
+       `test_eval_cases` / `test_eval_fixture` / `test_eval_generate` /
+       `test_admin_stats` 都会去扫 `status='active'`，一旦本文件清理失败
+       （RED 阶段就会：事务回滚会把整批清理一起撤掉），孤儿行会让**那几个
+       毫不相干的用例**报出 `Path(None)` 这种看不懂的错。实测踩过一次。
+    """
+    doc_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO documents
+               (id, doc_group_id, title, filename, file_type, md5, version,
+                effective_date, status, visibility, uploader_id)
+               VALUES ($1, $1, $2, 'x.txt', 'txt', $3, 1, CURRENT_DATE,
+                       'disabled', 'public', $4)""",
+            doc_id, f"{doc_id}.txt", uuid.uuid4().hex, uploader_id)
+    return doc_id
+
+
+async def _seed_eval_set(created_by: str) -> str:
+    set_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            "INSERT INTO eval_sets (id, name, created_by) VALUES ($1, $2, $3)",
+            set_id, f"t_{set_id[:8]}", created_by)
+    return set_id
+
+
+async def _seed_qa_log(user_id: str) -> str:
+    """qa_logs 无外键、按设计**只增不删**（管理端拒答分析的数据源）。"""
+    log_id = uuid.uuid4().hex
+    async with db.tx() as conn:
+        await conn.execute(
+            "INSERT INTO qa_logs (id, user_id, user_role, question) "
+            "VALUES ($1, $2, 'student', '测试提问')",
+            log_id, user_id)
+    return log_id
+
+
 @pytest_asyncio.fixture
 async def admin(client):
     u = await _insert_user("admin")
@@ -73,6 +143,32 @@ async def victim(client):
     yield u
     async with db.tx() as conn:
         await conn.execute("DELETE FROM users WHERE id = $1", u["id"])
+
+
+@pytest_asyncio.fixture
+async def target(victim):
+    """一个「有历史」的被删对象：会话+消息、传过的文档、建的评测集、qa_logs。
+
+    删除接口要清的（会话、消息、users 行）由它自己清；这里只清
+    **删接口特意保留**的那几行。victim 的 teardown 兜最后的 users 行 ——
+    它依赖本夹具，收尾顺序保证在本夹具之后跑。
+    """
+    victim["conversation_id"] = await _seed_conversation(victim["id"])
+    victim["document_id"] = await _seed_document(victim["id"])
+    victim["eval_set_id"] = await _seed_eval_set(victim["id"])
+    victim["qa_log_id"] = await _seed_qa_log(victim["id"])
+    yield victim
+    async with db.tx() as conn:
+        # ⚠️ messages 必须先于 conversations：外键 NOT NULL，顺序反了这整段事务
+        #    会回滚，前面几条删除跟着一起白删，然后 victim 的 teardown 撞
+        #    documents 外键报错 —— 报错点离真正的错因很远，实测踩过。
+        await conn.execute(
+            """DELETE FROM messages WHERE conversation_id IN
+                   (SELECT id FROM conversations WHERE user_id = $1)""", victim["id"])
+        await conn.execute("DELETE FROM conversations WHERE user_id = $1", victim["id"])
+        await conn.execute("DELETE FROM documents WHERE id = $1", victim["document_id"])
+        await conn.execute("DELETE FROM eval_sets WHERE id = $1", victim["eval_set_id"])
+        await conn.execute("DELETE FROM qa_logs WHERE id = $1", victim["qa_log_id"])
 
 
 # ============================================================
@@ -284,3 +380,128 @@ def pyjwt_decode_tv(token: str) -> str:
     payload = token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
     return str(_json.loads(base64.urlsafe_b64decode(payload))["tv"])
+
+
+# ============================================================
+# 删除用户（§4.3 用户管理）
+# ============================================================
+
+async def test_delete_user_is_admin_only(client, admin, victim):
+    """普通用户不能删号 —— 尤其是**不能删管理员**。"""
+    r = await client.delete(f"/api/admin/users/{admin['id']}",
+                            headers=_h(victim["token"]))
+    assert r.status_code == 403, r.text
+    async with db.tx() as conn:
+        alive = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", admin["id"])
+    assert alive, "返回 403 了，管理员却还是被删了"
+
+
+async def test_delete_unknown_user_is_404(client, admin):
+    r = await client.delete(f"/api/admin/users/{uuid.uuid4().hex}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 404, r.text
+    assert r.json()["code"] == "not_found"
+
+
+async def test_delete_self_is_rejected(client, admin):
+    """★ 不能删自己。
+
+    不只是手滑保护：拦掉这条之后，**管理员永远不可能被删光**。
+    能发出这个请求的人，一定是当下活着、且持有有效令牌的管理员
+    （令牌有效 ⇒ 登录时账号是启用的）；他删得掉别人，删不掉自己，
+    所以他必然还在。因此**不需要**再写一条「不许删最后一个管理员」的特判。
+    """
+    r = await client.delete(f"/api/admin/users/{admin['id']}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 400, r.text
+    async with db.tx() as conn:
+        alive = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", admin["id"])
+    assert alive, "拦是拦了，人还是没了"
+
+
+async def test_delete_user_removes_account_and_history(client, admin, target):
+    """★ 删号连带清掉他的会话与消息。
+
+    `conversations.user_id` 是 NOT NULL 外键 —— 不清就删不动，
+    这正是「有历史就不许删」那个备选方案的由来（本方案选了连清）。
+    """
+    conv_id = target["conversation_id"]
+
+    r = await client.delete(f"/api/admin/users/{target['id']}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 200, r.text
+
+    async with db.tx() as conn:
+        user = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", target["id"])
+        conv = await conn.fetchval("SELECT 1 FROM conversations WHERE id = $1", conv_id)
+        left = await conn.fetchval(
+            "SELECT count(*) FROM messages WHERE conversation_id = $1", conv_id)
+
+    assert user is None, "用户行还在"
+    assert conv is None, "会话没删掉"
+    assert left == 0, "会话删了，消息还留着（成了孤儿行）"
+    assert (await _login(client, target["username"])).status_code == 401, "删了还能登录"
+
+
+async def test_delete_user_keeps_documents_eval_sets_and_logs(client, admin, target):
+    """★ 删的是人，不是他的产出：文档、评测集、qa_logs 都留下。
+
+    一个学生毕业，全校语料不能跟着少几份 —— 共享知识必须留下，
+    归属列置空即可（文档管理页的「上传人」会显示为空）。
+    这里**必须同时断言「行还在」**：只断言 `uploader_id is None` 的话，
+    「整个文档被连带删了」也会让那条断言通过。
+    """
+    r = await client.delete(f"/api/admin/users/{target['id']}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 200, r.text
+
+    async with db.tx() as conn:
+        doc = await conn.fetchrow("SELECT uploader_id FROM documents WHERE id = $1",
+                                  target["document_id"])
+        ev = await conn.fetchrow("SELECT created_by FROM eval_sets WHERE id = $1",
+                                 target["eval_set_id"])
+        log_user = await conn.fetchval("SELECT user_id FROM qa_logs WHERE id = $1",
+                                       target["qa_log_id"])
+
+    assert doc is not None, "文档被连带删了 —— 全校语料不能随人走"
+    assert doc["uploader_id"] is None, "文档还在，上传人归属没置空"
+    assert ev is not None, "评测集被连带删了"
+    assert ev["created_by"] is None, "评测集还在，创建人归属没置空"
+    assert log_user == target["id"], "qa_logs 是审计日志，不该被删也不该被改"
+
+
+async def test_delete_user_invalidates_their_token(client, admin, target):
+    """删完人，他手上的令牌立刻作废。
+
+    ⚠️ 这条路走的是「查库查不到用户」兜底（`deps.current_user`），
+       **不是** token_version 比对 —— 删除是本文件里唯一**不**自增 tv
+       的写操作：行都要没了，自增无处可增。两条路各堵各的。
+    """
+    assert (await client.get("/api/auth/me",
+                             headers=_h(target["token"]))).status_code == 200
+
+    r = await client.delete(f"/api/admin/users/{target['id']}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 200, r.text
+
+    after = await client.get("/api/auth/me", headers=_h(target["token"]))
+    assert after.status_code == 401, "人删了，旧令牌还能用"
+
+
+async def test_deleted_username_can_be_reused(client, admin, target):
+    """真删与软删的分水岭：用户名立刻能被重新注册。
+
+    软删（行留着、只加 `deleted_at`）会被 `users.username` 的 UNIQUE
+    一直挡着，想复用还得再去动约束 —— 那是另一个方案，本方案选择了真删。
+    """
+    r = await client.delete(f"/api/admin/users/{target['id']}",
+                            headers=_h(admin["token"]))
+    assert r.status_code == 200, r.text
+
+    again = await client.post("/api/admin/users",
+                              json={"username": target["username"],
+                                    "password": PASSWORD, "role": "student"},
+                              headers=_h(admin["token"]))
+    assert again.status_code == 200, f"用户名没被释放：{again.text}"
+    async with db.tx() as conn:
+        await conn.execute("DELETE FROM users WHERE id = $1", again.json()["id"])

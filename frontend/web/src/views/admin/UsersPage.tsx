@@ -4,6 +4,7 @@
  * ⚠️ 三处写操作（建号 / 改角色 / 重置口令）后端都令 `token_version += 1` ——
  *    被改的人**旧令牌立刻失效**。界面上要讲清楚，否则管理员会以为
  *    「改完他还能用」。
+ *    删除是例外：账号整个没了，令牌自然作废，不需要跟用户解释这一层。
  */
 import { useCallback, useEffect, useState } from 'react'
 
@@ -26,7 +27,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
 import {
-  createUser, listRoles, listUsers, patchUser, resetPassword,
+  createUser, deleteUser, listRoles, listUsers, patchUser, resetPassword,
 } from '@/api/admin'
 import type { RoleItem, UserItem } from '@/api/admin'
 
@@ -40,6 +41,7 @@ export default function UsersPage() {
   const [creating, setCreating] = useState(false)
   const [resetting, setResetting] = useState<UserItem | null>(null)
   const [pendingDisable, setPendingDisable] = useState<UserItem | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<UserItem | null>(null)
   const pageSize = 20
 
   const load = useCallback(async () => {
@@ -144,6 +146,8 @@ export default function UsersPage() {
                                 onClick={() => void run(() => patchUser(u.id, { is_active: true }))}>
                           启用
                         </Button>}
+                    <Button variant="ghost" size="sm" className="text-destructive"
+                            onClick={() => setPendingDelete(u)}>删除</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -183,6 +187,32 @@ export default function UsersPage() {
               setPendingDisable(null)
               void run(() => patchUser(u.id, { is_active: false }))
             }}>确认停用</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 删除**不可恢复**，所以在确认框里把代价写全：什么没了、什么还在。
+          只说一句「确定删除吗」的话，管理员不会知道聊天记录也一起没了。 */}
+      <AlertDialog open={!!pendingDelete}
+                   onOpenChange={(o) => !o && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除「{pendingDelete?.username}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将<span className="font-medium text-foreground">永久删除</span>该账号，
+              以及他的全部会话与消息 —— 不可恢复。
+              他上传的文档、创建的评测集<span className="font-medium text-foreground">会保留</span>
+              （只是「上传人」显示为空）。
+              如果只是要停掉登录，请改用「停用」。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              const u = pendingDelete!
+              setPendingDelete(null)
+              void run(() => deleteUser(u.id))
+            }}>确认删除</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

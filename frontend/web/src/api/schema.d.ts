@@ -487,7 +487,13 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete User
+         * @description 真删用户（连带他的会话与消息）。返回形状与「删除文档」一致。
+         *
+         *     删自己会被 service 拒掉（400）—— 见 `user_service.delete_user`。
+         */
+        delete: operations["delete_user_api_admin_users__user_id__delete"];
         options?: never;
         head?: never;
         /** Patch User */
@@ -2736,6 +2742,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_user_api_admin_users__user_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

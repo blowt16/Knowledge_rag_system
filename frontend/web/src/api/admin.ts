@@ -115,6 +115,11 @@ export const resetPassword = (userId: string, password: string) =>
     body: JSON.stringify({ password }),
   })
 
+/** 删除用户（§4.3 用户管理）。**真删** —— 连同他的会话与消息一起没了，
+ *  不可恢复；文档与评测集保留，只是归属置空。返回形状同 `deleteDocument`。 */
+export const deleteUser = (userId: string) =>
+  request<{ message: string }>(`/admin/users/${userId}`, { method: 'DELETE' })
+
 // ---------------- 拒答分析（§4.3.1.3） ----------------
 
 /** `kind` 默认 `refused`（向后兼容）；`clarify` 列**被反问**的轮次 —— */

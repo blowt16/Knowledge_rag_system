@@ -61,3 +61,13 @@ async def patch_user(user_id: str, body: PatchUserRequest, user=AdminUser) -> Us
 async def reset_password(user_id: str, body: ResetPasswordRequest,
                          user=AdminUser) -> UserItem:
     return UserItem(**await users.reset_password(user_id, password=body.password))
+
+
+@router.delete("/users/{user_id}")
+async def delete_user(user_id: str, user=AdminUser) -> dict:
+    """真删用户（连带他的会话与消息）。返回形状与「删除文档」一致。
+
+    删自己会被 service 拒掉（400）—— 见 `user_service.delete_user`。
+    """
+    await users.delete_user(user_id, actor_id=user.id)
+    return {"message": "已删除"}
