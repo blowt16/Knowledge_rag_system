@@ -55,7 +55,15 @@ def test_rule_layer_only_classifies_the_obvious():
 # 澄清触发（仅两种）
 # ============================================================
 
-def test_clarify_trigger_one_unresolved_reference():
+def test_clarify_trigger_short_dangling_reference():
+    """短句 + 指代无先行词 → 澄清（触发条件：**短且无法定位主题**）。
+
+    ⚠️ 这条原来叫 trigger_one_unresolved_reference，判据是 `resolve_unresolved`
+       单独一个标志。2026-10-14 E2E 实测把它改了：那个标志**长句也命中**，
+       而长句恰恰不该反问（见本文件末尾「实测缺口（2026-10-14）」一节）。
+       现在它与触发条件二合并成同一份判据 —— 短、且没有可定位的主题。
+       本用例的输入**行为不变**（仍然澄清），只是依据换了。
+    """
     s = new_state(query="那这个要多久啊", resolved_query="那这个要多久啊",
                   resolve_unresolved=True, history=HISTORY)
     assert RT._should_clarify(s) is True
@@ -342,3 +350,78 @@ def test_chat_prompt_introduces_features_and_guides_asking():
     text = load_prompt("chat").template
     assert ("功能" in text) or ("能力" in text), "chat 提示词没写「介绍功能/能力」"
     assert "提问" in text, "chat 提示词没写「引导用户怎么提问」"
+
+
+# ============================================================
+# 实测缺口（2026-10-14）：超范围问题被「消解不了」硬拦成澄清
+# ============================================================
+
+def test_no_clarify_for_long_query_with_unresolved_pronoun():
+    """★ 主回归锁：**长句**带无先行词的代词，不得触发澄清。
+
+    ⚠️ 实测现场（E2E 多轮实测第 13 轮，`route_source=rule`）：
+       用户问「我之前跟你说的那个数学建模比赛，报名截止是几号来着？」——
+       30 个字，远超 8 字下限，可 `_should_clarify` 却为真、直接判澄清，
+       **路由 LLM 连被调用的机会都没有**。用户得到的是「你想问什么？」，
+       而他这句话里明明写清楚了自己想问什么。
+
+    ⚠️ 成因是判据本身：`resolve_unresolved = resolved == query and has_pronoun(query)`
+       把「消解器没能改写」当成了「指代无法消解」。可消解提示词明确要求
+       **「已经自包含就原样返回」**——于是「那个数学建模比赛」这种
+       **代词作定语、主题就在句中**的正常问句，被判成了消解失败。
+       同一个输出（`resolved == query`）在这里代表了**两件相反的事**。
+
+    ⚠️ 更要命的是位置：长度判据（≥8 放行）在它后面，所以这个硬拦
+       **只对长句生效** —— 恰恰是它最不该生效的地方。短句本来就会被
+       长度判据兜住，标志对它们毫无增量。
+    """
+    for q in ["我之前跟你说的那个数学建模比赛，报名截止是几号来着？我给忘了",
+              "那我之前跟你说的社团招新，是下周几来着？",
+              "你之前跟我说的那个缓考申请，截止日期是哪天来着？",
+              "我室友是哪个专业的来着？我又忘了"]:
+        s = new_state(query=q, resolved_query=q, resolve_unresolved=True, history=HISTORY)
+        assert RT._should_clarify(s) is False, (
+            f"长句被「消解不了」硬拦成澄清了（{len(q)} 字）：{q}")
+
+
+def test_no_clarify_when_pronoun_is_a_determiner():
+    """代词作**定语**、主题就在句子里时不算「定位不到主题」。
+
+    「那个缓考申请」的「那个」是定语不是指代 —— 去掉它，「缓考申请」照样
+    是个自足的查询。这类问句该进检索，不该被反问。
+    """
+    for q in ["那个缓考申请要提前几天", "这个转专业的条件是什么",
+              "那个学业预警的绩点标准是多少"]:
+        s = new_state(query=q, resolved_query=q, resolve_unresolved=True, history=HISTORY)
+        assert RT._should_clarify(s) is False, f"{q} 主题就在句子里，不该反问"
+
+
+async def test_unresolved_pronoun_on_long_query_reaches_llm(monkeypatch):
+    """★ 端到端版本：长句 + `resolve_unresolved` 必须**走到 LLM**，不得在规则层定死。
+
+    与 `test_capability_question_reaches_llm_and_is_chat` 同一类回归锁 ——
+    修复前 `_should_clarify` 为真 → 直接 return clarify 且 `route_source=rule`，
+    LLM 根本不被调用，所以它无从把超范围问题判成 chat 去引导用户。
+    """
+    async def fake(messages, **kw):
+        return {"route": "chat"}
+
+    monkeypatch.setattr(llm, "complete_json", fake)
+
+    q = "我之前跟你说的那个数学建模比赛，报名截止是几号来着？我给忘了"
+    out = await RT.route_node(new_state(query=q, resolved_query=q,
+                                        resolve_unresolved=True, history=HISTORY))
+    assert out["route_source"] == "llm", (
+        "长句被规则层硬拦了 —— LLM 没机会把它判成 chat 并引导用户")
+    assert out["route"] == "chat"
+
+
+def test_short_dangling_reference_still_clarifies():
+    """反向锁：**短**句指代无先行词**仍然**要澄清 —— 边界不能整条放宽。
+
+    放宽过头就会把「那这个要多久啊」放进检索，那是答非所问。
+    真正模糊的是「说不出想问什么」，这类才是澄清该管的事。
+    """
+    for q in ["那这个要多久啊", "那个呢", "怎么办", "还有吗"]:
+        s = new_state(query=q, resolved_query=q, resolve_unresolved=True, history=HISTORY)
+        assert RT._should_clarify(s) is True, f"{q} 该澄清却放过了"

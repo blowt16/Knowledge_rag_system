@@ -88,13 +88,24 @@ def rule_classify(query: str) -> str | None:
 
 
 def _should_clarify(state: RAGState) -> bool:
-    """澄清触发**仅两种**（§3.5.3 节点 2 / 节点 4）。
+    """澄清触发**只有一种**：短、且定位不到主题（§3.5.3 节点 2 / 节点 4）。
 
     **该直接回答时反问用户，是体验最差的失败模式 —— 宁可多答，不可多问。**
-    """
-    if state.get("resolve_unresolved"):
-        return True
 
+    ⚠️ 原设计有**两条**触发条件，第一条是 `resolve_unresolved`（指代无法消解），
+       且写成**无条件的第一个 return**。2026-10-14 E2E 实测证明它有缺陷，已删除：
+
+       | 现象 | 成因 |
+       |---|---|
+       | 长句被硬拦成澄清，LLM 没机会复核 | 长度判据（≥8 放行）排在它**后面**，所以它只对长句生效 |
+       | 「那个数学建模比赛」被判「消解失败」 | `resolved == query` 同时代表「消解不动」与「本来就自足」（提示词明确要求自足就原样返回） |
+
+       短句的澄清**不受影响** —— 它们本来就被长度判据兜住，那个标志对它们零增量。
+       实测现场见 `tests/unit/test_route.py` 的「实测缺口（2026-10-14）」一节。
+
+    ⚠️ `resolve_unresolved` 仍由 resolve 节点写入，但**不再参与路由判定**
+       （保留在 state 里供观测）。别再把它接回来 —— 接回来就是上面那张表。
+    """
     resolved = (state.get("resolved_query") or state.get("query") or "").strip()
     min_len = int(cfg("clarify.min_length", 8))
     if len(resolved) >= min_len:
