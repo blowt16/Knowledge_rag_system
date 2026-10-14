@@ -141,6 +141,13 @@ def rerank_sync(query: str, chunks: list[Chunk], *, top_k: int | None = None) ->
             raise RuntimeError("精排返回空分")
 
         ranked = sorted(zip(chunks, scores), key=lambda p: p[1], reverse=True)
+        # 分数阈值：低于 `reranker.min_score` 的直接丢弃（2026-10-14 实测默认 0.3，
+        # 见 tests/unit/test_reranker_threshold.py）。全滤掉时返回空列表、
+        # degraded=False —— 节点层据「reranked 为空」走零成本拒答。
+        # 降级路径没有精排分，不做过滤（保持 RRF 顺序原样返回）。
+        min_score = float(cfg("reranker.min_score", 0.3))
+        ranked = [(c, s) for c, s in ranked if s >= min_score]
+
         out: list[Chunk] = []
         for chunk, score in ranked[:top_k]:
             chunk.score = float(score)
