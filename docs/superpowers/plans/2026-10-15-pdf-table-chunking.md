@@ -27,7 +27,7 @@
 - **不做跨页表格合并。** 只做「表头继承」。每页表格保持独立对象，**一行都不丢**。判据不满足时降级为当前行为（无表头），不冒险。
 - **偏移参照系不变。** `char_start/char_end` 仍是规范化文本的 Unicode 码点偏移；表格文本内联进 `PageText.text` 后由 `build_normalized_text` 重新拼装，偏移自洽。
 - **`chunk_id` 生成规则不变**（`f"{document_id}:{chunk_index}"`），四处在用，不得改动。
-- **序列化用键值行**（用户 2026-10-15 决定）：`列名：值｜列名：值`。分隔符用 `｜`(U+FF5C)，**不是** `_SENTENCE_END`/`_SECONDARY_END` 里的任何字符。
+- **序列化用键值行**（用户 2026-10-15 决定）：`列名：值｜列名：值`。**列间分隔符** `｜`(U+FF5C) 避开 `_SENTENCE_END`/`_SECONDARY_END`；`KV`(`：`) 与 `GROUP_MARK` 的 `】` 在这两个集合里，但**不影响正确性** —— 组不被切开由 Task 4 的 `atomic` 硬边界保证，不靠分隔符。
 - **`squeeze` 放宽**（用户 2026-10-15 决定）：除空白外，额外剔除 `｜` 与 `：`。校验强度降低是已知并接受的代价。
 - **破坏性变更**：本改动使 `normalized_text` 与旧版不同，**必须重跑入库**。语料中仅 2 份文档含表格（`11_` 8 个表、`12_` 5 个表）。
 
@@ -56,7 +56,8 @@
 | `backend/app/eval/generate.py` | `squeeze` 放宽 | 修改 |
 | `backend/tests/unit/test_tables.py` | 表格模块单测 | 新建 |
 | `backend/tests/unit/test_chunker_atomic.py` | 原子区间单测 | 新建 |
-| `backend/tests/fixtures/eval_cases_v1.json` | 表格题的 `ground_truth` 改为新序列化形态 | 修改 |
+| `backend/eval_sets/第二课堂评分表专项.json` | 表格题的 `ground_truth` 改为新序列化形态 | 修改 |
+| ~~`backend/tests/fixtures/eval_cases_v1.json`~~ | **实测该 fixture 里一条 doc-12 用例都没有**，无需改动（第一版列错了文件） | 无 |
 
 ---
 
@@ -69,7 +70,8 @@
 **Interfaces:**
 - Consumes: 无（本任务是起点）
 - Produces:
-  - `@dataclass RawTable(bbox: tuple[float,float,float,float], headers: list[str], rows: list[list[str]], page: int)`
+  - `@dataclass RawTable(page: int, bbox: tuple[float,float,float,float], headers: list[str] = [], rows: list[list[str]] = [])`
+    —— 以本任务 Step 3 的**代码为准**；字段顺序是 `page, bbox, headers, rows`
   - `normalize_grid(rows: list[list[str]]) -> list[list[str]]` —— 丢弃**全空列**、右侧补齐到等宽
   - `forward_fill(rows: list[list[str]], *, skip_cols: frozenset[int] = frozenset()) -> list[list[str]]`
 
@@ -80,8 +82,6 @@
 ```python
 """表格提取与网格归一（§3.4.1 表格支持）。"""
 from __future__ import annotations
-
-import pytest
 
 from app.ingestion.tables import forward_fill, normalize_grid
 
@@ -142,6 +142,20 @@ def test_forward_fill_leaves_leading_empty_untouched():
     assert [r[0] for r in filled] == ["", "c"]
 
 
+def test_forward_fill_never_shifts_columns_when_first_row_is_short():
+    """★回归锁：第 0 列**整列都空**时，绝不能被别的列的值填进来。
+
+    踩过的坑：`last` 没预置到行宽时，`last[i:i+1] = [cell]` 在越界时是**追加**，
+    于是 last 整体左移一格 —— 第 1 列的值串进第 0 列。
+    实测 doc 12 第 12 页表格首行是 `['', '', '院级', …]`，第 0 列本来就空，
+    正是这条路径的触发形状。
+    """
+    rows = [["", "B", "C"], ["", "E", ""]]
+    filled = forward_fill(rows)
+    assert [r[0] for r in filled] == ["", ""], "第 0 列整列为空，不该出现任何值"
+    assert filled[1][2] == "C", "第 2 列是真合并单元格，应照常承上"
+
+
 def test_normalize_handles_table_with_no_data_rows():
     """只有表头、没有数据行 —— 读者会期望拿到空数据，而不是崩掉。"""
     rows = [["课程类别", "参考学分"]]
@@ -185,8 +199,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-#: 序列化用的分隔符。**必须避开 `chunker._SENTENCE_END` / `_SECONDARY_END`**，
-#: 否则切分器会在分隔符处断句，把表格组切碎 —— 那正是本次要修的病。
+#: 序列化用的分隔符。
+#:
+#: ⚠️ **只有 `SEP` 需要避开切分器的断句字符**（`chunker._SENTENCE_END` /
+#:    `_SECONDARY_END`）—— 它是列间分隔，落在断句字符上会让 `_best_break`
+#:    从中间断开。`｜`(U+FF5C) 不在那两个集合里，安全。
+#:
+#: ⚠️ `KV`(`：`) 和 `GROUP_MARK` 的尾字符 `】` **确实在 `_SECONDARY_END` 里**
+#:    （实测：`_SECONDARY_END = "，、：)）】」』"`）。**这不影响正确性** ——
+#:    表格组不被切开是靠 Task 4 的 `atomic` 区间保证的，那里是硬边界；
+#:    断句字符只影响组**内部**怎么断，而原子区间根本不给它断的机会。
+#:    别看到这里就以为 KV 需要换 —— 换掉才会破坏「列名：值」的可读性。
 SEP = "｜"          # U+FF5C 全角竖线
 KV = "："           # U+FF1A 全角冒号
 GROUP_MARK = "【表头】"
@@ -229,13 +252,23 @@ def forward_fill(rows: list[list[str]], *,
     last: list[str] = []
     for row in rows:
         new = list(row)
+        # ⚠️ **必须先把 last 补齐到本行宽度**。否则 `last[i]` 在首行较短时越界，
+        #    而 `last[i:i+1] = [cell]` 在越界时的语义是**追加**（不是赋值），
+        #    于是后面所有列的「last」整体左移一格 —— 实测：
+        #      forward_fill([["", "B", "C"], ["", "E", ""]])
+        #      错： [["", "B", "C"], ["B", "E", ""]]   ← B 从第 1 列串到第 0 列
+        #      对： [["", "B", "C"], ["", "E", "C"]]
+        #    这不是理论风险：doc 12 第 12 页表格的首行就是 `['', '', '院级', …]`，
+        #    第 0 列本来就空，正好触发。
+        while len(last) < len(new):
+            last.append("")
         for i, cell in enumerate(new):
             if i in skip_cols:
-                last[i:i + 1] = [cell]
+                last[i] = cell
                 continue
             if cell.strip():
-                last[i:i + 1] = [cell]
-            elif i < len(last) and last[i]:
+                last[i] = cell
+            elif last[i]:
                 new[i] = last[i]
         out.append(new)
     return out
@@ -245,7 +278,7 @@ def forward_fill(rows: list[list[str]], *,
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v`
 
-Expected: 7 passed
+Expected: 8 passed
 
 - [ ] **Step 5: 提交**
 
@@ -409,12 +442,11 @@ def test_real_doc12_all_continuations_inherit():
     hdr6 = ["课程类别", "课程项目", "课程内容", "参考学分", "开课单位", "获得学分方式"]
     prev = None
     for i, (pg, top, bot, nc) in enumerate(seq):
-        t = _t(pg, top, bot, [], [["x"] * nc] * 2)
+        # 首表的首行**就是**它的表头（6 列）；续页表首行是数据（7 列）
+        first_row = hdr6 if i == 0 else ["x"] * nc
+        t = _t(pg, top, bot, [], [first_row, ["x"] * nc])
         out = inherit_headers([t], prev, page_height=PH)[0]
-        if i == 0:
-            assert out.headers == hdr6, "首表从自己的首行取表头"
-        else:
-            assert out.headers == hdr6, f"p{pg} 应继承到表头"
+        assert out.headers == hdr6, f"p{pg} 应拿到表头（首表采纳 / 续页继承）"
         prev = out
 
 
@@ -457,7 +489,7 @@ def test_doc11_anchor_near_bottom_is_not_enough():
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v -k inherit or header`
+Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v -k "inherit or header"`
 
 Expected: FAIL，`ImportError: cannot import name 'inherit_headers'`
 
@@ -610,20 +642,20 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
     return out
 ```
 
-顶部补 `import re`。
+（**不需要 `import re`** —— 内容启发式判据已被几何判据取代，`re` 在本模块无用途。）
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v`
 
-Expected: 21 passed
+Expected: 22 passed
 
 - [ ] **Step 5: 用真实文档验证继承行为**
 
 Run:
 
 ```bash
-cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -c "
+cd /d/Knowledge_rag_system && PYTHONPATH=backend .venv/Scripts/python.exe -c "
 import pymupdf
 from app.ingestion.tables import extract_page_tables, inherit_headers
 d = pymupdf.open('corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf')
@@ -638,7 +670,7 @@ for i in range(7, 12):
 "
 ```
 
-Expected: 第 8 页拿到真表头 `['课程类别','课程项目',...]`；第 9–12 页继承到同一表头，且行数不减少（8/20/25/21/17 附近）。**若某页显示 `表头=[]`，说明该页判据没过而降级 —— 这是允许的，但要记录在案。**
+Expected: 第 8 页拿到真表头 `['课程类别','课程项目',...]`；第 9–12 页继承到同一表头，且行数不减少（实测 p8–p12 为 15/20/25/21/17 行）。**若某页显示 `表头=[]`，说明该页判据没过而降级 —— 这是允许的，但要记录在案。**
 
 - [ ] **Step 6: 提交**
 
@@ -686,6 +718,37 @@ def test_group_starts_with_header_line():
     assert serialize_groups(t, budget=500)[0].splitlines()[0].startswith(GROUP_MARK)
 
 
+def test_mismatched_header_count_never_mislabels_columns():
+    """★列数不符时**绝不按下标配列名** —— 这是本项目要消灭的失效类型。
+
+    实测 doc 12 的 p9–p12：继承来的表头 6 列、数据行 7 列
+    （多的「获奖等级」列承载真实数据）。按下标硬配的实际输出是：
+        …｜课程内容：无偿献血｜开课单位：2分/次｜获得学分方式：团委、各学院
+    —— 学分值被挂到「开课单位」名下，「参考学分」消失，第 7 格被静默丢弃，
+    影响 83 行。**「自信的错误标注」比拍平文本更糟**，因为拍平不会说谎。
+
+    多出来的列在**中间**、不在尾部，真实对齐无法从数据恢复 —— 所以不猜。
+    """
+    t = _tbl(["课程类别", "课程内容", "参考学分"],
+             [["甲类", "无偿献血", "2分/次", "获奖等级值"]])
+    lines = serialize_groups(t, budget=500)[0].splitlines()
+    header, body = lines[0], lines[1]
+
+    assert "参考学分：2分/次" not in body, "值不得挂到错位的列名上"
+    assert "课程内容：无偿献血" not in body, "同上：下标配对整体错位"
+    assert body.startswith("列1：甲类"), "应逐格按位置标注"
+    assert "列4：获奖等级值" in body, "第 4 格必须保留，不得被静默丢弃"
+    assert header.count("承上页表头") >= 1, "继承来的表头要留作上下文"
+    assert "参考学分" in header, "上下文里必须还能看到继承的列名"
+
+
+def test_matching_header_count_still_pairs_by_name():
+    """对照：列数相符时仍按列名配对 —— 别把上面那条修过头了。"""
+    t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
+    body = serialize_groups(t, budget=500)[0].splitlines()[1]
+    assert body == "课程内容：无偿献血｜参考学分：2分/次"
+
+
 def test_header_tokens_are_deducted_before_grouping():
     """★表头先扣预算：每组**含表头**不得超过 budget。
 
@@ -707,12 +770,17 @@ def test_oversized_single_row_becomes_its_own_group():
 
 
 def test_escape_cell_separators():
-    """★单元格里含分隔符或标记 —— 转义后不破坏结构，扫描器不误判。"""
-    t = _tbl(["参考学分"], [["含｜竖线的值", "含【表头】标记的值"]])
+    """★单元格里含分隔符或标记 —— 转义后不破坏结构，扫描器不误判。
+
+    ⚠️ 列名数必须与格子数对齐，否则第二个格子根本不会被序列化，
+       断言就成了空转（改这条测试时踩过）。
+    """
+    t = _tbl(["甲列", "乙列"], [["含｜竖线的值", "含【表头】标记的值"]])
     groups = serialize_groups(t, budget=500)
     body = groups[0].splitlines()[1]
-    # 正文里不能再出现裸的 GROUP_MARK（否则被当成新组的开头）
-    assert body.count(GROUP_MARK) == 0
+    assert body.count(GROUP_MARK) == 0, "正文里不能出现裸的组标记"
+    assert body.count("｜") == 1, "只应有列间那一个分隔符；格子内的 ｜ 必须被转义"
+    assert "【" not in body and "】" not in body, "格子内的 【】 必须被转义"
 
 
 def test_serialization_separators_never_break_a_chunk():
@@ -801,9 +869,31 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
     # ② 再向下填充合并单元格
     filled = forward_fill(table.rows)
 
-    headers = ([_escape(h) for h in table.headers]
-               if table.headers else [f"列{i + 1}" for i in range(ncols)])
+    # ⚠️⚠️ **列数不符时绝不按下标配列名。**
+    #
+    # `is_continuation` 允许 ±1 列的容差（实测 doc 12 的 p8 是 6 列、p9–p12 是 7 列，
+    # 多的「获奖等级」列承载真实数据）—— 但**继承到表头不等于能按下标配对**。
+    # 实测按下标硬配会输出：
+    #     …｜课程内容：无偿献血｜开课单位：2分/次｜获得学分方式：团委、各学院
+    # 即把学分值挂到「开课单位」名下、真正的「参考学分」消失、第 7 格被静默丢弃。
+    # 影响 doc 12 的 83 行。**这是「自信的错误标注」——比改造前的拍平文本更糟**，
+    # 因为拍平至少不会说谎，错配会。
+    #
+    # 无法从数据里恢复真实对齐（多出来的列在中间，不在尾部），所以**不猜**：
+    # 逐格按位置标注（`列N`），继承来的表头只作为**上下文**留在表头行里。
+    # 按位置标注永远不会错；按名字错配永远是错的。
+    aligned = bool(table.headers) and len(table.headers) == ncols
+    if aligned:
+        headers = [_escape(h) for h in table.headers]
+    else:
+        headers = [f"列{i + 1}" for i in range(ncols)]
+
     header_line = GROUP_MARK + SEP.join(headers)
+    if table.headers and not aligned:
+        # 承上页继承来的表头仍在，但**不参与逐行配对** —— 明确标出它的身份
+        inherited = SEP.join(_escape(h) for h in table.headers)
+        header_line += f"（承上页表头，列数不符未逐行套用：{inherited}）"
+
     # 扣掉表头 + 一个换行
     body_budget = budget - len(header_line) - 1
 
@@ -840,7 +930,7 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v`
 
-Expected: 30 passed
+Expected: 33 passed
 
 - [ ] **Step 5: 用真实表格验证膨胀与分组数**
 
@@ -864,7 +954,14 @@ print('含无偿献血的组:'); print(grp[0][:300] if grp else '未找到')
 "
 ```
 
-Expected: 组数 20–30；**超 500 的组为 0**；「无偿献血」那行完整带着 `课程内容：无偿献血｜参考学分：2分/次`。
+Expected: 组数 20–30；**超 500 的组为 0**。
+
+「无偿献血」那行的期望形态**取决于它所在的页**（这是列数漂移判定的直接后果）：
+
+- 若落在 **p8**（6 列，与继承表头相符）→ `课程内容：无偿献血｜参考学分：2分/次`
+- 若落在 **p9–p12**（7 列，不符）→ `列3：无偿献血｜列5：2分/次｜…`
+
+实测它落在 p11，所以是**后者**。**别拿 p8 的形态当预期去判定失败** —— 判据是「学分值有没有被挂到错误的列名上」，不是「有没有出现『参考学分』这四个字」。
 
 - [ ] **Step 6: 提交**
 
@@ -1100,7 +1197,15 @@ def test_pdf_table_is_serialized_with_column_names():
     res = load_pdf(pdf)
     merged = "\n".join(p.text for p in res.pages)
     assert GROUP_MARK in merged, "表头行必须出现"
-    assert "课程内容：无偿献血" in merged, "数据行必须自带列名"
+    # ⚠️ 别断言 `课程内容：无偿献血` —— doc 12 的「无偿献血」落在 p11，
+    #    那是 7 列的表、继承的是 6 列表头，按 Task 3 的裁定走**位置标注**，
+    #    列名形态根本不存在（第一版断言就是照 p8 的形态写的，是错的）。
+    #    真正要守的是：值还在、且被某个标签正确带着。
+    assert "无偿献血" in merged, "数据行必须出现"
+    # 列名形态（列数相符的表，如 p8）
+    assert "课程内容：完成相应培训课时" in merged, "列数相符的表应按列名配对"
+    # 位置标注形态（列数不符的表，如 p11）
+    assert "列3：无偿献血" in merged, "列数不符的表应按位置标注，值不得错挂列名"
 
 
 def test_pdf_table_text_appears_only_once():
@@ -1114,6 +1219,59 @@ def test_pdf_table_text_appears_only_once():
     res = load_pdf(pdf)
     merged = "\n".join(p.text for p in res.pages)
     assert merged.count("捐献造血干细胞") == 1, "同一个单元格出现了多次"
+
+
+def test_multi_table_page_keeps_reading_order():
+    """★多表页的正文不能被挤到页尾。
+
+    踩过的坑：把「正文块」按前缀排干时，**假设了 `get_text("blocks")` 按 y 递增**。
+    实测 doc 11 的 p3/p4/p6 块表**第 0 项是页脚页码块**（top=776.4，比页上最高的
+    表顶 541.5 还大），排干在 cursor=0 就卡死、一个块都插不进去 —— 整页变成
+    「以【表头】开头」，表格上方的引导正文（「（一）科研成果类…」）全被推到页尾。
+    内容没丢，但阅读顺序错乱，而且**是静默的**。
+    """
+    from pathlib import Path
+    from app.ingestion.loaders.pdf import load_pdf
+    from app.ingestion.tables import GROUP_MARK
+
+    pdf = Path("corpus/guet/11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf")
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    for n in (3, 4, 6):              # 实测这三页各含两张表
+        text = next(p.text for p in res.pages if p.page == n)
+        head = text[:text.find(GROUP_MARK)]
+        assert text.find(GROUP_MARK) > 0, f"p{n} 以表格组开头"
+        assert head.strip(), f"p{n} 第一个表格组之前没有任何正文 —— 阅读顺序错乱"
+
+
+def test_every_table_group_is_blank_line_delimited():
+    """★跨任务接口契约：Task 6 靠「`【表头】` 到下一个空行」切段。
+
+    组**前**的空行是构造保证（每组必先 `append("")`）；组**后**的那一行
+    第一版不是构造保证 —— `append("")` 发生在正文块之前，两张表之间的正文块
+    会挤掉它，于是该组只跟后面隔一个 `\\n`。当前语料恰好不触发（触发要求
+    块表按 y 有序，而多表页的块表第 0 项是页脚），但契约不能靠巧合。
+
+    判据：按空行切页文本，凡是**含**组标记却不**以**组标记开头的块，
+    就说明有一组没被空行定界。
+    """
+    from pathlib import Path
+    from app.ingestion.loaders.pdf import load_pdf
+    from app.ingestion.tables import GROUP_MARK
+
+    for name in ("11_创新创业拓展课程学分认定管理办法_桂电教2026-13号",
+                 "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号"):
+        pdf = Path(f"corpus/guet/{name}.pdf")
+        if not pdf.exists():
+            continue
+        res = load_pdf(pdf)
+        for pg in res.pages:
+            for block in pg.text.split("\n\n"):
+                if block.startswith(GROUP_MARK):
+                    continue
+                assert GROUP_MARK not in block, (
+                    f"{name} p{pg.page} 有一组没被空行定界：{block[:60]!r}")
 
 
 def test_table_group_marker_survives_cleaning():
@@ -1182,12 +1340,19 @@ def _text_blocks(page: "fitz.Page") -> tuple[list[str], list[dict]]:
 
 ```python
 def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
-                      *, prev_table=None) -> tuple[str, list[dict], object]:
+                      *, prev_table=None,
+                      page_text: str | None = None) -> tuple[str, list[dict], object]:
     """把表格区域从拍平文本里换成键值序列化文本。
 
     ⚠️ 表格的原始拍平文本**必须剔除**，否则表格内容会出现两遍
        （一遍 get_text("blocks") 的拍平版，一遍序列化版）。
        剔除依据是 bbox 包含 —— 落进表格 bbox 的块就属于该表。
+
+    ⚠️ **没有表格时必须返回调用方算好的 `page_text`，不要用 `"\\n".join(blocks)` 重建。**
+       竖排页的 `reverse_line_order` 结果只存在于页文本里，块列表里没有；重建会把
+       反转整个丢掉，于是成文日期被清洗规则当页码删掉 —— 实测两个竖排回归用例全红。
+       本方案第一版就是重建，是错的。
+       竖排**且**有表格的页是已知限制：那种页拿到的仍是未反转的块文本。
 
     返回 (新文本, 剩余 boxes, 本页最后一张表)。`blocks` 与 `boxes` 必须一一对应。
     """
@@ -1196,14 +1361,16 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
     )
     from app.ingestion.chunker import chunk_size_hint
 
+    fallback = page_text if page_text is not None else "\n".join(blocks)
+
     tables = extract_page_tables(page)
     if not tables:
-        return "\n".join(blocks), boxes, prev_table
+        return fallback, boxes, prev_table
 
     tables = inherit_headers(tables, prev_table, page_height=page.rect.height)
     table_boxes = [t.bbox for t in tables if t.rows]
     if not table_boxes:
-        return "\n".join(blocks), boxes, prev_table
+        return fallback, boxes, prev_table
 
     # ① 剔除落进表格 bbox 的块（2pt 容差）
     kept_blocks: list[str] = []
@@ -1218,24 +1385,48 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
             kept_blocks.append(blk)
             kept_boxes.append(box)
 
-    # ② 序列化每张表，按 bbox 上沿 y 插入到阅读顺序里
-    pieces: list[tuple[float, str]] = []
+    # ② 把「正文块」与「表格组」**按 y 归并**，别依赖 get_text("blocks") 的返回顺序。
+    #
+    # ⚠️⚠️ 本方案第一版是「拿 kept_boxes 当前缀往前排干」，**假设块表按 top 递增**。
+    #     实测这个假设不成立：doc 11 的 p3/p4/p6 块表**第 0 项是页脚页码块**
+    #     （top=776.4，比页上最高的表顶 541.5 还大），排干在 cursor=0 就卡死、
+    #     一个块都插不进去 —— 结果整页落到「以【表头】开头」，表格上方的正文
+    #     （「（一）科研成果类…」这类引导句）全被推到**页尾**。三页中招。
+    #     内容没丢，但阅读顺序错乱，且是静默的。
+    #
+    #     归并排序不依赖输入顺序，从构造上消除这个问题。
+    items: list[tuple[float, int, str]] = []
+    for blk, box in zip(kept_blocks, kept_boxes):
+        items.append((box["top"], 0, blk))          # 0 = 正文块
     for t in tables:
         for g in serialize_groups(t, budget=chunk_size_hint()):
-            pieces.append((t.bbox[1], g))
+            items.append((t.bbox[1], 1, g))         # 1 = 表格组
+    # 同一 y 上正文块在前（kind 0 < 1）
+    items.sort(key=lambda x: (x[0], x[1]))
 
     out: list[str] = []
-    cursor = 0
-    for top, group in sorted(pieces, key=lambda x: x[0]):
-        while cursor < len(kept_boxes) and kept_boxes[cursor]["top"] <= top:
-            out.append(kept_blocks[cursor])
-            cursor += 1
-        out.append("")              # 组前留空行 —— table_atomic_ranges 靠空行切段
-        out.append(group)
-    out.append("")
-    out.extend(kept_blocks[cursor:])
+    for _top, kind, payload in items:
+        if kind == 1:
+            if out:                 # 首个元素前不加空行，避免 join 出前导 "\n"
+                out.append("")      # 组前空行
+            out.append(payload)
+            out.append("")          # 组后空行 —— **构造保证**，Task 6 靠「到下一个空行」切段
+        else:
+            out.append(payload)
 
-    return "\n".join(out), kept_boxes, (tables[-1] if tables else prev_table)
+    # ⚠️ 收尾必须把 3 个以上连续换行收敛成 2 个（与 `clean_page` 同口径）。
+    #
+    #    为什么必要：`get_text("blocks")` 的块文本**自带尾换行**，于是
+    #    「块(尾 \n) + 组前空行("")」会 join 出 `正文\n\n\n【表头】…`。
+    #    按 `\n\n` 切段就得到 `'\n【表头】…'` —— **不以组标记开头**，
+    #    Task 6 的扫描器会把它当成普通正文块，那一组就扫不出来了。
+    #    本方案第一版漏了这一步，实现者跑它自己新加的 `blank_line` 测试时才发现。
+    #
+    #    注意：`clean_page` 之后也会收敛，但**本函数是被测试直接调用的**
+    #    （`load_pdf` 的输出还没经过 `build_normalized_text`），所以不能指望下游。
+    # 不加 .strip() —— 收尾已有收敛；页首尾的空白由下游 `clean_page` 处理。
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)), kept_boxes, (
+        tables[-1] if tables else prev_table)
 ```
 
 **改 ④：`chunker.py` 补一个读配置的小函数**（别让 pdf.py 直接 import 私有常量）：
@@ -1276,8 +1467,12 @@ def chunk_size_hint() -> int:
                     text = reverse_line_order(text)
 
                 # 表格：结构化后替换拍平文本（OCR 路径不碰）
+                # ⚠️ 参数顺序是 (blocks, boxes, page) —— 与签名一致。
+                #    本方案第一版写成 (page, block_texts, boxes)，会直接 TypeError。
+                # ⚠️ 必须把**已算好的 text** 传进去当无表时的回退：竖排页的
+                #    `reverse_line_order` 结果只存在于 text 里，块列表里没有。
                 text, boxes, prev_table = _text_with_tables(
-                    page, block_texts, boxes, prev_table=prev_table)
+                    block_texts, boxes, page, prev_table=prev_table, page_text=text)
 
                 result.pages.append(PageText(
                     page=page_no,
@@ -1297,7 +1492,7 @@ def chunk_size_hint() -> int:
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/integration/test_loaders.py -v -k table`
 
-Expected: 3 passed
+Expected: 5 passed
 
 - [ ] **Step 5: 跑全量加载器测试确认没回归**
 
@@ -1402,7 +1597,12 @@ def table_atomic_ranges(normalized: str) -> list[tuple[int, int]]:
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v -k atomic_ranges`
 
-Expected: 3 passed
+Expected: 4 passed
+
+> 第 4 条是**游标回归锁**（`test_atomic_ranges_advance_cursor_on_duplicate_groups`）：
+> 重复行的表格能把相邻两组序列化成**完全相同的字符串**，用不前进游标的
+> `text.find(组文本)` 会把两组映射到同一区间 —— 实测后果是第 2 组被切碎、
+> 行值跨块重复（3 次 vs 真实 2 次）。任务书原定 3 条抓不住这个，实现者补了第 4 条。
 
 - [ ] **Step 5: 端到端验证：重新解析 doc 12，确认表格组不被切开**
 
@@ -1432,6 +1632,15 @@ print('无偿献血所在块含2分/次:', all('2分/次' in s.text for s in hit
 ```
 
 Expected: `被切碎的表格 chunk: 无`；`无偿献血所在块含2分/次: True`
+
+> ⚠️ **上面这个「被切碎」判据是弱检查**（实现者实测出过假阴性）：它只看
+> 「含组标记却不以组标记开头」。若某组被从**尾部**截断，那个残片不以组标记开头、
+> 会被算进 `broken`；但若它恰好**以组标记开头**（组首那一块没被切），
+> 判据就漏了。**做验收（Task 8）时换成强判据**：
+>
+> 每个原子区间是否**完整落在同一个 chunk 内** ——
+> 对 `table_atomic_ranges(normalized)` 的每个 `(s, e)`，断言存在某个 `chunk`
+> 使 `chunk.char_start <= s` 且 `e <= chunk.char_end`。实测 28/28 通过。
 
 - [ ] **Step 6: 提交**
 
@@ -1525,7 +1734,34 @@ Expected: 2 passed
 | sc-09 | `课程内容：团支部书记、班长｜参考学分：3分/学年` |
 | sc-10 | `要求学生每学年获得“思想政治与道德修养”类学分不少于15分`（正文题，不变） |
 
-⚠️ **上表的字符串以 Task 8 重新入库后的实际正文为准**。若某条对不上，以正文实际内容为准改 ground_truth，**不要改序列化代码去迁就题目**。
+⚠️⚠️ **上表是「列数相符」时的形态，但 doc 12 的 p9–p12 不适用。**
+
+实测：doc 12 只有 **p8** 那张表的列数与继承表头相符（6=6）；**p9–p12 是 7 列对 6 个继承表头**，
+按裁定改走「逐格按位置标注」——那 9 条题的答案会变成 `列3：无偿献血｜列5：2分/次` 这种**位置标签**形态，
+不是上表的列名形态。（`test_mismatched_header_count_never_mislabels_columns` 钉的就是这个行为。）
+
+**所以本步骤必须这样执行**：先跑一次真实输出，把每条的 `ground_truth` **照抄实际正文里的那一段**，
+不要照抄上表。取实际输出：
+
+```bash
+cd /d/Knowledge_rag_system && PYTHONPATH=backend .venv/Scripts/python.exe -c "
+import pymupdf
+from app.ingestion.tables import extract_page_tables, inherit_headers, serialize_groups
+d=pymupdf.open('corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf')
+prev=None; g=[]
+for i in range(7,12):
+    p=d.load_page(i)
+    for t in inherit_headers(extract_page_tables(p), prev, page_height=p.rect.height):
+        g += serialize_groups(t, budget=500); prev=t
+for key in ['无偿献血','捐献造血干细胞','大学英语六级','计算机等级','校级学生组织负责','文体竞赛','挑战杯','国家级立项','团支部']:
+    hit=[x for x in g if key in x]
+    print('###', key); print(hit[0][:400] if hit else '未找到'); print()
+"
+```
+
+把每条题对应的那一行**逐字**抄成 `ground_truth`。
+
+**不要改序列化代码去迁就上表** —— 上表只是列数相符时的预期形态，实际以正文为准。
 
 - [ ] **Step 6: 提交**
 
