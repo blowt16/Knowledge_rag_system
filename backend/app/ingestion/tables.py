@@ -97,3 +97,147 @@ def forward_fill(rows: list[list[str]], *,
                 new[i] = last[i]
         out.append(new)
     return out
+
+
+#: 判定「锚表结束在页面下部」—— 用**页高比例**，不用绝对 pt。
+#:
+#: ⚠️ 2026-10-15 实测：绝对阈值是本方案第一版最大的错误。页面有 **62pt 上边距**，
+#:    表格从来不贴页顶/页底。实测 doc 12 的 4 张续页表锚表距页底分别是
+#:    72 / 75 / 83 / 126 pt，写死 24pt 一处都通不过。
+ANCHOR_BOTTOM_RATIO = 0.8
+#: 判定「本表从页顶开始」—— 同样用比例。实测续页表的顶都在 62.4pt ≈ 页高 7.4%。
+CONT_TOP_RATIO = 0.1
+#: 列数兼容的容差。
+#:
+#: ⚠️ 不能用「列数相等」：实测同一张逻辑表 doc 12 p8 是 **6 列**、p9–p12 是 **7 列** ——
+#:    多的那列是「获奖等级」（特等奖/一二三等奖），**承载真实数据**，不是空列。
+#:    第一版误以为它是空列可以丢掉，是错的。
+MAX_COL_DIFF = 1
+
+
+def extract_page_tables(page) -> list[RawTable]:
+    """取一页里的所有表格。**不做任何表头判断** —— 交给 `inherit_headers`。"""
+    out: list[RawTable] = []
+    try:
+        found = page.find_tables()
+    except Exception:      # noqa: BLE001 —— 表格识别失败不该拖垮整页文本
+        return out
+
+    for tab in getattr(found, "tables", []) or []:
+        try:
+            raw = tab.extract()
+        except Exception:  # noqa: BLE001
+            continue
+        if not raw:
+            continue
+        bbox = tuple(float(v) for v in tab.bbox)
+        out.append(RawTable(page=page.number + 1, bbox=bbox, rows=[
+            [(c or "").replace("\n", "").strip() for c in row] for row in raw
+        ]))
+    return out
+
+
+def is_continuation(table: RawTable, prev: RawTable | None, *,
+                    page_height: float) -> bool:
+    """本表是不是上一页那张表的续页。
+
+    **全靠几何，不看文字内容。** 实测三条同时成立才判续页：
+
+    1. 锚表底 > 页高 × `ANCHOR_BOTTOM_RATIO`（锚表伸到页面下部）
+    2. 本表顶 < 页高 × `CONT_TOP_RATIO`（本表从页顶开始）
+    3. `|列数差| <= MAX_COL_DIFF`（列结构兼容）
+
+    外加两表必须在**相邻页**。
+
+    ⚠️ **为什么不看文字**：2026-10-15 实测，这套判据在语料上打字面——
+       doc 12 的 4 处真续页 4/4 通过；doc 11 的 7 对**独立表** 7/7 正确拒绝，
+       其中 `p6→p8`（锚表底 753 贴页底、很像续页）因本表顶在 214 而被挡下 ——
+       **正是 RAGFlow PR #18789 假阳性事故的场景**。
+
+    ⚠️ **为什么不看字体/底纹**：实测 doc 12 的表头行与数据行在
+       字体、字号、flags、颜色、**背景色**上**完全一致**（背景全白、无加粗）。
+       doc 11 同样。PyMuPDF `_get_header` 用的加粗/背景色/文本属性那套信号
+       在本语料上一条都用不上。
+    """
+    if prev is None or not prev.headers:
+        return False
+    if prev.page != table.page - 1:
+        return False
+    if prev.bbox[3] <= page_height * ANCHOR_BOTTOM_RATIO:
+        return False
+    if table.bbox[1] >= page_height * CONT_TOP_RATIO:
+        return False
+    if not table.rows:
+        return False
+    return abs(len(prev.headers) - len(table.rows[0])) <= MAX_COL_DIFF
+
+
+def is_projected_row_header(row: list[str], ncols: int) -> bool:
+    """这一行是不是「分组行」（projected row header）。
+
+    操作式定义照抄 PubTables-1M（arXiv:2110.00061）Algorithm 1 第 7 行：
+    **「不在列头里、且恰好只有一个非空格子、且那个格子在第一个位置」**。
+    论文统计 761,262 张受调查表里 153,705 张含这种行（约 20%），不算罕见。
+
+    用途：`serialize_groups` 跳过它 —— 它只是个分类分隔，不承载数据，
+    序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
+    （它的值已经由 `forward_fill` 传播到下面每一行了。）
+    """
+    if not row or ncols < 2:
+        return False
+    filled = [i for i, c in enumerate(row) if c.strip()]
+    return filled == [0]
+
+
+def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
+                    page_height: float) -> list[RawTable]:
+    """补上表头。**不合并表、不跨页搬行。**
+
+    按**固定顺序**判四档（顺序有意义，别调换）：
+
+    | 档 | 条件 | 结果 |
+    |---|---|---|
+    | ① | `t.headers` 已有值 | 原样保留 |
+    | ② | `is_continuation` 为真 | 用 `prev.headers`；**首行保留为数据** |
+    | ③ | 有数据行 | 首行**采纳为表头**，从数据里移除 |
+    | ④ | 只有一行 | 不采纳（否则表变空），`headers=[]` 降级 |
+
+    ⚠️ **② 必须排在 ③ 前面。** 续页表的首行是数据，若先走 ③ 会被当表头吃掉。
+
+    ⚠️ ③ **不看文字内容**，只要求「本表自带表头」这个前提成立。
+       第一版用「非空格子过半 且 无一格含『数字+分』」的内容启发式，
+       被实测否掉了 —— doc 11 的表头行含数字（`第1 作者`、`第2 作者`），
+       任何「表头不含数字」的判据都会误判。
+
+    ④ 是**有意的降级**：没有表头只是回到改造前的行为，而错误归类会把
+       数据行错标成别的表的列 —— 更糟。
+    """
+    out: list[RawTable] = []
+    for t in tables:
+        t.rows = normalize_grid(t.rows)
+        if not t.rows:
+            out.append(t)
+            continue
+
+        # ① 自带表头
+        if t.headers:
+            out.append(t)
+            continue
+
+        # ② 续页表 → 继承（首行是数据，留着）
+        if is_continuation(t, prev, page_height=page_height):
+            t.headers = list(prev.headers)
+            out.append(t)
+            continue
+
+        # ③ 本表自带表头行 → 采纳，并从数据里移除
+        if len(t.rows) > 1:
+            t.headers = list(t.rows[0])
+            t.rows = t.rows[1:]
+            out.append(t)
+            continue
+
+        # ④ 只有一行：不能当表头（表会变空），降级
+        t.headers = []
+        out.append(t)
+    return out
