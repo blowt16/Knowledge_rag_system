@@ -73,3 +73,18 @@ def test_anchor_turns_are_not_first(payload):
         for i, turn in enumerate(case["turns"], start=1):
             if turn["resolved_must_contain_any"] and i == 1:
                 pytest.fail(f"{case['id']} 首轮就要求消解锚点 —— 首轮没有上下文可消解")
+
+
+def test_squeeze_strips_table_serialization_separators():
+    """★键值行的分隔符不算「字」—— 否则表格题的标准答案永远校验不过。"""
+    from app.eval.generate import squeeze
+
+    assert squeeze("课程内容：无偿献血｜参考学分：2分/次") == "课程内容无偿献血参考学分2分/次"
+    assert squeeze("无偿献血\n2分/次") == "无偿献血2分/次"
+
+
+def test_squeeze_still_strips_whitespace():
+    """原有行为不回归。"""
+    from app.eval.generate import squeeze
+
+    assert squeeze(" 甲 \n\n 乙 ") == "甲乙"

@@ -1,0 +1,230 @@
+{
+ "version": 1,
+ "set": {
+  "name": "第二课堂评分表专项",
+  "description": "针对《第二课堂成绩单制度实施办法》(桂电〔2025〕30号) 附件评分表的 10 条专项题，用于暴露表格拍平后的分块损伤。人工依据原文逐字出题，ground_truth 均为原文片段。"
+ },
+ "exported_at": "2026-10-15T18:35:00",
+ "cases": [
+  {
+   "id": "sc-01",
+   "question": "参加一次无偿献血能加多少第二课堂学分？",
+   "ground_truth": "列3：无偿献血｜列5：2分/次",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "同值歧义：『2分/次』全表出现 5 次，检索到错误行的风险高｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:14']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-02",
+   "question": "捐献造血干细胞能加多少第二课堂学分？",
+   "ground_truth": "列3：捐献造血干细胞｜列5：10分/次",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "纯数字向量区分度低，『10分/次』与相邻的 15/20 分档易混｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:14']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-03",
+   "question": "通过大学英语六级能加多少第二课堂学分？",
+   "ground_truth": "列4：大学英语六级｜列5：5分/项",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "『5分/项』全表出现 6 次以上，需靠行标题『大学英语六级』锚定｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:16']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-04",
+   "question": "通过全国计算机等级考试并拿到证书，能加多少第二课堂学分？",
+   "ground_truth": "列4：通过各级计算机等级考试并获得证书｜列5：3分/项",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "行标题被换行切成 2 段，与分值之间还隔着空行｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:16']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-05",
+   "question": "担任校级学生组织负责人，一学年能加多少第二课堂学分？",
+   "ground_truth": "列4：校级学生组织负责人、团委兼职副书记｜列5：10分/学年",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "合并单元格行：类别标签『校级』与岗位名分离，需靠『10分/学年』反向定位｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:15']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-06",
+   "question": "在文体竞赛中获得国家级二等奖，能加多少第二课堂学分？",
+   "ground_truth": "列3：获国家级奖项一、二、三等奖｜列4：其他｜列5：18、15、12分/项",
+   "case_type": "cross_paragraph",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "★位置映射题，答案 15：『18、15、12』按序对应一/二/三等奖。表格拍平后无列对齐信息，只能靠语序推断｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:12']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-07",
+   "question": "在“挑战杯”等A类竞赛中获得国家级特等奖（金奖），能加多少第二课堂学分？",
+   "ground_truth": "列4：特等奖（金奖）、一、二、三等奖｜列5：30、20、15、10分/项",
+   "case_type": "cross_paragraph",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "★位置映射题，答案 30：『30、20、15、10』对应特等奖(金奖)/一/二/三等奖。且竞赛类别行在另一块｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:10']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-08",
+   "question": "参加暑期“三下乡”社会实践并获得国家级立项，能加多少第二课堂学分？",
+   "ground_truth": "列3：国家级立项｜列5：15分/项",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "『国家级立项』在多个实践项目下重复出现｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:13']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-09",
+   "question": "担任团支部书记或班长，一学年能加多少第二课堂学分？",
+   "ground_truth": "列4：学生会和团委部门工作人员、年级团总支部门正副职、年级委部门正副职、团支部书记、班长｜列5：3分/学年",
+   "case_type": "cross_paragraph",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "★边界侥幸题：该片段字符区间恰好跨越 chunk15→16，全靠 50 字重叠才在 chunk16 内保全；且同块内紧邻上一行的『4分/学年』，两个学年分值挨着，极易串行。overlap 一旦调小此题即断｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:16']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  },
+  {
+   "id": "sc-10",
+   "question": "在校生每学年“思想政治与道德修养”类第二课堂学分最低要达到多少？",
+   "ground_truth": "要求学生每学年获得“思想政治与道德修养”类学分不少于15",
+   "case_type": "factual",
+   "suite": "full",
+   "expected_doc_ids": [
+    "d513cdbe13bf4de280f1b9542d7194f0"
+   ],
+   "expected_chunk_ids": null,
+   "turns": null,
+   "visible_roles": null,
+   "expected_route": "knowledge",
+   "should_clarify": 0,
+   "source": "manual",
+   "in_eval": true,
+   "note": "对照组（正文题，非表格）：片段落在 chunk5/6 重叠区，两块均完整命中｜证据落位 ['d513cdbe13bf4de280f1b9542d7194f0:5', 'd513cdbe13bf4de280f1b9542d7194f0:6']",
+   "source_document_id": "d513cdbe13bf4de280f1b9542d7194f0",
+   "source_chunk_id": null,
+   "source_page": null,
+   "source_snippet": null
+  }
+ ]
+}
