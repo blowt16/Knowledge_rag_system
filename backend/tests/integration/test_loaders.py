@@ -44,7 +44,10 @@ def loaded():
 # ---- ① 每份都出内容 ---------------------------------------------------
 
 def test_all_documents_produce_chunks(loaded):
-    assert len(loaded) == 10
+    """**别写死份数** —— 语料会增长（10 → 15 只用了几天），
+    写死会在加文档时误报「加载层坏了」，而真正要守的是「有几份就出几份」。"""
+    assert PDFS, "语料目录里一份 PDF 都没有"
+    assert len(loaded) == len(PDFS)
     for name, (_r, _n, _s, chunks) in loaded.items():
         assert chunks, f"{name} 没有产出任何 chunk"
 
@@ -190,46 +193,88 @@ def test_horizontal_documents_keep_doc_number(loaded):
 # ---- ⑤ 表格结构化（Task 5）--------------------------------------------
 
 def test_pdf_table_is_serialized_with_column_names():
-    """★表格在 PageText.text 里是键值行，不再是拍平的单格行。
-
-    ⚠️ 两条断言分别覆盖 `serialize_groups` 的两个分支（实测 doc 12）：
-
-    | 数据 | 表头来源 | 标注方式 |
-    |---|---|---|
-    | p8（6 列） | 本表首行 | 真实列名 `课程内容：…` |
-    | p9–p12（7 列） | 承上页 6 列表头，列数不符 | 位置标注 `列3：…` |
-
-    「无偿献血」在 p9–p12，正是**列数不符**的那批（多的「获奖等级」列在中间，
-    真实对齐无法从数据恢复）—— 所以它只能是 `列3：无偿献血`。
-    `课程内容：无偿献血` 恰恰是 Task 3 修复（a43d895）明确要消灭的错配输出
-    （见 `tests/unit/test_tables.py::test_mismatched_header_count_never_mislabels_columns`），
-    这里断言它反而会把错误行为固化成期望。
-    """
-    from pathlib import Path
+    """★表格在 PageText.text 里是键值行，不再是拍平的单格行。"""
     from app.ingestion.loaders.pdf import load_pdf
     from app.ingestion.tables import GROUP_MARK
 
-    pdf = Path("corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf")
+    pdf = CORPUS / "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf"
     if not pdf.exists():
         pytest.skip("语料不在仓库中")
     res = load_pdf(pdf)
     merged = "\n".join(p.text for p in res.pages)
     assert GROUP_MARK in merged, "表头行必须出现"
-    assert "列3：无偿献血" in merged, "列数不符时数据行按位置标注，值仍自带标签"
-    assert "课程内容：完成相应培训课时" in merged, "列数相符时数据行按真实列名标注"
+    # ⚠️ 别断言 `课程内容：无偿献血` —— doc 12 的「无偿献血」落在 p11，
+    #    那是 7 列的表、继承的是 6 列表头，按 Task 3 的裁定走**位置标注**，
+    #    列名形态根本不存在（第一版断言就是照 p8 的形态写的，是错的）。
+    #    真正要守的是：值还在、且被某个标签正确带着。
+    assert "无偿献血" in merged, "数据行必须出现"
+    # 列名形态（列数相符的表，如 p8）
+    assert "课程内容：完成相应培训课时" in merged, "列数相符的表应按列名配对"
+    # 位置标注形态（列数不符的表，如 p11）
+    assert "列3：无偿献血" in merged, "列数不符的表应按位置标注，值不得错挂列名"
 
 
 def test_pdf_table_text_appears_only_once():
     """★表格内容不能出现两遍（拍平版 + 序列化版）。"""
-    from pathlib import Path
     from app.ingestion.loaders.pdf import load_pdf
 
-    pdf = Path("corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf")
+    pdf = CORPUS / "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf"
     if not pdf.exists():
         pytest.skip("语料不在仓库中")
     res = load_pdf(pdf)
     merged = "\n".join(p.text for p in res.pages)
     assert merged.count("捐献造血干细胞") == 1, "同一个单元格出现了多次"
+
+
+def test_multi_table_page_keeps_reading_order():
+    """★多表页的正文不能被挤到页尾。
+
+    踩过的坑：把「正文块」按前缀排干时，**假设了 `get_text("blocks")` 按 y 递增**。
+    实测 doc 11 的 p3/p4/p6 块表**第 0 项是页脚页码块**（top=776.4，比页上最高的
+    表顶 541.5 还大），排干在 cursor=0 就卡死、一个块都插不进去 —— 整页变成
+    「以【表头】开头」，表格上方的引导正文（「（一）科研成果类…」）全被推到页尾。
+    内容没丢，但阅读顺序错乱，而且**是静默的**。
+    """
+    from app.ingestion.loaders.pdf import load_pdf
+    from app.ingestion.tables import GROUP_MARK
+
+    pdf = CORPUS / "11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    for n in (3, 4, 6):              # 实测这三页各含两张表
+        text = next(p.text for p in res.pages if p.page == n)
+        head = text[:text.find(GROUP_MARK)]
+        assert text.find(GROUP_MARK) > 0, f"p{n} 以表格组开头"
+        assert head.strip(), f"p{n} 第一个表格组之前没有任何正文 —— 阅读顺序错乱"
+
+
+def test_every_table_group_is_blank_line_delimited():
+    """★跨任务接口契约：Task 6 靠「`【表头】` 到下一个空行」切段。
+
+    组**前**的空行是构造保证（每组必先 `append("")`）；组**后**的那一行
+    第一版不是构造保证 —— `append("")` 发生在正文块之前，两张表之间的正文块
+    会挤掉它，于是该组只跟后面隔一个 `\\n`。当前语料恰好不触发（触发要求
+    块表按 y 有序，而多表页的块表第 0 项是页脚），但契约不能靠巧合。
+
+    判据：按空行切页文本，凡是**含**组标记却不**以**组标记开头的块，
+    就说明有一组没被空行定界。
+    """
+    from app.ingestion.loaders.pdf import load_pdf
+    from app.ingestion.tables import GROUP_MARK
+
+    for name in ("11_创新创业拓展课程学分认定管理办法_桂电教2026-13号",
+                 "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号"):
+        pdf = CORPUS / f"{name}.pdf"
+        if not pdf.exists():
+            continue
+        res = load_pdf(pdf)
+        for pg in res.pages:
+            for block in pg.text.split("\n\n"):
+                if block.startswith(GROUP_MARK):
+                    continue
+                assert GROUP_MARK not in block, (
+                    f"{name} p{pg.page} 有一组没被空行定界：{block[:60]!r}")
 
 
 def test_table_group_marker_survives_cleaning():

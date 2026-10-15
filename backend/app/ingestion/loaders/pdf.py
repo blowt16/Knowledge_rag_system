@@ -444,24 +444,42 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
             kept_blocks.append(blk)
             kept_boxes.append(box)
 
-    # ② 序列化每张表，按 bbox 上沿 y 插入到阅读顺序里
-    pieces: list[tuple[float, str]] = []
+    # ② 把「正文块」与「表格组」**按 y 归并**，别依赖 get_text("blocks") 的返回顺序。
+    #
+    # ⚠️⚠️ 本方案第一版是「拿 kept_boxes 当前缀往前排干」，**假设块表按 top 递增**。
+    #     实测这个假设不成立：doc 11 的 p3/p4/p6 块表**第 0 项是页脚页码块**
+    #     （top=776.4，比页上最高的表顶 541.5 还大），排干在 cursor=0 就卡死、
+    #     一个块都插不进去 —— 结果整页落到「以【表头】开头」，表格上方的正文
+    #     （「（一）科研成果类…」这类引导句）全被推到**页尾**。三页中招。
+    #     内容没丢，但阅读顺序错乱，且是静默的。
+    #
+    #     归并排序不依赖输入顺序，从构造上消除这个问题。
+    items: list[tuple[float, int, str]] = []
+    for blk, box in zip(kept_blocks, kept_boxes):
+        items.append((box["top"], 0, blk))          # 0 = 正文块
     for t in tables:
         for g in serialize_groups(t, budget=chunk_size_hint()):
-            pieces.append((t.bbox[1], g))
+            items.append((t.bbox[1], 1, g))         # 1 = 表格组
+    # 同一 y 上正文块在前（kind 0 < 1）
+    items.sort(key=lambda x: (x[0], x[1]))
 
     out: list[str] = []
-    cursor = 0
-    for top, group in sorted(pieces, key=lambda x: x[0]):
-        while cursor < len(kept_boxes) and kept_boxes[cursor]["top"] <= top:
-            out.append(kept_blocks[cursor])
-            cursor += 1
-        out.append("")              # 组前留空行 —— table_atomic_ranges 靠空行切段
-        out.append(group)
-    out.append("")
-    out.extend(kept_blocks[cursor:])
+    for _top, kind, payload in items:
+        if kind == 1:
+            if out:
+                out.append("")      # 组前空行（整页以组开头时不加，否则页文本以空行打头）
+            out.append(payload)
+            out.append("")          # 组后空行 —— **构造保证**，Task 6 靠「到下一个空行」切段
+        else:
+            out.append(payload)
 
-    return "\n".join(out), kept_boxes, (tables[-1] if tables else prev_table)
+    # ⚠️ 块文字自带尾换行（`get_text("blocks")` 如此），与上面补的空行叠加会变成
+    #    `正文\n\n\n【表头】` —— 按 `\n\n` 切段时组被切成「\n【表头】…」：含组标记
+    #    却**不以其开头**，Task 6「【表头】到下一个空行」的判据当场失效
+    #    （实测 doc 11 p3「论文类」后面就是）。收敛口径与 `clean_page` 的
+    #    `_MULTI_BLANK_RE` 一致：三个以上换行 → 一个空行。
+    return (re.sub(r"\n{3,}", "\n\n", "\n".join(out)), kept_boxes,
+            (tables[-1] if tables else prev_table))
 
 
 def load_pdf(path: Path, *, image_dir: Path | None = None) -> LoadResult:
