@@ -1,8 +1,6 @@
 """表格提取与网格归一（§3.4.1 表格支持）。"""
 from __future__ import annotations
 
-import pytest
-
 from app.ingestion.tables import forward_fill, normalize_grid
 
 
@@ -60,6 +58,20 @@ def test_forward_fill_leaves_leading_empty_untouched():
     rows = [["", "b"], ["c", "d"]]
     filled = forward_fill(rows)
     assert [r[0] for r in filled] == ["", "c"]
+
+
+def test_forward_fill_never_shifts_columns_when_first_row_is_short():
+    """★回归锁：第 0 列**整列都空**时，绝不能被别的列的值填进来。
+
+    踩过的坑：`last` 没预置到行宽时，`last[i:i+1] = [cell]` 在越界时是**追加**，
+    于是 last 整体左移一格 —— 第 1 列的值串进第 0 列。
+    实测 doc 12 第 12 页表格首行是 `['', '', '院级', …]`，第 0 列本来就空，
+    正是这条路径的触发形状。
+    """
+    rows = [["", "B", "C"], ["", "E", ""]]
+    filled = forward_fill(rows)
+    assert [r[0] for r in filled] == ["", ""], "第 0 列整列为空，不该出现任何值"
+    assert filled[1][2] == "C", "第 2 列是真合并单元格，应照常承上"
 
 
 def test_normalize_handles_table_with_no_data_rows():

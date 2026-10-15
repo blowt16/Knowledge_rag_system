@@ -24,8 +24,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-#: 序列化用的分隔符。**必须避开 `chunker._SENTENCE_END` / `_SECONDARY_END`**，
-#: 否则切分器会在分隔符处断句，把表格组切碎 —— 那正是本次要修的病。
+#: 序列化用的分隔符。
+#:
+#: ⚠️ **只有 `SEP` 需要避开切分器的断句字符**（`chunker._SENTENCE_END` /
+#:    `_SECONDARY_END`）—— 它是列间分隔，落在断句字符上会让 `_best_break`
+#:    从中间断开。`｜`(U+FF5C) 不在那两个集合里，安全。
+#:
+#: ⚠️ `KV`(`：`) 和 `GROUP_MARK` 的尾字符 `】` **确实在 `_SECONDARY_END` 里**
+#:    （实测：`_SECONDARY_END = "，、：)）】」』"`）。**这不影响正确性** ——
+#:    表格组不被切开是靠 Task 4 的 `atomic` 区间保证的，那里是硬边界；
+#:    断句字符只影响组**内部**怎么断，而原子区间根本不给它断的机会。
+#:    别看到这里就以为 KV 需要换 —— 换掉才会破坏「列名：值」的可读性。
 SEP = "｜"          # U+FF5C 全角竖线
 KV = "："           # U+FF1A 全角冒号
 GROUP_MARK = "【表头】"
@@ -68,13 +77,23 @@ def forward_fill(rows: list[list[str]], *,
     last: list[str] = []
     for row in rows:
         new = list(row)
+        # ⚠️ **必须先把 last 补齐到本行宽度**。否则 `last[i]` 在首行较短时越界，
+        #    而 `last[i:i+1] = [cell]` 在越界时的语义是**追加**（不是赋值），
+        #    于是后面所有列的「last」整体左移一格 —— 实测：
+        #      forward_fill([["", "B", "C"], ["", "E", ""]])
+        #      错： [["", "B", "C"], ["B", "E", ""]]   ← B 从第 1 列串到第 0 列
+        #      对： [["", "B", "C"], ["", "E", "C"]]
+        #    这不是理论风险：doc 12 第 12 页表格的首行就是 `['', '', '院级', …]`，
+        #    第 0 列本来就空，正好触发。
+        while len(last) < len(new):
+            last.append("")
         for i, cell in enumerate(new):
             if i in skip_cols:
-                last[i:i + 1] = [cell]
+                last[i] = cell
                 continue
             if cell.strip():
-                last[i:i + 1] = [cell]
-            elif i < len(last) and last[i]:
+                last[i] = cell
+            elif last[i]:
                 new[i] = last[i]
         out.append(new)
     return out
