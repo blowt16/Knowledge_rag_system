@@ -69,12 +69,18 @@ def chunk_text(
     min_size: int | None = None,
     boundaries: list[int] | None = None,
     base_offset: int = 0,
+    atomic: list[tuple[int, int]] | None = None,
 ) -> list[ChunkSpan]:
     """把文本切成 chunk。
 
     `boundaries` 是一组**不允许跨越**的字符偏移（如 PPTX 的幻灯片起始位置）。
     切分遇到下一个 boundary 就收尾，即使还没到 chunk_size。
     `base_offset` 加到 char_start/char_end 上，用于分页拼装后仍指向全局规范化文本。
+
+    `atomic` 是一组**不允许切开**的区间 `[(start, end), ...]`（表格组）。
+    ⚠️ 光有 `boundaries` 挡不住表格被切 —— `_best_break` 是**从 limit 往回找**
+       断句点，所以组内只要有 `；`/`：` 就会提前断开。原子区间是唯一的保证。
+       区间**优先于 boundary**：表格不切断 > chunk 不跨页。
     """
     chunk_size = chunk_size or int(cfg("chunking.chunk_size", 500))
     overlap = overlap if overlap is not None else int(cfg("chunking.chunk_overlap", 50))
@@ -86,38 +92,57 @@ def chunk_text(
 
     hard_stops = sorted(b for b in (boundaries or []) if 0 < b < len(text))
 
+    # 原子区间：丢掉越界/退化的、按起点排序 —— 调用方传错不该让整篇入库失败
+    spans_atomic = sorted(
+        (s, e) for s, e in (atomic or []) if 0 <= s < e <= len(text)
+    )
+
     chunks: list[ChunkSpan] = []
     index = 0
     pos = 0
     total = len(text)
 
-    while pos < total:
-        # 本 chunk 的硬上界：不超过下一个 boundary
-        hard_limit = total
-        for b in hard_stops:
-            if b > pos:
-                hard_limit = min(hard_limit, b)
-                break
-
-        limit = min(pos + chunk_size, hard_limit)
-        floor = min(pos + max(min_size, chunk_size // 4), limit)
-        end = _best_break(text, pos, limit, floor=floor)
-
-        piece = text[pos:end]
+    def _emit(start: int, end: int) -> None:
+        nonlocal index
+        piece = text[start:end]
         if piece.strip():
             chunks.append(ChunkSpan(
                 chunk_index=index,
-                char_start=base_offset + pos,
+                char_start=base_offset + start,
                 char_end=base_offset + end,
                 text=piece.strip(),
             ))
             index += 1
 
+    while pos < total:
+        # ---- ① 落在原子区间起点：整段吐出，不切、不重叠 ----
+        hit = next(((s, e) for s, e in spans_atomic if s <= pos < e), None)
+        if hit is not None:
+            _emit(hit[0], hit[1])
+            pos = hit[1]
+            continue
+
+        # ---- ② 普通文本：先按 boundary 收窄 ----
+        hard_limit = total
+        for b in hard_stops:
+            if b > pos:
+                hard_limit = min(hard_limit, b)
+                break
+        # 下一个原子区间起点也是硬上界 —— 正文不该吃进表格
+        for s, _e in spans_atomic:
+            if s > pos:
+                hard_limit = min(hard_limit, s)
+                break
+
+        limit = min(pos + chunk_size, hard_limit)
+        floor = min(pos + max(min_size, chunk_size // 4), limit)
+        end = _best_break(text, pos, limit, floor=floor)
+        _emit(pos, end)
+
         if end >= total:
             break
-
         if end >= hard_limit:
-            # 撞上 boundary：从 boundary 之后重新开始，不重叠（跨页内容不该混）
+            # 撞上 boundary（或原子区间起点）：从这里重新开始，不重叠
             pos = end
             continue
 
