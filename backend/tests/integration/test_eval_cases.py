@@ -12,13 +12,17 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
 
 from app import db
 from app.core.config import repo_path
+
+# ⚠️ 校验口径**只此一份**：从生成器 import，不在这里另抄。
+#    抄一份就会漂移 —— 生成期放行的答案在集成校验里报「答案不是原文片段」，
+#    而报出来的是一句看不懂的假失败，不是「两边口径不一致」。
+from app.eval.generate import squeeze
 
 FIXTURE = repo_path("backend", "tests", "fixtures", "eval_cases_v1.json")
 
@@ -27,11 +31,6 @@ if FIXTURE.exists():
     CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 
 pytestmark = pytest.mark.skipif(not CASES, reason="题库未生成")
-
-
-def _squeeze(s: str) -> str:
-    """去空白比对 —— 与生成器同一口径（见 app/eval/generate.squeeze）。"""
-    return re.sub(r"\s+", "", s or "")
 
 
 async def test_case_ids_are_unique():
@@ -64,8 +63,10 @@ async def test_doc_number_cases_only_reference_first_five_docs():
 async def test_ground_truth_is_verbatim_in_live_corpus():
     """★★ 核心断言：每一条 ground_truth 都要在**活库正文**里逐字找到。
 
-    ⚠️ 忽略空白比对（与生成器同口径）：规范化正文里有 PDF 提取留下的硬换行，
-       而模型复述时写成一行 —— 那是同一句话，不是改写。
+    ⚠️ 比对口径与生成器**同一份实现**（`app.eval.generate.squeeze`）：忽略空白，
+       外加表格序列化分隔符 `｜`／`：`。规范化正文里有 PDF 提取留下的硬换行，
+       而模型复述时写成一行 —— 那是同一句话，不是改写；
+       表格题的标准答案抄自键值行，中间的 `｜`／`：` 同理不算「字」。
     """
     async with db.tx() as conn:
         rows = await conn.fetch(
@@ -90,7 +91,7 @@ async def test_ground_truth_is_verbatim_in_live_corpus():
         if not gt:
             continue
         if c["case_type"] == "restricted":
-            if _squeeze(gt) not in _squeeze(restricted_src):
+            if squeeze(gt) not in squeeze(restricted_src):
                 problems.append(f"{c['id']}: 受限题答案不在 restricted_sample.md 里")
             else:
                 restricted_checked += 1
@@ -99,7 +100,7 @@ async def test_ground_truth_is_verbatim_in_live_corpus():
         if title not in texts:
             problems.append(f"{c['id']}: 期望文档不在库里 —— {title}")
             continue
-        if _squeeze(gt) not in _squeeze(texts[title]):
+        if squeeze(gt) not in squeeze(texts[title]):
             problems.append(f"{c['id']}: 答案不是《{title[:20]}》的原文片段")
             continue
         checked += 1

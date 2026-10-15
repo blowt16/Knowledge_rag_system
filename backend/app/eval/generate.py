@@ -74,7 +74,13 @@ def squeeze(s: str) -> str:
     文字（`A：B` 与 `AB`）会被判成同一串 —— 含 `：` 的正文题会校验得更松。
     这是负责人 2026-10-15 明确接受的取舍，不是疏忽。
 
-    `tools/make_eval_cases.py` 与校验脚本都引用这里，不另抄一份。
+    `tools/make_eval_cases.py` 与 `tests/integration/test_eval_cases.py` 都 import
+    这里，不另抄一份 —— 抄一份就会漂移，而漂移之后「生成期放行、校验期报
+    不是原文」是**一句看不懂的假失败**，最难查（实测踩过）。
+
+    ⚠️ 唯一的例外是 `app/eval/sets.py::locate_highlight()`：它要把命中区间映射回
+       **原文偏移**，只能自己逐字符扫一遍，用的是「只去空白」口径。于是界面高亮
+       比这里更严（宁可不高亮，也不高亮错位置）—— 这是有意的，别去「对齐」它。
     """
     return re.sub(r"[\s｜：]+", "", s or "")
 
