@@ -282,9 +282,31 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
     # ② 再向下填充合并单元格
     filled = forward_fill(table.rows)
 
-    headers = ([_escape(h) for h in table.headers]
-               if table.headers else [f"列{i + 1}" for i in range(ncols)])
+    # ⚠️⚠️ **列数不符时绝不按下标配列名。**
+    #
+    # `is_continuation` 允许 ±1 列的容差（实测 doc 12 的 p8 是 6 列、p9–p12 是 7 列，
+    # 多的「获奖等级」列承载真实数据）—— 但**继承到表头不等于能按下标配对**。
+    # 实测按下标硬配会输出：
+    #     …｜课程内容：无偿献血｜开课单位：2分/次｜获得学分方式：团委、各学院
+    # 即把学分值挂到「开课单位」名下、真正的「参考学分」消失、第 7 格被静默丢弃。
+    # 影响 doc 12 的 83 行。**这是「自信的错误标注」——比改造前的拍平文本更糟**，
+    # 因为拍平至少不会说谎，错配会。
+    #
+    # 无法从数据里恢复真实对齐（多出来的列在中间，不在尾部），所以**不猜**：
+    # 逐格按位置标注（`列N`），继承来的表头只作为**上下文**留在表头行里。
+    # 按位置标注永远不会错；按名字错配永远是错的。
+    aligned = bool(table.headers) and len(table.headers) == ncols
+    if aligned:
+        headers = [_escape(h) for h in table.headers]
+    else:
+        headers = [f"列{i + 1}" for i in range(ncols)]
+
     header_line = GROUP_MARK + SEP.join(headers)
+    if table.headers and not aligned:
+        # 承上页继承来的表头仍在，但**不参与逐行配对** —— 明确标出它的身份
+        inherited = SEP.join(_escape(h) for h in table.headers)
+        header_line += f"（承上页表头，列数不符未逐行套用：{inherited}）"
+
     # 扣掉表头 + 一个换行
     body_budget = budget - len(header_line) - 1
 

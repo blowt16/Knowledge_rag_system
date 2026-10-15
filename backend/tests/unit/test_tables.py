@@ -277,6 +277,37 @@ def test_group_starts_with_header_line():
     assert serialize_groups(t, budget=500)[0].splitlines()[0].startswith(GROUP_MARK)
 
 
+def test_mismatched_header_count_never_mislabels_columns():
+    """★列数不符时**绝不按下标配列名** —— 这是本项目要消灭的失效类型。
+
+    实测 doc 12 的 p9–p12：继承来的表头 6 列、数据行 7 列
+    （多的「获奖等级」列承载真实数据）。按下标硬配的实际输出是：
+        …｜课程内容：无偿献血｜开课单位：2分/次｜获得学分方式：团委、各学院
+    —— 学分值被挂到「开课单位」名下，「参考学分」消失，第 7 格被静默丢弃，
+    影响 83 行。**「自信的错误标注」比拍平文本更糟**，因为拍平不会说谎。
+
+    多出来的列在**中间**、不在尾部，真实对齐无法从数据恢复 —— 所以不猜。
+    """
+    t = _tbl(["课程类别", "课程内容", "参考学分"],
+             [["甲类", "无偿献血", "2分/次", "获奖等级值"]])
+    lines = serialize_groups(t, budget=500)[0].splitlines()
+    header, body = lines[0], lines[1]
+
+    assert "参考学分：2分/次" not in body, "值不得挂到错位的列名上"
+    assert "课程内容：无偿献血" not in body, "同上：下标配对整体错位"
+    assert body.startswith("列1：甲类"), "应逐格按位置标注"
+    assert "列4：获奖等级值" in body, "第 4 格必须保留，不得被静默丢弃"
+    assert header.count("承上页表头") >= 1, "继承来的表头要留作上下文"
+    assert "参考学分" in header, "上下文里必须还能看到继承的列名"
+
+
+def test_matching_header_count_still_pairs_by_name():
+    """对照：列数相符时仍按列名配对 —— 别把上面那条修过头了。"""
+    t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
+    body = serialize_groups(t, budget=500)[0].splitlines()[1]
+    assert body == "课程内容：无偿献血｜参考学分：2分/次"
+
+
 def test_header_tokens_are_deducted_before_grouping():
     """★表头先扣预算：每组**含表头**不得超过 budget。
 
