@@ -255,3 +255,93 @@ def test_doc11_anchor_near_bottom_is_not_enough():
     assert prev.bbox[3] > PH * 0.8, "前提：锚表确实伸到了页面下部"
     cur = _t(6, 166, 700, [], [["x"] * 2] * 2)
     assert not is_continuation(cur, prev, page_height=PH)
+
+
+from app.ingestion.tables import GROUP_MARK, SEP, serialize_groups
+from app.ingestion.chunker import _SECONDARY_END, _SENTENCE_END
+
+
+def _tbl(headers, rows):
+    return RawTable(page=1, bbox=(0.0, 0.0, 100.0, 100.0), headers=list(headers), rows=rows)
+
+
+def test_every_row_carries_its_column_names():
+    """★核心断言：序列化后每一行都自带完整列名，切到哪都不丢归属。"""
+    t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
+    groups = serialize_groups(t, budget=500)
+    assert groups[0].splitlines()[1] == "课程内容：无偿献血｜参考学分：2分/次"
+
+
+def test_group_starts_with_header_line():
+    t = _tbl(["参考学分"], [["2分/次"]])
+    assert serialize_groups(t, budget=500)[0].splitlines()[0].startswith(GROUP_MARK)
+
+
+def test_header_tokens_are_deducted_before_grouping():
+    """★表头先扣预算：每组**含表头**不得超过 budget。
+
+    Docling #3428 的 bug 就是没扣，切完再拼表头 → 超 max_tokens。
+    """
+    rows = [[f"行{i}", "1分/次"] for i in range(50)]
+    t = _tbl(["课程内容", "参考学分"], rows)
+    groups = serialize_groups(t, budget=200)
+    for g in groups:
+        assert len(g) <= 200, f"组超预算：{len(g)}"
+
+
+def test_oversized_single_row_becomes_its_own_group():
+    """★单个格子比预算还长 —— 自成一组且**不被切开**（否则死循环）。"""
+    long_cell = "长" * 400
+    t = _tbl(["参考学分"], [[long_cell], ["2分/次"]])
+    groups = serialize_groups(t, budget=200)
+    assert any(long_cell in g for g in groups), "超长行必须完整出现在某一组里"
+
+
+def test_escape_cell_separators():
+    """★单元格里含分隔符或标记 —— 转义后不破坏结构，扫描器不误判。
+
+    ⚠️ 列名数必须与格子数对齐，否则第二个格子根本不会被序列化，
+       断言就成了空转（改这条测试时踩过）。
+    """
+    t = _tbl(["甲列", "乙列"], [["含｜竖线的值", "含【表头】标记的值"]])
+    groups = serialize_groups(t, budget=500)
+    body = groups[0].splitlines()[1]
+    assert body.count(GROUP_MARK) == 0, "正文里不能出现裸的组标记"
+    assert body.count("｜") == 1, "只应有列间那一个分隔符；格子内的 ｜ 必须被转义"
+    assert "【" not in body and "】" not in body, "格子内的 【】 必须被转义"
+
+
+def test_serialization_separators_never_break_a_chunk():
+    """★分隔符必须避开切分器的断句字符，否则组会被切碎。"""
+    assert SEP not in _SENTENCE_END
+    assert SEP not in _SECONDARY_END
+
+
+def test_no_data_rows_yields_no_groups():
+    t = _tbl(["参考学分"], [])
+    assert serialize_groups(t, budget=500) == []
+
+
+def test_projected_row_header_is_skipped_but_its_value_propagates():
+    """★分组行（PRH）不单独成行，但它的值要填充到下面每一行。
+
+    照 PubTables-1M 的定义，「只填第一列」的行是分类分隔（实践实习与社会工作
+    这类），不承载数据。若照常序列化，会产出一条只有 `课程类别：xxx` 的噪声行。
+    """
+    t = _tbl(["课程类别", "课程内容", "参考学分"], [
+        ["实践实习与社会工作", "", ""],          # PRH
+        ["", "无偿献血", "2分/次"],
+        ["", "捐献造血干细胞", "10分/次"],
+    ])
+    body = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(body) == 3, "表头 + 2 条数据行；PRH 不该单独成行"
+    assert body[1] == "课程类别：实践实习与社会工作｜课程内容：无偿献血｜参考学分：2分/次"
+    assert body[2].startswith("课程类别：实践实习与社会工作")
+
+
+def test_forward_fill_does_not_swallow_first_data_row():
+    """填充不能把真实数据行吃掉 —— 首行有数据的行照常输出。"""
+    t = _tbl(["课程类别", "参考学分"], [["甲类", "5分"], ["", "3分"]])
+    body = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(body) == 3
+    assert body[1] == "课程类别：甲类｜参考学分：5分"

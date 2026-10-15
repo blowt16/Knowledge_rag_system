@@ -241,3 +241,77 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
         t.headers = []
         out.append(t)
     return out
+
+
+#: 单元格内容里出现这些字符时的替身 —— 保证正文里**不出现裸的** SEP / GROUP_MARK。
+_ESCAPE = {"｜": "丨", "【": "〔", "】": "〕"}
+
+
+def _escape(cell: str) -> str:
+    for bad, good in _ESCAPE.items():
+        cell = cell.replace(bad, good)
+    return cell
+
+
+def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
+    """把表格按行分组，每组自带表头。
+
+    输出形态（每组是一段文本，组间由调用方用空行分隔）::
+
+        【表头】课程内容｜参考学分
+        课程内容：无偿献血｜参考学分：2分/次
+        课程内容：捐献造血干细胞｜参考学分：10分/次
+
+    ⚠️ **合并单元格的向下填充在这里做**（不在 `inherit_headers` 里）：
+       分组行（PRH）的判定必须在填充**之前** —— 一个只填了第一列的 PRH 行，
+       一经向下填充就变成满格，再也认不出来。
+
+    ⚠️ **表头的长度先从预算里扣掉**，再决定每组放几行。
+       Docling #3428 / LightRAG HeaderRecovery 都是这个做法 ——
+       事后往切好的片里拼表头必然超预算。
+
+    ⚠️ 单行超过预算时**自成一组**，宁可整组超预算也不切开 ——
+       切开就等于回到改造前「标签与值分离」的老问题。
+    """
+    if not table.rows:
+        return []
+
+    ncols = len(table.rows[0])
+    # ① 先在**原始行**上判分组行 —— 顺序不能和 ② 换
+    prh = [is_projected_row_header(r, ncols) for r in table.rows]
+    # ② 再向下填充合并单元格
+    filled = forward_fill(table.rows)
+
+    headers = ([_escape(h) for h in table.headers]
+               if table.headers else [f"列{i + 1}" for i in range(ncols)])
+    header_line = GROUP_MARK + SEP.join(headers)
+    # 扣掉表头 + 一个换行
+    body_budget = budget - len(header_line) - 1
+
+    lines: list[str] = []
+    for row, is_prh in zip(filled, prh):
+        if is_prh:
+            # 分组行只是分类分隔，不承载数据；它的值已被 ② 传播到下面每一行。
+            # 序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
+            continue
+        pairs = [f"{headers[i]}{KV}{_escape(row[i])}"
+                 for i in range(min(len(headers), len(row))) if row[i].strip()]
+        if pairs:
+            lines.append(SEP.join(pairs))
+
+    if not lines:
+        return []
+
+    groups: list[str] = []
+    cur: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line) + 1                     # +1 = 换行
+        if cur and used + cost > body_budget:
+            groups.append(header_line + "\n" + "\n".join(cur))
+            cur, used = [], 0
+        cur.append(line)
+        used += cost
+    if cur:
+        groups.append(header_line + "\n" + "\n".join(cur))
+    return groups
