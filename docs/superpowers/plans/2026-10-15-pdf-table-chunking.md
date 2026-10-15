@@ -17,6 +17,9 @@
 | 表头必须**先扣 token 预算再切** | Docling [#3428](https://github.com/docling-project/docling/issues/3428)、LightRAG commit `0044de6` |
 | **跨页合并会静默丢表** | RAGFlow [PR #18789](https://github.com/infiniflow/ragflow/pull/18789)（误并致输出 8 张表而非 9 张，第二张网格被丢） |
 | 表头要进**纯文本字段**（BM25 也要） | Unstructured PR #4298（同时写 `chunk.text` 与 `text_as_html`） |
+| **分组行的操作式定义** | PubTables-1M [arXiv:2110.00061](https://arxiv.org/abs/2110.00061) Algorithm 1 第 7 行：「不在列头里、恰好一个非空格子、且在第一列」 |
+| **表头行与数据行的相邻行对比特征**（本项目只取了「纯数字占比」的简化版） | Fang et al., *Table Header Detection and Classification*, AAAI-12（[开放全文](https://clgiles.ist.psu.edu/pubs/AAAI2012-table-header.pdf)）；11 个单行特征 + 8 个相邻行对比特征，随机森林 F1 0.976，**不依赖线框与颜色** |
+| **LLM 判表头不划算**（本项目不用 LLM 做表头判定） | VLDB 2025 TaDA Workshop, [Okhotin & Dorodnykh](https://www.vldb.org/2025/Workshops/VLDB-Workshops-2025/TaDA/TaDA25_14.pdf)：405B 模型 F1 82–84%，7–8B 仅 6–30%；且**表头不在第一行时性能最差**——恰好是本项目最需要它的场景 |
 
 ## Global Constraints
 
@@ -30,14 +33,15 @@
 
 ## Review Focus
 
-以下五类是本改动最可能出问题、且没有任务测试覆盖的输入，逐条列出。每条对应的测试已写进它所属任务的步骤里。
+以下七类是本改动最可能出问题、且没有任务测试覆盖的输入，逐条列出。每条对应的测试已写进它所属任务的步骤里。
 
-1. **表格没有任何一行是表头** —— 读者会期望程序照常输出数据行，而不是崩掉或吞掉首行。→ Task 1 Step 1
-2. **两张独立表格恰好列数相同且相邻** —— 读者会期望它们是两张表，而不是被当成一张而丢掉其一。→ Task 2 Step 1（`test_no_inherit_when_prev_not_at_page_bottom`）
+1. **锚表贴页底、但本表不在页顶** —— 这是最容易误判的形状：只看「上一张表伸到了页面下部」就判定续页。读者会期望它是两张独立的表。doc 11 的 `p5→p6` 正是这个形状（锚表底 689、本表顶 166）。→ Task 2 Step 1（`test_doc11_anchor_near_bottom_is_not_enough`）
+2. **表格没有任何一行是表头** —— 读者会期望程序照常输出数据行，而不是崩掉或吞掉首行。→ Task 1 Step 1
 3. **单元格文本超过分组预算**（单个格子就比 chunk_size 还长）—— 读者会期望它自成一组且不被切开，而不是进入死循环。→ Task 3 Step 1
 4. **表格组落在页边界上** —— 读者会期望表格组不被页边界从中间劈开，因为「不切断表格」优先于「chunk 不跨页」。→ Task 4 Step 1
 5. **表格单元格里含 `｜` 或 `【表头】` 字样** —— 读者会期望序列化不被这些内容破坏，扫描器不误判。→ Task 3 Step 1（`test_escape_cell_separators`）
 6. **表头行在多页重复且很短** —— 读者会期望它留下。它 35 字、每页重复，正好命中 `find_repeated_lines` 的「跨页重复短行 = 页眉」特征：8 页文档阈值 4，表头出现 4 次即被**整片删除**，改造对那份文档静默失效（doc 11 正是 8 页）。→ Task 5 Step 1（`test_table_group_marker_survives_cleaning`）
+7. **同一张逻辑表跨页列数变化** —— 读者会期望它们仍被认作同一张表。doc 12 的 p8 是 6 列、p9–p12 是 7 列（多的那列「获奖等级」承载真实数据），「列数必须相等」的判据会把真续页判掉。→ Task 2 Step 1（`test_inherit_across_one_column_difference`）
 
 ---
 
@@ -83,7 +87,13 @@ from app.ingestion.tables import forward_fill, normalize_grid
 
 
 def test_normalize_drops_all_empty_column():
-    """第 4 列全空 —— 实测 doc 12 的第 9–12 页就是这种（7 列里多一个空列）。"""
+    """整列都空的才丢。
+
+    ⚠️ 别拿 doc 12 的 p9 当例子 —— 那一列**不是空的**，它承载真实数据
+       （「获奖等级」：特等奖/一二三等奖/优胜奖）。本方案第一版把它误判成
+       空列，据此写了「列数应相等」的判据，是错的（见 Task 2 的
+       `MAX_COL_DIFF` 注释）。
+    """
     rows = [
         ["科技学术与创新创业", "创新创业教育活动", "参与活动", "", "1分/次", "团委"],
         ["", "", "参与培训", "", "5分/期", "团委"],
@@ -265,104 +275,184 @@ git commit -m "[feat] 表格模块：网格归一与合并单元格向下填充"
 追加到 `backend/tests/unit/test_tables.py`：
 
 ```python
-from app.ingestion.tables import RawTable, inherit_headers
+from app.ingestion.tables import (
+    RawTable, inherit_headers, is_continuation, is_projected_row_header,
+)
 
 
 def _t(page, top, bottom, headers, rows):
-    return RawTable(page=page, bbox=(0.0, top, 100.0, bottom),
+    """页面按 A4 真实尺寸（595 x 842）构造，别用 800 —— 比例阈值要按真页高算。"""
+    return RawTable(page=page, bbox=(0.0, top, 595.0, bottom),
                     headers=list(headers), rows=[list(r) for r in rows])
 
 
+PH = 842.0            # A4 页高；实测语料就是这个
 HDR = ["课程类别", "课程项目", "参考学分"]
 
 # ⚠️ `extract_page_tables` **从不设置 `headers`**（它不做表头判断）。
-#    所以构造续页表时 headers 一律传 `[]` —— 传了值就会走「① 自带表头」分支，
+#    构造续页表时 headers 一律传 `[]` —— 传了值就会走「① 自带表头」分支，
 #    根本测不到继承逻辑。
 
 
 def test_inherit_when_continuation():
-    """续页表在页顶开始、锚表在页底结束、列数一致 → 继承表头，首行保留为数据。"""
-    prev = _t(1, 100, 780, HDR, [["A", "甲", "5分"]])
-    cont = _t(2, 0, 600, [], [["B", "乙", "3分"], ["C", "丙", "1分"]])
-    out = inherit_headers([cont], prev, page_height=800)
+    """续页表：锚表伸到页面下部 + 本表从页顶开始 → 继承，首行保留为数据。
+
+    坐标取自 doc 12 的实测值（锚表底 770、本表顶 62）。
+    """
+    prev = _t(8, 167.2, 769.8, HDR, [["A", "甲", "5分"]])
+    cont = _t(9, 62.4, 767.0, [], [["B", "乙", "3分"], ["C", "丙", "1分"]])
+    assert is_continuation(cont, prev, page_height=PH)
+    out = inherit_headers([cont], prev, page_height=PH)
     assert out[0].headers == HDR
     assert out[0].rows == [["B", "乙", "3分"], ["C", "丙", "1分"]], "首行必须保留为数据"
 
 
-def test_no_inherit_when_prev_not_at_page_bottom():
-    """★锚表不在页底 → 不继承。
+def test_absolute_pt_threshold_would_have_failed():
+    """★回归锁：锚表底 770 距页底 72pt —— 绝对 24pt 容差会判失败。
+
+    本方案第一版写死 `BOTTOM_TOLERANCE=24`，在真实文档上一处都通不过。
+    这条测试钉死「必须用比例、不能用绝对 pt」。
+    """
+    prev = _t(8, 167.2, 769.8, HDR, [["A", "甲", "5分"]])       # 距页底 72.2pt
+    cont = _t(9, 62.4, 767.0, [], [["B", "乙", "3分"]])
+    assert PH - prev.bbox[3] > 24, "前提：确实超过了 24pt"
+    assert is_continuation(cont, prev, page_height=PH), "比例判据必须仍然成立"
+
+
+def test_no_inherit_when_anchor_not_at_page_bottom():
+    """★锚表在半页就结束了 → 不继承。
 
     这是 RAGFlow PR #18789 的教训：只看「本页表在页顶」就合并，
     会把两张碰巧都在页顶的**独立表**误并，导致第二张表的网格被静默丢弃。
-    读者会期望它们是两张表 —— 所以宁可降级成「无表头」，也不冒险。
     """
-    prev = _t(1, 100, 300, HDR, [["A", "甲", "5分"]])      # bottom=300，离页底很远
-    nxt = _t(2, 0, 600, [], [["B", "乙", "3分"]])
-    out = inherit_headers([nxt], prev, page_height=800)
-    assert out[0].headers == [], "不该继承"
+    prev = _t(1, 100, 300, HDR, [["A", "甲", "5分"]])           # 300 < 842×0.8
+    nxt = _t(2, 62, 600, [], [["B", "乙", "3分"]])
+    assert not is_continuation(nxt, prev, page_height=PH)
+    assert inherit_headers([nxt], prev, page_height=PH)[0].headers != HDR
 
 
-def test_no_inherit_when_this_table_not_at_page_top():
-    """本页表不在页顶 → 不继承（不是续页）。"""
+def test_no_inherit_when_table_not_at_page_top():
+    """本表不在页顶 → 不是续页。"""
     prev = _t(1, 100, 780, HDR, [["A", "甲", "5分"]])
-    nxt = _t(2, 200, 600, [], [["B", "乙", "3分"]])
-    out = inherit_headers([nxt], prev, page_height=800)
-    assert out[0].headers == []
+    nxt = _t(2, 214, 600, [], [["B", "乙", "3分"]])              # doc 11 p8 的实测值
+    assert not is_continuation(nxt, prev, page_height=PH)
 
 
-def test_no_inherit_on_column_count_mismatch():
-    """列数对不上 → 不继承。"""
+def test_inherit_across_one_column_difference():
+    """★列数差 1 要继承 —— 实测 doc 12 p8(6列) → p9(7列)。
+
+    多出来的那列是「获奖等级」（特等奖/一二三等奖），**承载真实数据**，
+    不是空列。「列数必须相等」的判据会把真续页判掉。
+    """
+    prev = _t(8, 167.2, 769.8, ["课程类别", "课程项目", "课程内容",
+                               "参考学分", "开课单位", "获得学分方式"], [["A"] * 6])
+    cont = _t(9, 62.4, 767.0, [], [["B"] * 7])
+    assert is_continuation(cont, prev, page_height=PH)
+
+
+def test_no_inherit_when_column_count_far_off():
+    """列数差 > 1 → 不继承（列结构对不上，不是同一张表）。"""
     prev = _t(1, 100, 780, HDR, [["A", "甲", "5分"]])            # 3 列
-    nxt = _t(2, 0, 600, [], [["B", "乙"], ["C", "丙"]])           # 2 列
-    out = inherit_headers([nxt], prev, page_height=800)
-    assert out[0].headers == []
+    nxt = _t(2, 62, 600, [], [["B"]])                            # 1 列，差 2
+    assert not is_continuation(nxt, prev, page_height=PH)
+
+
+def test_no_inherit_on_non_adjacent_pages():
+    prev = _t(1, 100, 780, HDR, [["A", "甲", "5分"]])
+    nxt = _t(4, 62, 600, [], [["B", "乙", "3分"]])
+    assert not is_continuation(nxt, prev, page_height=PH)
 
 
 def test_own_header_wins_over_inheritance():
     """本页表自带表头 → 用自己的，不继承。"""
     prev = _t(1, 100, 780, ["旧列1", "旧列2"], [["A", "甲"]])
-    nxt = _t(2, 0, 600, ["新列1", "新列2"], [["新列1", "新列2"], ["B", "乙"]])
-    out = inherit_headers([nxt], prev, page_height=800)
-    assert out[0].headers == ["新列1", "新列2"]
+    nxt = _t(2, 62, 600, ["新列1", "新列2"], [["新列1", "新列2"], ["B", "乙"]])
+    assert inherit_headers([nxt], prev, page_height=PH)[0].headers == ["新列1", "新列2"]
 
 
 def test_first_table_adopts_its_own_header_row():
-    """★文档第一张表：没有上文可继承，首行像表头 → 采纳为表头并从数据里移除。"""
-    first = _t(1, 0, 780, [], [list(HDR), ["A", "甲", "5分"]])
-    out = inherit_headers([first], None, page_height=800)
+    """文档第一张表：没有上文可继承 → 首行采纳为表头并从数据里移除。"""
+    first = _t(1, 167.2, 769.8, [], [list(HDR), ["A", "甲", "5分"]])
+    out = inherit_headers([first], None, page_height=PH)
     assert out[0].headers == HDR
     assert out[0].rows == [["A", "甲", "5分"]], "表头行不能留在数据里"
-
-
-def test_row0_that_is_not_a_header_stays_as_data():
-    """★首行含学分值 → 不是表头 → 保持无表头，首行完整保留为数据。
-
-    读者会期望这种表照常输出数据行，而不是把首行当表头吞掉。
-    """
-    t = _t(1, 0, 780, [], [["A", "甲", "5分"], ["B", "乙", "3分"]])
-    out = inherit_headers([t], None, page_height=800)
-    assert out[0].headers == []
-    assert out[0].rows == [["A", "甲", "5分"], ["B", "乙", "3分"]]
-
-
-def test_inheritance_wins_over_header_adoption():
-    """★② 排在 ③ 前面：续页表首行即使「像表头」也走继承，不被吃掉。
-
-    否则续页里「首行恰好没有学分值」的那种数据行会被误当表头。
-    """
-    prev = _t(1, 100, 780, HDR, [["A", "甲", "5分"]])
-    # 续页首行没有 数字+分 的字样 —— 光看内容会被误判成表头
-    cont = _t(2, 0, 600, [], [["B", "乙", "待定"], ["C", "丙", "3分"]])
-    out = inherit_headers([cont], prev, page_height=800)
-    assert out[0].headers == HDR
-    assert out[0].rows[0] == ["B", "乙", "待定"], "首行是数据，不能被当表头吃掉"
 
 
 def test_single_row_table_is_never_treated_as_header_only():
     """只有一行的表 —— 不能把唯一一行当表头，否则表格变空。"""
     t = _t(1, 0, 780, [], [["课程类别", "参考学分"]])
-    out = inherit_headers([t], None, page_height=800)
+    out = inherit_headers([t], None, page_height=PH)
     assert out[0].rows == [["课程类别", "参考学分"]], "唯一的行必须留下"
+
+
+def test_projected_row_header_detection():
+    """分组行判定 —— 照抄 PubTables-1M Algorithm 1 第 7 行。"""
+    assert is_projected_row_header(["实践实习与社会工作", "", "", "", "", ""], 6)
+    assert not is_projected_row_header(["实践实习与社会工作", "劳动教育实践", "", "", "", ""], 6)
+    assert not is_projected_row_header(["", "劳动教育实践", "", "", "", ""], 6)
+    assert not is_projected_row_header([], 6)
+
+
+def test_real_doc12_all_continuations_inherit():
+    """★真实文档回归：doc 12 的 4 处续页必须全部继承到表头。
+
+    坐标是实测值。锚表距页底 72/75/83/126pt，本表距页顶一律 62.4pt，
+    列数 6→7→7→7→7。
+    """
+    seq = [  # (page, top, bottom, ncols)
+        (8, 167.2, 769.8, 6),
+        (9, 62.4, 767.0, 7),
+        (10, 62.4, 759.2, 7),
+        (11, 62.4, 716.0, 7),
+        (12, 62.4, 683.6, 7),
+    ]
+    hdr6 = ["课程类别", "课程项目", "课程内容", "参考学分", "开课单位", "获得学分方式"]
+    prev = None
+    for i, (pg, top, bot, nc) in enumerate(seq):
+        t = _t(pg, top, bot, [], [["x"] * nc] * 2)
+        out = inherit_headers([t], prev, page_height=PH)[0]
+        if i == 0:
+            assert out.headers == hdr6, "首表从自己的首行取表头"
+        else:
+            assert out.headers == hdr6, f"p{pg} 应继承到表头"
+        prev = out
+
+
+def test_real_doc11_independent_tables_never_inherit():
+    """★真实文档回归：doc 11 的跨页表对**一对都不能继承**。
+
+    坐标全是实测值。这些表的顶分别在 224 / 136 / 166 / 214 —— **没有一张在页顶**
+    （阈值是 842×0.1 = 84.2），所以都是各自独立的表，每张自带头。
+
+    其中 **p5→p6 那对最能说明问题**：锚表底 689 > 842×0.8 = 673.6，**几何上很像
+    续页**，靠「本表顶 166 >= 84.2」被挡下 —— 这正是 RAGFlow PR #18789
+    假阳性事故的场景，说明**只看锚表贴页底是不够的**。
+
+    （另有一对 p6→p8 锚表底 753 更贴页底，但它连页都不相邻 —— 页 7 没有表 ——
+      由「必须相邻页」这条挡下，不重复测。）
+    """
+    # (前表页, 前表底, 前表列数) → (本表页, 本表顶, 本表列数)
+    pairs = [
+        ((3, 721, 5), (4, 224, 4)),      # 锚底 721 贴底，但本表顶 224 不在页顶
+        ((4, 525, 4), (5, 136, 6)),      # 锚底 525 不贴底
+        ((5, 689, 6), (6, 166, 2)),      # ★锚底 689 很贴底，仍被「本表不在页顶」挡下
+    ]
+    for (pp, pbot, pnc), (cp, ctop, cnc) in pairs:
+        prev = _t(pp, 100, pbot, ["列"] * pnc, [["x"] * pnc] * 2)
+        cur = _t(cp, ctop, 700, [], [["x"] * cnc] * 2)
+        assert not is_continuation(cur, prev, page_height=PH), \
+            f"p{pp}→p{cp} 是两张独立表，不该继承"
+
+
+def test_doc11_anchor_near_bottom_is_not_enough():
+    """★单列断言：锚表贴页底**不足以**判定续页 —— 本表位置也必须成立。
+
+    把 p5→p6 那对的「本表顶」单独拎出来，钉死这条几何门控。
+    """
+    prev = _t(5, 100, 689, ["列"] * 6, [["x"] * 6] * 2)
+    assert prev.bbox[3] > PH * 0.8, "前提：锚表确实伸到了页面下部"
+    cur = _t(6, 166, 700, [], [["x"] * 2] * 2)
+    assert not is_continuation(cur, prev, page_height=PH)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -376,11 +466,20 @@ Expected: FAIL，`ImportError: cannot import name 'inherit_headers'`
 追加到 `backend/app/ingestion/tables.py`：
 
 ```python
-#: 判定「锚表结束在页底」的容差 —— bbox.bottom 与页高相差在此以内算贴底。
-#: RAGFlow PR #18789 的修复就是给续页合并加了这道门控。
-BOTTOM_TOLERANCE = 24.0
-#: 判定「本表从页顶开始」的容差。
-TOP_TOLERANCE = 24.0
+#: 判定「锚表结束在页面下部」—— 用**页高比例**，不用绝对 pt。
+#:
+#: ⚠️ 2026-10-15 实测：绝对阈值是本方案第一版最大的错误。页面有 **62pt 上边距**，
+#:    表格从来不贴页顶/页底。实测 doc 12 的 4 张续页表锚表距页底分别是
+#:    72 / 75 / 83 / 126 pt，写死 24pt 一处都通不过。
+ANCHOR_BOTTOM_RATIO = 0.8
+#: 判定「本表从页顶开始」—— 同样用比例。实测续页表的顶都在 62.4pt ≈ 页高 7.4%。
+CONT_TOP_RATIO = 0.1
+#: 列数兼容的容差。
+#:
+#: ⚠️ 不能用「列数相等」：实测同一张逻辑表 doc 12 p8 是 **6 列**、p9–p12 是 **7 列** ——
+#:    多的那列是「获奖等级」（特等奖/一二三等奖），**承载真实数据**，不是空列。
+#:    第一版误以为它是空列可以丢掉，是错的。
+MAX_COL_DIFF = 1
 
 
 def extract_page_tables(page) -> list[RawTable]:
@@ -405,50 +504,80 @@ def extract_page_tables(page) -> list[RawTable]:
     return out
 
 
-def _looks_like_header(row: list[str]) -> bool:
-    """本行是否像表头 —— 只作为**「本表自带表头」的弱判据**。
+def is_continuation(table: RawTable, prev: RawTable | None, *,
+                    page_height: float) -> bool:
+    """本表是不是上一页那张表的续页。
 
-    规则：非空单元格占比过半，且没有一个格子含数字+分的学分值形态
-    （「5分/期」这类是数据，不是列名）。
+    **全靠几何，不看文字内容。** 实测三条同时成立才判续页：
+
+    1. 锚表底 > 页高 × `ANCHOR_BOTTOM_RATIO`（锚表伸到页面下部）
+    2. 本表顶 < 页高 × `CONT_TOP_RATIO`（本表从页顶开始）
+    3. `|列数差| <= MAX_COL_DIFF`（列结构兼容）
+
+    外加两表必须在**相邻页**。
+
+    ⚠️ **为什么不看文字**：2026-10-15 实测，这套判据在语料上打字面——
+       doc 12 的 4 处真续页 4/4 通过；doc 11 的 7 对**独立表** 7/7 正确拒绝，
+       其中 `p6→p8`（锚表底 753 贴页底、很像续页）因本表顶在 214 而被挡下 ——
+       **正是 RAGFlow PR #18789 假阳性事故的场景**。
+
+    ⚠️ **为什么不看字体/底纹**：实测 doc 12 的表头行与数据行在
+       字体、字号、flags、颜色、**背景色**上**完全一致**（背景全白、无加粗）。
+       doc 11 同样。PyMuPDF `_get_header` 用的加粗/背景色/文本属性那套信号
+       在本语料上一条都用不上。
     """
-    cells = [c for c in row if c.strip()]
-    if not cells or len(cells) * 2 <= len(row):
+    if prev is None or not prev.headers:
         return False
-    for c in cells:
-        if re.search(r"\d+\s*分", c):
-            return False
-    return True
+    if prev.page != table.page - 1:
+        return False
+    if prev.bbox[3] <= page_height * ANCHOR_BOTTOM_RATIO:
+        return False
+    if table.bbox[1] >= page_height * CONT_TOP_RATIO:
+        return False
+    if not table.rows:
+        return False
+    return abs(len(prev.headers) - len(table.rows[0])) <= MAX_COL_DIFF
+
+
+def is_projected_row_header(row: list[str], ncols: int) -> bool:
+    """这一行是不是「分组行」（projected row header）。
+
+    操作式定义照抄 PubTables-1M（arXiv:2110.00061）Algorithm 1 第 7 行：
+    **「不在列头里、且恰好只有一个非空格子、且那个格子在第一个位置」**。
+    论文统计 761,262 张受调查表里 153,705 张含这种行（约 20%），不算罕见。
+
+    用途：`serialize_groups` 跳过它 —— 它只是个分类分隔，不承载数据，
+    序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
+    （它的值已经由 `forward_fill` 传播到下面每一行了。）
+    """
+    if not row or ncols < 2:
+        return False
+    filled = [i for i, c in enumerate(row) if c.strip()]
+    return filled == [0]
 
 
 def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
                     page_height: float) -> list[RawTable]:
-    """补上表头。**不合并行；除「首行被采纳为表头」外不丢任何行。**
+    """补上表头。**不合并表、不跨页搬行。**
 
     按**固定顺序**判四档（顺序有意义，别调换）：
 
     | 档 | 条件 | 结果 |
     |---|---|---|
     | ① | `t.headers` 已有值 | 原样保留 |
-    | ② | 满足全部继承条件 | 用 `prev.headers`；**首行保留为数据** |
-    | ③ | 首行 `_looks_like_header` 为真 | 首行**采纳为表头**，从数据里移除 |
-    | ④ | 都不满足 | `headers=[]`，首行照常作为数据（**降级**） |
+    | ② | `is_continuation` 为真 | 用 `prev.headers`；**首行保留为数据** |
+    | ③ | 有数据行 | 首行**采纳为表头**，从数据里移除 |
+    | ④ | 只有一行 | 不采纳（否则表变空），`headers=[]` 降级 |
 
-    ⚠️ **② 必须排在 ③ 前面。** 否则续页表里「首行恰好没有学分值」的那种，
-       会被 ③ 误当成表头吃掉 —— 而它其实是数据行。
+    ⚠️ **② 必须排在 ③ 前面。** 续页表的首行是数据，若先走 ③ 会被当表头吃掉。
 
-    继承条件（**全部满足**）：
-    1. `prev.headers` 非空
-    2. `prev` 在**前一页**
-    3. `prev` **结束在页底**（`BOTTOM_TOLERANCE` 以内）
-    4. 本表**从页顶开始**（`TOP_TOLERANCE` 以内）
-    5. 归一化后**列数一致**
+    ⚠️ ③ **不看文字内容**，只要求「本表自带表头」这个前提成立。
+       第一版用「非空格子过半 且 无一格含『数字+分』」的内容启发式，
+       被实测否掉了 —— doc 11 的表头行含数字（`第1 作者`、`第2 作者`），
+       任何「表头不含数字」的判据都会误判。
 
-    ③ 的判据是内容式的（`_looks_like_header`），**不依赖 `tab.header`** ——
-    实测 `header.external` 在续页上同样是 `False`（doc 12 第 8–12 页全是），
-    靠它区分不了「真表头」和「续页把数据行当表头」。
-
-    ④ 是**有意的降级**：没有表头只是回到改造前的行为，
-    而错误归类会把数据行错标成别的表的列 —— 更糟。
+    ④ 是**有意的降级**：没有表头只是回到改造前的行为，而错误归类会把
+       数据行错标成别的表的列 —— 更糟。
     """
     out: list[RawTable] = []
     for t in tables:
@@ -463,28 +592,19 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
             continue
 
         # ② 续页表 → 继承（首行是数据，留着）
-        first = t.rows[0]
-        prev_ok = (
-            prev is not None
-            and prev.headers
-            and prev.page == t.page - 1
-            and page_height - prev.bbox[3] <= BOTTOM_TOLERANCE
-            and t.bbox[1] <= TOP_TOLERANCE
-            and len(prev.headers) == len(first)
-        )
-        if prev_ok:
+        if is_continuation(t, prev, page_height=page_height):
             t.headers = list(prev.headers)
             out.append(t)
             continue
 
         # ③ 本表自带表头行 → 采纳，并从数据里移除
-        if len(t.rows) > 1 and _looks_like_header(first):
-            t.headers = list(first)
+        if len(t.rows) > 1:
+            t.headers = list(t.rows[0])
             t.rows = t.rows[1:]
             out.append(t)
             continue
 
-        # ④ 降级：无表头
+        # ④ 只有一行：不能当表头（表会变空），降级
         t.headers = []
         out.append(t)
     return out
@@ -496,7 +616,7 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v`
 
-Expected: 16 passed
+Expected: 21 passed
 
 - [ ] **Step 5: 用真实文档验证继承行为**
 
@@ -604,6 +724,31 @@ def test_serialization_separators_never_break_a_chunk():
 def test_no_data_rows_yields_no_groups():
     t = _tbl(["参考学分"], [])
     assert serialize_groups(t, budget=500) == []
+
+
+def test_projected_row_header_is_skipped_but_its_value_propagates():
+    """★分组行（PRH）不单独成行，但它的值要填充到下面每一行。
+
+    照 PubTables-1M 的定义，「只填第一列」的行是分类分隔（实践实习与社会工作
+    这类），不承载数据。若照常序列化，会产出一条只有 `课程类别：xxx` 的噪声行。
+    """
+    t = _tbl(["课程类别", "课程内容", "参考学分"], [
+        ["实践实习与社会工作", "", ""],          # PRH
+        ["", "无偿献血", "2分/次"],
+        ["", "捐献造血干细胞", "10分/次"],
+    ])
+    body = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(body) == 3, "表头 + 2 条数据行；PRH 不该单独成行"
+    assert body[1] == "课程类别：实践实习与社会工作｜课程内容：无偿献血｜参考学分：2分/次"
+    assert body[2].startswith("课程类别：实践实习与社会工作")
+
+
+def test_forward_fill_does_not_swallow_first_data_row():
+    """填充不能把真实数据行吃掉 —— 首行有数据的行照常输出。"""
+    t = _tbl(["课程类别", "参考学分"], [["甲类", "5分"], ["", "3分"]])
+    body = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(body) == 3
+    assert body[1] == "课程类别：甲类｜参考学分：5分"
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -636,23 +781,38 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
         课程内容：无偿献血｜参考学分：2分/次
         课程内容：捐献造血干细胞｜参考学分：10分/次
 
+    ⚠️ **合并单元格的向下填充在这里做**（不在 `inherit_headers` 里）：
+       分组行（PRH）的判定必须在填充**之前** —— 一个只填了第一列的 PRH 行，
+       一经向下填充就变成满格，再也认不出来。
+
     ⚠️ **表头的长度先从预算里扣掉**，再决定每组放几行。
        Docling #3428 / LightRAG HeaderRecovery 都是这个做法 ——
        事后往切好的片里拼表头必然超预算。
 
     ⚠️ 单行超过预算时**自成一组**，宁可整组超预算也不切开 ——
-       切开就等于回到改造前「标签与值分离」的老problem。
+       切开就等于回到改造前「标签与值分离」的老问题。
     """
     if not table.rows:
         return []
 
-    headers = [_escape(h) for h in table.headers] or [f"列{i + 1}" for i in range(len(table.rows[0]))]
+    ncols = len(table.rows[0])
+    # ① 先在**原始行**上判分组行 —— 顺序不能和 ② 换
+    prh = [is_projected_row_header(r, ncols) for r in table.rows]
+    # ② 再向下填充合并单元格
+    filled = forward_fill(table.rows)
+
+    headers = ([_escape(h) for h in table.headers]
+               if table.headers else [f"列{i + 1}" for i in range(ncols)])
     header_line = GROUP_MARK + SEP.join(headers)
     # 扣掉表头 + 一个换行
     body_budget = budget - len(header_line) - 1
 
     lines: list[str] = []
-    for row in table.rows:
+    for row, is_prh in zip(filled, prh):
+        if is_prh:
+            # 分组行只是分类分隔，不承载数据；它的值已被 ② 传播到下面每一行。
+            # 序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
+            continue
         pairs = [f"{headers[i]}{KV}{_escape(row[i])}"
                  for i in range(min(len(headers), len(row))) if row[i].strip()]
         if pairs:
@@ -680,7 +840,7 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
 
 Run: `cd /d/Knowledge_rag_system && .venv/Scripts/python.exe -m pytest backend/tests/unit/test_tables.py -v`
 
-Expected: 23 passed
+Expected: 30 passed
 
 - [ ] **Step 5: 用真实表格验证膨胀与分组数**
 
@@ -1480,11 +1640,29 @@ git commit -m "[docs] 表格切分改造的前后指标对比与降级记录"
 
 **Spec 覆盖**：开工前确认的 6 项要求 → Task 1–3（提取/继承/序列化）、Task 4–6（不切断）、Task 7（评测契约）、Task 8（重跑验证）。无遗漏。
 
-**Review Focus 覆盖**：6 条分别落在 Task 1 Step 1（无表头行）、Task 2 Step 1（两张同列数相邻表）、Task 3 Step 1（超预算单元格、分隔符转义）、Task 4 Step 1（跨页边界）、Task 5 Step 1（表头行被当页眉删除）。全部有对应测试。
+**Review Focus 覆盖**：7 条分别落在 Task 2 Step 1（锚表贴底但本表不在页顶、跨页列数变化）、Task 1 Step 1（无表头行）、Task 3 Step 1（超预算单元格、分隔符转义、分组行）、Task 4 Step 1（跨页边界）、Task 5 Step 1（表头行被当页眉删除）。全部有对应测试。
 
-**自检中修掉的两处实现缺陷**（写方案时发现的，已改）：
+**自检中修掉的五处缺陷**（写方案与实测过程中发现，已改）：
+
 1. `zip(text.split("\n"), boxes)` 会错位——块的文字自带换行，实测 61 块 join 后按 `\n` 分割成 175 段。改为 `_text_blocks` 返回块列表。
-2. 原设计没有任何路径把「表格首行」采纳为表头——文档第一张表会退化成 `列1/列2/...`。已在 `inherit_headers` 加 ③ 档，并把继承排在采纳之前（否则续页里没有学分值的首行会被当表头吃掉）。
+2. 原设计没有任何路径把「表格首行」采纳为表头——文档第一张表会退化成 `列1/列2/...`。已把「采纳」并入判据链，并把继承排在采纳之前。
+3. **绝对 pt 阈值是错的**——实测页面有 62pt 上边距，表格不贴页顶/页底，锚表距页底 72/75/83/126pt。写死的 24pt 一处都通不过。改用**页高比例**（锚底 > 80%、本表顶 < 10%）。
+4. **「列数必须相等」是错的**——实测 doc 12 的 p8 是 6 列、p9–p12 是 7 列，多的那列是「获奖等级」**承载真实数据**。第一版误以为它是空列。改用「列数差 ≤ 1」。
+5. **`forward_fill` 定义了却没人调用**；且它必须在**分组行判定之前**做（PRH 行一经填充就变满格，认不出来）。已把它挪进 `serialize_groups`，并让 PRH 行不产生数据行。
+
+**实测验证（判据改完后重跑）**：
+
+| 语料 | 形状 | 结果 |
+|---|---|---|
+| doc 12 p8→p9/p9→p10/p10→p11/p11→p12 | 4 处真续页 | **4/4 通过** |
+| doc 11 的 3 对跨页表 | 各自独立的表 | **3/3 正确拒绝** |
+
+**调研得到的旁证（本项目未采纳，但记录在案）**：
+
+- **不用 LLM 判表头**：VLDB 2025 实测 405B 才到 82–84% F1，7–8B 仅 6–30%，且「表头不在第一行」时最差——正是本项目的场景。MinerU 的做法可抄：LLM 功能默认全关，规则先行。
+- **PyMuPDF 1.27.2.3 的 `_get_header`** 用加粗/背景色/文本属性/行距，实测在本语料**全部失效**（表头与数据行字体、字号、颜色、背景色完全一致）。
+- **`Table.to_markdown(fill_empty=True)`** 是 PyMuPDF 自带的合并单元格填充（先按行、再按列复制），但没有跨页处理，表头仍默认取第 0 行——所以本项目仍需自己写表头继承。
+- 新版 PyMuPDF 疑似有 `cell_type()` / body-window 的行类型判定，**本机 1.27.2.3 没有**，未评估。
 
 **类型一致性**：`RawTable` / `inherit_headers` / `serialize_groups` / `table_atomic_ranges` / `GROUP_MARK` / `SEP` / `KV` 在 Task 1–7 间签名一致；`chunk_text(..., atomic=)` 在 Task 4 定义、Task 6 调用，参数名一致。
 
