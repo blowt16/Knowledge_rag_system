@@ -37,6 +37,11 @@ def make_chunk_id(document_id: str, chunk_index: int) -> str:
     return f"{document_id}:{chunk_index}"
 
 
+def chunk_size_hint() -> int:
+    """表格分组的预算 —— 与 chunk_size 同源，避免两处各写一个数。"""
+    return int(cfg("chunking.chunk_size", 500))
+
+
 def _best_break(text: str, start: int, limit: int, *, floor: int) -> int:
     """在 [floor, limit] 区间里找一个尽量靠后的断句点。
 

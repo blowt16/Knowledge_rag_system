@@ -378,8 +378,13 @@ def _extract_images(doc: "fitz.Document", page: "fitz.Page", page_no: int,
     return saved
 
 
-def _text_blocks(page: "fitz.Page") -> tuple[str, list[dict]]:
-    """取文字 + 逐块 bbox。"""
+def _text_blocks(page: "fitz.Page") -> tuple[list[str], list[dict]]:
+    """取逐块文字与 bbox。
+
+    ⚠️ 返回**块列表**，不是 join 好的字符串：块的文字自带换行，
+       拿 join 后的串去和 bbox 一一对齐会严重错位（61 块 → 175 段）。
+       表格剔除按 `zip(blocks, boxes)` 逐块判断，依赖这个一一对应。
+    """
     blocks = page.get_text("blocks")
     parts: list[str] = []
     boxes: list[dict] = []
@@ -390,7 +395,73 @@ def _text_blocks(page: "fitz.Page") -> tuple[str, list[dict]]:
         parts.append(text)
         boxes.append({"x0": round(x0, 1), "x1": round(x1, 1),
                       "top": round(y0, 1), "bottom": round(y1, 1)})
-    return "\n".join(parts), boxes
+    return parts, boxes
+
+
+def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
+                      *, prev_table=None,
+                      page_text: str | None = None) -> tuple[str, list[dict], object]:
+    """把表格区域从拍平文本里换成键值序列化文本。
+
+    ⚠️ 表格的原始拍平文本**必须剔除**，否则表格内容会出现两遍
+       （一遍 get_text("blocks") 的拍平版，一遍序列化版）。
+       剔除依据是 bbox 包含 —— 落进表格 bbox 的块就属于该表。
+
+    ⚠️ 没有表格时返回**调用方算好的页文本**（`page_text`），不要用
+       `"\\n".join(blocks)` 重建 —— 竖排页的 `reverse_line_order` 结果只存在于
+       页文本里，块列表里没有；重建会把反转整个丢掉，成文日期随即被清洗规则
+       当页码删掉（实测：竖排恢复的回归用例全红）。
+       竖排**且**有表格的页是已知限制：那种页拿到的仍是未反转的块文本。
+
+    返回 (新文本, 剩余 boxes, 本页最后一张表)。`blocks` 与 `boxes` 必须一一对应。
+    """
+    from app.ingestion.tables import (
+        extract_page_tables, inherit_headers, serialize_groups,
+    )
+    from app.ingestion.chunker import chunk_size_hint
+
+    fallback = page_text if page_text is not None else "\n".join(blocks)
+
+    tables = extract_page_tables(page)
+    if not tables:
+        return fallback, boxes, prev_table
+
+    tables = inherit_headers(tables, prev_table, page_height=page.rect.height)
+    table_boxes = [t.bbox for t in tables if t.rows]
+    if not table_boxes:
+        return fallback, boxes, prev_table
+
+    # ① 剔除落进表格 bbox 的块（2pt 容差）
+    kept_blocks: list[str] = []
+    kept_boxes: list[dict] = []
+    for blk, box in zip(blocks, boxes):
+        inside = any(
+            b[0] - 2 <= box["x0"] and box["x1"] <= b[2] + 2
+            and b[1] - 2 <= box["top"] and box["bottom"] <= b[3] + 2
+            for b in table_boxes
+        )
+        if not inside:
+            kept_blocks.append(blk)
+            kept_boxes.append(box)
+
+    # ② 序列化每张表，按 bbox 上沿 y 插入到阅读顺序里
+    pieces: list[tuple[float, str]] = []
+    for t in tables:
+        for g in serialize_groups(t, budget=chunk_size_hint()):
+            pieces.append((t.bbox[1], g))
+
+    out: list[str] = []
+    cursor = 0
+    for top, group in sorted(pieces, key=lambda x: x[0]):
+        while cursor < len(kept_boxes) and kept_boxes[cursor]["top"] <= top:
+            out.append(kept_blocks[cursor])
+            cursor += 1
+        out.append("")              # 组前留空行 —— table_atomic_ranges 靠空行切段
+        out.append(group)
+    out.append("")
+    out.extend(kept_blocks[cursor:])
+
+    return "\n".join(out), kept_boxes, (tables[-1] if tables else prev_table)
 
 
 def load_pdf(path: Path, *, image_dir: Path | None = None) -> LoadResult:
@@ -404,22 +475,32 @@ def load_pdf(path: Path, *, image_dir: Path | None = None) -> LoadResult:
     doc = fitz.open(path)
     try:
         total = doc.page_count
-        extracted: list[tuple[int, "fitz.Page", str, list[dict]]] = []
+        extracted: list[tuple[int, "fitz.Page", list[str], list[dict]]] = []
         for index in range(total):
             page = doc.load_page(index)
-            text, boxes = _text_blocks(page)
-            extracted.append((index + 1, page, text, boxes))   # 1-based 绝对页码
+            block_texts, boxes = _text_blocks(page)
+            extracted.append((index + 1, page, block_texts, boxes))   # 1-based 绝对页码
 
         # 整份级初判（§E.8.1）：整份像扫描件时，所有页都走 OCR。
         # 注意它是**整份**判据，不能拿它逐页判。
-        whole_scanned = document_looks_scanned(doc, [t for _, _, t, _ in extracted])
+        whole_scanned = document_looks_scanned(
+            doc, ["\n".join(bt) for _, _, bt, _ in extracted])
 
-        for page_no, page, text, boxes in extracted:
+        prev_table = None
+        for page_no, page, block_texts, boxes in extracted:
+            text = "\n".join(block_texts)       # 竖排判定与可用性判定都用 join 后的文本
             if (not whole_scanned) and _page_is_usable(page, text):
                 # 竖排检测必须在清洗之前（E.3.3）
-                ratio = single_char_line_ratio(text)
-                if ratio >= float(cfg("ingestion.vertical_text_single_char_ratio", 0.5)):
+                if single_char_line_ratio(text) >= float(
+                        cfg("ingestion.vertical_text_single_char_ratio", 0.5)):
                     text = reverse_line_order(text)
+
+                # 表格：结构化后替换拍平文本（OCR 路径不碰）
+                # `page_text=text` 把（可能已做竖排反转的）页文本带进去 ——
+                # 没有表格的页必须原样返回它，不能拿块列表重建。
+                text, boxes, prev_table = _text_with_tables(
+                    block_texts, boxes, page, prev_table=prev_table,
+                    page_text=text)
 
                 result.pages.append(PageText(
                     page=page_no,
@@ -430,6 +511,7 @@ def load_pdf(path: Path, *, image_dir: Path | None = None) -> LoadResult:
                 ))
             else:
                 # 不合格的页单独走 OCR —— 不是整份文档（§E.8.6）
+                prev_table = None          # 换页路径要断掉继承链
                 needs_ocr.append(page_no)
     finally:
         doc.close()

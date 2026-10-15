@@ -185,3 +185,65 @@ def test_horizontal_documents_keep_doc_number(loaded):
             continue
         _r, normalized, _s, _c = loaded[name]
         assert doc_number in normalized[:200], f"{name} 文号 {doc_number} 丢失"
+
+
+# ---- ⑤ 表格结构化（Task 5）--------------------------------------------
+
+def test_pdf_table_is_serialized_with_column_names():
+    """★表格在 PageText.text 里是键值行，不再是拍平的单格行。
+
+    ⚠️ 两条断言分别覆盖 `serialize_groups` 的两个分支（实测 doc 12）：
+
+    | 数据 | 表头来源 | 标注方式 |
+    |---|---|---|
+    | p8（6 列） | 本表首行 | 真实列名 `课程内容：…` |
+    | p9–p12（7 列） | 承上页 6 列表头，列数不符 | 位置标注 `列3：…` |
+
+    「无偿献血」在 p9–p12，正是**列数不符**的那批（多的「获奖等级」列在中间，
+    真实对齐无法从数据恢复）—— 所以它只能是 `列3：无偿献血`。
+    `课程内容：无偿献血` 恰恰是 Task 3 修复（a43d895）明确要消灭的错配输出
+    （见 `tests/unit/test_tables.py::test_mismatched_header_count_never_mislabels_columns`），
+    这里断言它反而会把错误行为固化成期望。
+    """
+    from pathlib import Path
+    from app.ingestion.loaders.pdf import load_pdf
+    from app.ingestion.tables import GROUP_MARK
+
+    pdf = Path("corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf")
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    merged = "\n".join(p.text for p in res.pages)
+    assert GROUP_MARK in merged, "表头行必须出现"
+    assert "列3：无偿献血" in merged, "列数不符时数据行按位置标注，值仍自带标签"
+    assert "课程内容：完成相应培训课时" in merged, "列数相符时数据行按真实列名标注"
+
+
+def test_pdf_table_text_appears_only_once():
+    """★表格内容不能出现两遍（拍平版 + 序列化版）。"""
+    from pathlib import Path
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = Path("corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf")
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    merged = "\n".join(p.text for p in res.pages)
+    assert merged.count("捐献造血干细胞") == 1, "同一个单元格出现了多次"
+
+
+def test_table_group_marker_survives_cleaning():
+    """★表头行不能被「跨页重复行」规则当成页眉删掉。
+
+    实测：表头行 35 字 ≤ `find_repeated_lines` 的 `max_len=40`，
+    而它每页都重复。8 页文档的阈值是 `int(8*0.6)=4`，
+    表头在 4 页出现 → **恰好达到阈值会被整片删除**（doc 11 正是 8 页）。
+    结果就是改造对那份文档完全失效，且不报任何错。
+    """
+    from app.ingestion.clean import build_normalized_text
+    from app.ingestion.tables import GROUP_MARK
+
+    hdr = GROUP_MARK + "课程类别｜课程项目｜课程内容｜参考学分｜开课单位｜获得学分方式"
+    pages = [(i + 1, f"第{i + 1}页正文。\n{hdr}\n课程类别：甲｜参考学分：5分") for i in range(8)]
+    normalized, _ = build_normalized_text(pages)
+    assert normalized.count(GROUP_MARK) == 8, "每个表头行都必须留下"

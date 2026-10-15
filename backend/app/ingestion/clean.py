@@ -16,6 +16,8 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 
+from app.ingestion.tables import GROUP_MARK
+
 # 独立数字行（页码）：`^\\d{1,4}$`
 _PAGE_NUMBER_RE = re.compile(r"^\s*[-—–]?\s*\d{1,4}\s*[-—–]?\s*$")
 # 目录行：`第一章 ................ 3`
@@ -65,7 +67,7 @@ def find_repeated_lines(pages: list[str], *, min_ratio: float = 0.6,
 
 
 def clean_page(text: str, *, repeated: set[str] | None = None) -> str:
-    """清洗单页。规则：控制字符 / 页眉页脚 / 页码行 / 目录行。"""
+    """清洗单页。规则：控制字符 / 页眉页脚 / 页码行 / 目录行，表格组标记豁免。"""
     text = _strip_control(text)
     repeated = repeated or set()
 
@@ -76,6 +78,11 @@ def clean_page(text: str, *, repeated: set[str] | None = None) -> str:
 
         if not stripped:
             kept.append("")
+            continue
+        if stripped.startswith(GROUP_MARK):
+            # 表格组标记永不删 —— 它每页重复且很短，正好命中「页眉页脚」特征。
+            # 删掉就等于把整个表格改造静默作废（见 clean_page 的测试）。
+            kept.append(_MULTI_SPACE_RE.sub(" ", line))
             continue
         if stripped in repeated:
             continue
