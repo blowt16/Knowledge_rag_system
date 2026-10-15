@@ -337,3 +337,42 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
     if cur:
         groups.append(header_line + "\n" + "\n".join(cur))
     return groups
+
+
+def table_atomic_ranges(normalized: str) -> list[tuple[int, int]]:
+    """扫描规范化文本，返回每个表格组的字符区间 —— 交给 `chunk_text(atomic=)`。
+
+    组 = 以 `GROUP_MARK` 开头、到**下一个空行**为止的块。
+    `serialize_groups` 保证组内不出现空行、组间恰好空一行（`pdf.py` 插组时
+    前后各补一个空行并把连续空行收敛成一行），所以「到下一个空行」等价于
+    「到本组结束」—— 后面那 2 格空白落在区间外，正文进来不了。
+
+    ⚠️ **游标必须前进，不能对每组重跑 `find(组文本)`**：
+       一端串重复行被预算切在中间时，相邻两组可以序列化出**逐字节相同**的
+       文本。从头 `find` 会把两组映射到同一个区间 —— 而 `chunk_text` 的命中
+       判据是 `s <= pos < e` 且**不合并重叠区间**：重叠的那段文本会被吐出两次，
+       真正漏掉的那组反而完全不受保护。这里扫的是**唯一**的 `【表头】` 标记
+       （格子内的 `【` 已被 `_escape` 转义，正文里不存在裸标记），游标严格越过
+       上一个标记（`blank > start`，且 `【` 不等于换行），所以区间天然递增、
+       两两不重叠。
+
+    ⚠️ `end` 取 `blank`（空行前那个 `\\n` 的下标），**不取 `blank + 2`**：
+       `text[line_start:blank]` 恰好是组自身；`blank + 2` 会把空行也吃进区间。
+       在本管线里那两格往往正是 `build_normalized_text` 的**页间分隔符**
+       （`parts.append("\\n\\n")`），吃进去 `char_end` 就落到下一页。
+       `chunk_text` 的 `_emit` 对取出的文本做 `strip()`，不含空行不影响产出。
+    """
+    out: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        start = normalized.find(GROUP_MARK, pos)
+        if start == -1:
+            break
+        # 回到行首（GROUP_MARK 前可能缩进）
+        line_start = normalized.rfind("\n", 0, start) + 1
+        # 找下一个空行：组内无空行，所以它就是本组的结束
+        blank = normalized.find("\n\n", start)
+        end = blank if blank != -1 else len(normalized)
+        out.append((line_start, end))
+        pos = end
+    return out

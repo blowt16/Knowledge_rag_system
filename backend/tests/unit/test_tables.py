@@ -376,3 +376,43 @@ def test_forward_fill_does_not_swallow_first_data_row():
     body = serialize_groups(t, budget=500)[0].splitlines()
     assert len(body) == 3
     assert body[1] == "课程类别：甲类｜参考学分：5分"
+
+
+from app.ingestion.tables import table_atomic_ranges
+
+
+def test_atomic_ranges_cover_each_group_block():
+    """每个【表头】开头的块 → 一个原子区间，到下一个空行为止。"""
+    text = "正文。\n\n【表头】A｜B\nA：1｜B：2\n\n【表头】A｜B\nA：3｜B：4\n\n正文继续。"
+    ranges = table_atomic_ranges(text)
+    assert len(ranges) == 2
+    for s, e in ranges:
+        assert text[s:e].startswith(GROUP_MARK)
+
+
+def test_atomic_ranges_do_not_swallow_following_prose():
+    """★区间必须止于块尾，不能把后面的正文一起吃进去。"""
+    text = "【表头】A\nA：1\n\n正文在这里。"
+    (s, e), = table_atomic_ranges(text)
+    assert "正文在这里" not in text[s:e]
+
+
+def test_atomic_ranges_empty_when_no_table():
+    assert table_atomic_ranges("纯正文，没有表格。") == []
+
+
+def test_atomic_ranges_stay_distinct_for_identical_groups():
+    """★相邻两组序列化成**逐字节相同**的文本时，区间必须各自独立。
+
+    重复行被预算切在中间时，相邻两组可以是同一个字符串（同一条表头行、
+    同样的若干行数据）。若解析器对每组都从 0 重跑 `find(组文本)`，
+    两组会映射到**同一个区间** —— 而 `chunk_text` 的命中判据是
+    `s <= pos < e` 且**不合并重叠区间**：重叠区间会让那段文本被吐出两次，
+    真正漏掉的那组则根本不受保护。所以扫描必须靠**游标前进**。
+    """
+    group = "【表头】A｜B\nA：1｜B：2"
+    text = "前文。\n\n" + group + "\n\n" + group + "\n\n后文。"
+    (s1, e1), (s2, e2) = table_atomic_ranges(text)
+    assert s1 != s2, "两组必须映射到不同区间，不能都指回第一组"
+    assert e1 <= s2, "区间必须递增且两两不重叠"
+    assert text[s1:e1] == text[s2:e2] == group

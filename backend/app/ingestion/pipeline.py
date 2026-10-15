@@ -57,6 +57,7 @@ from app.ingestion.enrich import DocumentMeta, build_chunk_metadata
 from app.ingestion.file_type import extension_of, is_supported
 from app.ingestion.loaders import load as load_document
 from app.ingestion.loaders.pdf import extract_chapter_marks
+from app.ingestion.tables import table_atomic_ranges
 from app.services import index_service
 from app.services.index_service import IndexEntry
 
@@ -206,7 +207,14 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
             # PPTX：chunk 不跨幻灯片（§3.4.2）；其余格式也按页断开更稳
             boundaries = [s.char_start for s in slices[1:]]
 
-        spans: list[ChunkSpan] = chunk_text(normalized, boundaries=boundaries)
+        # 表格组是**原子区间**：`pdf.py` 已把它们按「【表头】… 到下一个空行」
+        # 内联进页文本，这里把区间交给切分器 —— 组内不断，也不与正文合块。
+        # 不传 `atomic` 时切分行为与改造前逐字一致（Task 4 的回归保护）。
+        spans: list[ChunkSpan] = chunk_text(
+            normalized,
+            boundaries=boundaries,
+            atomic=table_atomic_ranges(normalized),
+        )
 
         image_by_page = {p.page: p.image_paths for p in result.pages}
         page_boxes = [b for p in result.pages for b in p.bbox]
