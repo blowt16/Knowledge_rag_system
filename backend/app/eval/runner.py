@@ -24,6 +24,8 @@ from typing import Any
 
 from app import db
 from app.graph.builder import get_graph
+# ★ 与模型看到的上下文**同一份渲染实现** —— 评测器绝不另抄一份
+from app.graph.nodes.build_context import render_chunk_block
 from app.graph.state import UserContextLite, new_state
 from app.eval import ragas as ragas_service
 
@@ -251,7 +253,16 @@ async def run_eval(run_id: str) -> None:
             metrics["ms"] = elapsed
 
             answer = final.get("answer") or ""
-            contexts = [c.text for c in _rank_chunks(final)[:TOP_K]]
+            # ★ 送 ragas 的上下文 = **模型看到的那份**：取 state 里的 `evidence`
+            #   （已裁剪、已重排、已编号），用 build_context 的同一个函数逐块渲染。
+            #   ⚠️ 原来是 `_rank_chunks()[:TOP_K]` 的裸 `c.text` —— 既不是编号顺序，
+            #   又丢了 `[n] 《文档名》 · 第 x 页` 头行。文档名（`documents.title`，
+            #   入库时默认取上传文件名的 stem）**正文里一个字都没有**：模型照头行
+            #   写的「根据《…》」在判官眼里成了无出处的话，忠实度被凭空扣掉
+            #   （实测那轮 4 条答案各少一个可验证说法）。
+            evidence = final.get("evidence") or []
+            contexts = [render_chunk_block(c, i)
+                        for i, c in enumerate(evidence, start=1)]
             results.append({
                 "case_id": case["id"], "metrics": metrics, "answer": answer,
                 "retrieved_ids": [c.chunk_id for c in _rank_chunks(final)[:TOP_K]],
@@ -263,8 +274,14 @@ async def run_eval(run_id: str) -> None:
             })
             await _record_progress(run_id, len(results))
 
-            # 有答案、有标准答案才送 ragas（拒答题没有 ground_truth）
-            if answer and case.get("ground_truth") and contexts:
+            # 有答案、有标准答案、**没拒答**才送 ragas。
+            # ⚠️ 拒答必须挡在这里：它在 faithfulness / answer_relevancy 上按构造
+            #    就是 0（回答里没有一个字来自上下文，也不是在回答这个问题），
+            #    送进去等于把「拒答率」混进「答案质量」的均值 —— 实测同一轮
+            #    answer_relevancy 10 题 0.5494、只看 6 道作答题 0.9157，
+            #    差的全是 4 道拒答题。拒答率由 `refused_count` / `refusal_rate` 单独报。
+            if (answer and case.get("ground_truth") and contexts
+                    and not metrics.get("refused")):
                 ragas_samples.append({
                     "user_input": case["question"], "response": answer,
                     "retrieved_contexts": contexts,
@@ -349,6 +366,11 @@ def _aggregate(results: list[dict], ragas: dict) -> dict:
         "ragas": ragas.get("means") or {},
         "ragas_available": bool(ragas.get("available")),
         "ragas_errors": ragas.get("errors") or [],
+        # ★ 上面四项均值**只算在作答（未拒答）的题上** —— 把真实分母记下来，
+        #   否则 6 题算出来的均值会被当成 10 题的读（报告页的结论句要念它）。
+        #   取 `rows` 而不是送出去的样本数：ragas 整批挂掉时 rows 是空的，
+        #   这里的 0 与「均值其实没算出来」一致。
+        "ragas_scored_cases": len(ragas.get("rows") or []),
     }
     # 拒答率的分母按 §9.0 的 M4-D2 口径：**只数 route='knowledge' 的轮次**
     knowledge = [r for r in ok if r["metrics"].get("route") == "knowledge"]

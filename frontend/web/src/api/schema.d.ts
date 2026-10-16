@@ -1324,6 +1324,8 @@ export interface components {
              * @default []
              */
             ragas_errors: string[];
+            /** Ragas Scored Cases */
+            ragas_scored_cases?: number | null;
         };
         /** EvalReportCase */
         EvalReportCase: {

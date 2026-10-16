@@ -41,6 +41,7 @@ const METRIC_LABEL: Record<string, string> = {
   knowledge_count: 'knowledge 轮次',
   refused_count: '拒答题数',
   scored_with_ground_truth: '有参考答案题数',
+  ragas_scored_cases: 'RAGAS 打分题数',
   faithfulness: 'Faithfulness',
   answer_relevancy: 'Answer Relevancy',
   context_precision: 'Context Precision',

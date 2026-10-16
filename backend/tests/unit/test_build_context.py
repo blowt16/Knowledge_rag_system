@@ -142,3 +142,24 @@ def test_header_carries_locator_and_images():
 
 def test_empty_input_yields_empty_pair():
     assert BC.build_evidence([]) == ("", [])
+
+
+def test_context_is_exactly_the_join_of_rendered_blocks():
+    """★ 上下文必须**逐字等于** `render_chunk_block` 的拼接 —— 只有这一份渲染实现。
+
+    评测器送 ragas 的 `retrieved_contexts` 调的是同一个函数（见 `eval/runner.py`）。
+    抄第二份到评测器里的话两份迟早漂移（`squeeze` 已经栽过一次：删掉抄来的
+    `_squeeze`、改成 import 生成器实现），而这里的漂移更隐蔽 ——
+    指标会**在评一段模型从没见过的上下文**，分数低得莫名其妙。
+    """
+    chunks = [
+        _chunk("d1:0", "甲", doc="d1", name="文档一", idx=0, page=3, chapter="第二章"),
+        _chunk("d1:1", "乙", doc="d1", name="文档一", idx=1, page=4, images=["p4_0.jpeg"]),
+    ]
+
+    context, evidence = BC.build_evidence(chunks)
+
+    assert context == "\n".join(
+        BC.render_chunk_block(c, i) for i, c in enumerate(evidence, start=1))
+    # 渲染出来的块要带文档名/页码头与正文（评测器靠它证明「模型看过的」）
+    assert BC.render_chunk_block(evidence[0], 1) == "[1] 《文档一》 · 第二章 · 第 3 页\n甲\n"

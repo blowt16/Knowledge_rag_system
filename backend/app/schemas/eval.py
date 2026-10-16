@@ -107,6 +107,9 @@ class EvalReport(BaseModel):
     #: （环境不在 / 有指标没算出来 / 没有可评分样本）。没有它们就是哑谜。
     ragas_available: bool | None = None
     ragas_errors: list[str] = []
+    #: RAGAS 四项均值的**分母**（只算作答的题，拒答不送）。老轮次没有 → `None`。
+    #: 前端拿它与「用例 N 条」并排显示 —— 6 题的均值不能被当成 10 题的读。
+    ragas_scored_cases: int | None = None
 
 
 class EvalRunDetail(EvalRunSummary):

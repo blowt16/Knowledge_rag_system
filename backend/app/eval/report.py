@@ -20,6 +20,15 @@
 ⚠️ 别和「四项都拿到了分、且真的都是 0」混为一谈（§7.3 末尾）：参考图第 3 行
 就是那种 —— 它有标准答案「换货」，只是检索没找到，**所以那个 0 是真的**。
 
+## 分母是「有分的题」，结论句要念出来
+
+RAGAS 四项只算在**作答（未拒答）**的题上（拒答不送，见 `eval/runner.py`）：
+拒答在 faithfulness / answer_relevancy 上按构造得 0，混进来就是拿**拒答率**
+冒充**答案质量**（实测那一轮 answer_relevancy 10 题 0.5494、6 道作答题 0.9157）。
+所以整轮汇总带 `ragas_scored_cases`，报告透出它、结论句把它念成
+`（6/10 题有分）` —— 6 题的均值不能被当成 10 题的读。老轮次没有这个键，
+结论句照旧不念分母（历史数据是当时的真实口径）。
+
 ## 键名拍平
 
 库里逐题的键是带前缀的 `metrics.ragas_context_recall`，整轮的键是嵌套的
@@ -73,6 +82,13 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
+def _count(value: Any) -> int | None:
+    """计数列要的是非负整数 —— 老轮次的汇总里没有这些键（`None`），布尔要挡掉。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _case_values(case: dict) -> dict[str, float | None]:
     """从**带前缀**的逐题 metrics 里取四项（`ragas_context_recall` 这种）。"""
     metrics = _loads(case.get("metrics"))
@@ -88,6 +104,10 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
     metrics = _loads(run_row.get("metrics")) if run_row.get("metrics") else {}
     available = metrics.get("ragas_available")
     errors = list(metrics.get("ragas_errors") or [])
+    # ★ RAGAS 四张卡的**分母**：均值只算在作答（未拒答）的题上，拒答不送 ragas。
+    #   老轮次没有这个键 → `None`，结论句就不念分母（历史数据照旧口径）。
+    scored = _count(metrics.get("ragas_scored_cases"))
+    cases = _count(metrics.get("cases"))
 
     rows = [{"case_id": c.get("case_id"),
              "question": c.get("question"),
@@ -127,12 +147,14 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
         "report": {
             "composite_score": composite,
             "metrics": cards,
-            "verdict": _verdict(cards, available, errors),
+            "verdict": _verdict(cards, available, errors, scored, cases),
             # ⚠️ 这两个**必须在 report 里**，不能只在 metrics 里：报告页四张卡全「—」时
             #    前端得能说清为什么（环境不在 / 有指标没算出来 / 没有可评分样本）。
             #    没有它们，那就是哑谜。
             "ragas_available": available,
             "ragas_errors": errors,
+            # ★ 均值的分母（老轮次是 `None`）—— 前端拿它与「用例 N 条」并排显示
+            "ragas_scored_cases": scored,
         },
         "cases": rows,
     }
@@ -159,7 +181,23 @@ def _reason(errors: list[str]) -> str:
     return f"{first[:_MAX_REASON_CHARS]}…（完整输出见 ragas_errors 字段与后端日志）"
 
 
-def _verdict(cards: list[dict], available: Any, errors: list[str]) -> str:
+def _denominator(scored: int | None, cases: int | None) -> str:
+    """结论句里的分母尾巴，如 `（6/10 题有分）`。
+
+    ⚠️ RAGAS 四项**只算在作答（未拒答）的题上**（拒答不送，见 `eval/runner.py`）。
+       不把分母念出来，6 题算出来的均值就会被当成 10 题的读 ——
+       实测那一轮 answer_relevancy 10 题 0.5494、6 道作答题 0.9157。
+       老轮次没有这两个数 → 给空串（不硬编一个分母）。
+    """
+    if scored is None:
+        return ""
+    if cases is None:
+        return f"（{scored} 题有分）"
+    return f"（{scored}/{cases} 题有分）"
+
+
+def _verdict(cards: list[dict], available: Any, errors: list[str],
+             scored: int | None = None, cases: int | None = None) -> str:
     """结论句（§7.5）。
 
     大多数时候这一页只有一句话可读，所以它得把「能不能下结论」说清楚，
@@ -174,16 +212,19 @@ def _verdict(cards: list[dict], available: Any, errors: list[str]) -> str:
             return f"{names}没算出来：ragas 隔离环境不可用{why}，见 docs/评测与ragas.md。"
         if reason:
             return f"{names}没算出来：{reason}"
-        return (f"缺少{names} —— 这几项没有可评分的样本（缺标准答案或检索上下文），"
-                "综合得分先不给。")
+        # ⚠️ 「都拒答了」是拒答不进 ragas 之后新增的一种**正常**原因 ——
+        #    不写出来的话，用户会以为环境坏了（校准小集整轮拒答就是这种）
+        return (f"缺少{names} —— 这几项没有可评分的样本"
+                "（缺标准答案、没有检索上下文，或都拒答了），综合得分先不给。")
 
+    denom = _denominator(scored, cases)
     failed = [c for c in cards if not c["passed"]]
     if not failed:
-        return "四项指标都在合理区间。"
+        return f"四项指标都在合理区间{denom}。"
     parts = [f"{LABELS[c['key']]} {c['score']:.4f}"
              f"（差 {c['threshold'] - c['score']:.4f} 到 {c['threshold']}）"
              for c in failed]
-    return "有未达标：" + "；".join(parts) + "。"
+    return f"有未达标{denom}：" + "；".join(parts) + "。"
 
 
 def duration_ms(run_row: dict) -> int | None:

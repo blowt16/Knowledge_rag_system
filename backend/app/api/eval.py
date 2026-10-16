@@ -406,9 +406,12 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
         raise HTTPException(404, detail=f"这些 run 不存在：{missing}")
 
     # 指标全集：所有 run 出现过的键，**按固定顺序**（不然表头会随数据乱跳）
+    # ⚠️ `ragas_scored_cases` 要进表：RAGAS 均值只算作答的题，两行分母不同时
+    #    直接比四项分数就是错的 —— 分母得看得见（口径见 eval/report.py）
     preferred = ["recall_at_k", "mrr", "avg_ms", "refusal_rate",
                  "unauthorized_hits", "uncited_ratio", "citation_invalid",
-                 "cases", "failed", "answered_count", "knowledge_count"]
+                 "cases", "failed", "answered_count", "knowledge_count",
+                 "ragas_scored_cases"]
     ragas_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     # ⚠️ 这三个不是指标，**不能当矩阵列**：`ragas` 是嵌套子字典（下面拍平进 values），
     #    `ragas_available` 恒为 true、`ragas_errors` 是列表 —— 当列只是噪声。

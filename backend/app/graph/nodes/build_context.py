@@ -27,6 +27,10 @@ reranked (Top-5)
    因为本节点是「按文档分组 → 组内按 chunk_index 排序」后才拼 context，
    **prompt 里的顺序 ≠ reranked 的顺序**。拿 reranked 做映射，
    `[1]` 会指向错的 chunk —— **引用错位比漏引用更糟**。
+
+⚠️ **渲染只有一份实现**（`render_chunk_block`）：评测器送 ragas 的
+   `retrieved_contexts` 直接 import 它，与模型看到的上下文逐字同源 ——
+   在评测器里另抄一份，指标就会在评模型从没见过的文本。
 """
 
 from __future__ import annotations
@@ -37,6 +41,30 @@ from app.core.config import cfg
 from app.graph.state import Chunk, NodeTrace, RAGState
 # token 计数只留一份 —— 本节点与 context_service 的水位线必须同一口径
 from app.services.context_service import count_tokens
+
+
+def render_chunk_block(chunk: Chunk, index: int) -> str:
+    """渲染单个证据块：`[n]` 头行 + 正文 + 图片占位，块尾留一个空行。
+
+    ⚠️ **全项目唯一的上下文渲染实现** —— 评测器（`eval/runner.py`）送 ragas 的
+       `retrieved_contexts` 调的是同一个函数，它就是「模型看到了什么」的凭据。
+       另抄一份的话两份迟早漂移（`squeeze` 已经栽过一次），而漂移的后果很隐蔽：
+       **指标在评一段模型没见过的上下文**。头行里的文档名（`documents.title`，
+       默认取上传文件名）正文里一个字都没有 —— 判官看不到这行，模型照它写的
+       「根据《…》」就会被判成无出处的话。
+    """
+    header = f"[{index}] 《{chunk.document_name or '未知文档'}》"
+    locator = []
+    if chunk.chapter:
+        locator.append(chunk.chapter)
+    locator.append(f"第 {chunk.page} 页")
+    if locator:
+        header += " · " + " · ".join(locator)
+    lines = [header, chunk.text]
+    if chunk.images:
+        # 图片只记占位，描述在 E.4.5 已删除
+        lines.append(f"（本段关联图片：{'、'.join(chunk.images)}）")
+    return "\n".join(lines) + "\n"
 
 
 def build_evidence(chunks: list[Chunk]) -> tuple[str, list[Chunk]]:
@@ -68,23 +96,10 @@ def build_evidence(chunks: list[Chunk]) -> tuple[str, list[Chunk]]:
     for group in grouped.values():
         evidence.extend(group)
 
-    lines: list[str] = []
-    for index, chunk in enumerate(evidence, start=1):
-        header = f"[{index}] 《{chunk.document_name or '未知文档'}》"
-        locator = []
-        if chunk.chapter:
-            locator.append(chunk.chapter)
-        locator.append(f"第 {chunk.page} 页")
-        if locator:
-            header += " · " + " · ".join(locator)
-        lines.append(header)
-        lines.append(chunk.text)
-        if chunk.images:
-            # 图片只记占位，描述在 E.4.5 已删除
-            lines.append(f"（本段关联图片：{'、'.join(chunk.images)}）")
-        lines.append("")
-
-    return "\n".join(lines), evidence
+    # ④ 拼装 —— 逐块渲染后拼接，渲染实现只有 `render_chunk_block` 一份
+    return "\n".join(
+        render_chunk_block(chunk, index)
+        for index, chunk in enumerate(evidence, start=1)), evidence
 
 
 async def build_context_node(state: RAGState) -> dict:

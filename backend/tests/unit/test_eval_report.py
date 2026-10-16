@@ -22,10 +22,15 @@ THRESHOLDS = {"context_recall": 0.7, "context_precision": 0.6,
               "faithfulness": 0.8, "answer_relevancy": 0.7}
 
 
-def _run(*, means=None, available=True, errors=None) -> dict:
-    return {"metrics": {"ragas": means or {}, "ragas_available": available,
-                        "ragas_errors": errors or []},
-            "status": "done", "error": None,
+def _run(*, means=None, available=True, errors=None,
+         scored=None, cases=None) -> dict:
+    metrics = {"ragas": means or {}, "ragas_available": available,
+               "ragas_errors": errors or []}
+    if scored is not None:
+        metrics["ragas_scored_cases"] = scored
+    if cases is not None:
+        metrics["cases"] = cases
+    return {"metrics": metrics, "status": "done", "error": None,
             "started_at": None, "finished_at": None}
 
 
@@ -212,8 +217,45 @@ def test_error_column_is_only_filled_for_real_failures():
 # ============================================================
 
 def test_verdict_when_everything_passes():
+    # 老轮次（库里没有 `ragas_scored_cases`）照旧给原句 —— 报告是历史数据的视图
     out = report.build(_run(), [_case("a", **{k: 1.0 for k in RAGAS_KEYS})])
     assert out["report"]["verdict"] == "四项指标都在合理区间。"
+
+
+# ============================================================
+# RAGAS 的分母（2026-10-16 口径修正）
+# ============================================================
+# ⚠️ 四项均值现在只算在**作答的题**上（拒答不送 ragas，见 `eval/runner.py` 的门槛）。
+#    分母变了就必须说出来，否则 6 题算出来的均值会被当成 10 题的读 ——
+#    实测那轮：answer_relevancy 10 题 0.5494、6 道作答题 0.9157。
+
+def test_report_carries_the_ragas_denominator():
+    """整轮汇总里的 `ragas_scored_cases` 要原样进报告 —— 前端拿它和用例数并排显示。"""
+    out = report.build(_run(means={k: 0.9 for k in RAGAS_KEYS}, scored=6, cases=10),
+                       [_case("a", **{k: 0.9 for k in RAGAS_KEYS})])
+    assert out["report"]["ragas_scored_cases"] == 6
+
+
+def test_denominator_is_absent_for_old_runs():
+    """老轮次没有这个字段 → `None`，**不是 0**（0 会被读成「一道都没算」）。"""
+    out = report.build(_run(), [_case("a", **{k: 0.9 for k in RAGAS_KEYS})])
+    assert out["report"]["ragas_scored_cases"] is None
+
+
+def test_verdict_names_the_denominator_when_everything_passes():
+    """结论句要把「几分之几」念出来 —— 这是报告页唯一一句话，漏了就没人知道分母。"""
+    cases = [_case("a", **{k: 0.9 for k in RAGAS_KEYS})]
+    verdict = report.build(
+        _run(means={k: 0.9 for k in RAGAS_KEYS}, scored=6, cases=10),
+        cases)["report"]["verdict"]
+    assert verdict == "四项指标都在合理区间（6/10 题有分）。"
+
+
+def test_verdict_names_the_denominator_when_something_missed():
+    cases = [_case("a", context_recall=0.5, context_precision=0.9,
+                   faithfulness=0.9, answer_relevancy=0.9)]
+    verdict = report.build(_run(scored=3, cases=4), cases)["report"]["verdict"]
+    assert verdict == "有未达标（3/4 题有分）：上下文召回 0.5000（差 0.2000 到 0.7）。"
 
 
 def test_verdict_names_the_ones_that_missed():
@@ -228,6 +270,13 @@ def test_verdict_names_the_ones_that_missed():
 def test_verdict_says_why_when_it_cannot_judge():
     verdict = report.build(_run(), [])["report"]["verdict"]
     assert "上下文召回" in verdict and "缺少" in verdict
+
+
+def test_verdict_mentions_refusal_as_a_way_to_get_no_samples():
+    """拒答**不进 ragas** 之后（见 `eval/runner.py` 的门槛），「四项都没分」
+    多了一种正常原因：整轮都拒答了。不写出来的话，用户只会以为环境坏了。"""
+    verdict = report.build(_run(scored=0, cases=4), [])["report"]["verdict"]
+    assert "拒答" in verdict
 
 
 def test_verdict_never_embeds_a_raw_diagnostic_dump():

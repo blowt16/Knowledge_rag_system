@@ -53,10 +53,13 @@ def no_ragas(monkeypatch):
 
 
 def _final(doc_ids: list[str], *, answer: str = "生成的答案",
-           refused: bool = False) -> dict:
-    chunks = [Chunk(chunk_id=f"c{i}", text=f"片段{i}", document_id=d)
+           refused: bool = False, document_name: str = "") -> dict:
+    chunks = [Chunk(chunk_id=f"c{i}", text=f"片段{i}", document_id=d,
+                    document_name=document_name)
               for i, d in enumerate(doc_ids)]
-    return {"reranked": chunks, "answer": answer, "refused": refused,
+    # 真图里 build_context 会把编号后的 `evidence` 写进 state —— 假图照做，
+    # 评测器取的正是它（`retrieved_contexts` 来自 `final["evidence"]`，不是 reranked）
+    return {"reranked": chunks, "evidence": chunks, "answer": answer, "refused": refused,
             "route": "knowledge", "decision": "answer", "verify_report": {}}
 
 
@@ -359,6 +362,100 @@ async def test_stale_cleanup_writes_the_error_column():
         assert row["status"] == "failed"
         assert row["error"] and "stale" in row["error"], \
             f"「失败原因」列是空的（只有 metrics.error）：{row['error']!r}"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+# ============================================================
+# 喂给 ragas 的样本（两块历史伤口的护栏）
+# ============================================================
+# ⚠️ 实测（2026-10-15 的 `第二课堂评分表专项` 那轮，库里 d0b270f4）：
+#    ragas 拿到的是 `c.text`，**丢了模型看到的那行 `[n] 《文档名》 · 第 x 页`**；
+#    而文档名是上传文件名，正文里一个字都没有 —— 模型照着头部写的
+#    「根据《12_第二课堂成绩单制度实施办法…》」在 ragas 眼里全是无出处的话。
+#    同一轮再把拒答（faithfulness / answer_relevancy 按构造 = 0）也塞了进去，
+#    于是 answer_relevancy 10 题 0.5494、只看 6 道作答题 0.9157。
+
+@pytest.fixture
+def ragas_samples(monkeypatch):
+    """把 ragas 换成可控假实现，并把**实际送进去的样本**抄一份出来。"""
+    samples: list[dict] = []
+
+    async def fake(batch, *a, **kw):
+        samples.extend(batch)
+        row = {"faithfulness": 1.0, "answer_relevancy": 1.0,
+               "context_precision": 1.0, "context_recall": 1.0}
+        return {"available": True, "ok": True, "rows": [dict(row) for _ in batch],
+                "means": dict(row), "errors": [], "ms": 0}
+
+    monkeypatch.setattr(runner.ragas_service, "score_samples", fake)
+    return samples
+
+
+async def test_ragas_contexts_are_what_the_model_saw(scratch_set, monkeypatch,
+                                                     ragas_samples):
+    """★ `retrieved_contexts` = 模型看到的上下文：同一份 evidence、同一个渲染函数。
+
+    三件事一起钉住：① 头行（文档名 + 页码）必须在 —— 判官要能验证
+    「根据《…》」这类话；② 顺序是 **evidence** 的顺序（编号顺序），不是精排顺序；
+    ③ 渲染来自 `build_context.render_chunk_block` 这一份实现，不另抄一份。
+    """
+    doc_name = "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号"
+    final = _final(["d1", "d2"], document_name=doc_name)
+    # 编号顺序 ≠ 精排顺序 —— 真实图中 build_context 是分组重排后才编号的
+    final["evidence"] = list(reversed(final["reranked"]))
+    _graph_returning(monkeypatch, {"题": final})
+    async with db.tx() as conn:
+        await _add_case(conn, scratch_set, "题")
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+    try:
+        await runner.run_eval(run_id)
+
+        assert len(ragas_samples) == 1
+        contexts = ragas_samples[0]["retrieved_contexts"]
+        # ① 头行在、正文紧随其后 —— 判官看得到文档名
+        assert contexts[0] == f"[1] 《{doc_name}》 · 第 1 页\n片段1\n"
+        # ② 顺序跟着 evidence（片段1 在前），不是 reranked
+        assert contexts[1] == f"[2] 《{doc_name}》 · 第 1 页\n片段0\n"
+        # ③ 与 build_context 同一份渲染实现（抄第二份就会在这里漂移）
+        from app.graph.nodes.build_context import render_chunk_block
+        assert contexts == [
+            render_chunk_block(c, i)
+            for i, c in enumerate(final["evidence"], start=1)]
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_refused_cases_are_not_sent_to_ragas(scratch_set, monkeypatch,
+                                                   ragas_samples):
+    """拒答**不进 ragas**：它在 faithfulness / answer_relevancy 上按构造就是 0，
+    送进去等于把「拒答率」混进「答案质量」的均值（实测 10 题 0.5494 vs
+    6 道作答题 0.9157）。拒答仍由 `refused_count` / `refusal_rate` 单独报，
+    而 `ragas_scored_cases` 把均值的**真实分母**记下来 —— 6 题算出来的均值
+    不能被当成 10 题的读。
+    """
+    _graph_returning(monkeypatch, {
+        "答得上的": _final(["d1"]),
+        "答不上的": _final(["d1"], answer="知识库中未找到相关依据，无法回答该问题。",
+                           refused=True),
+    })
+    async with db.tx() as conn:
+        await _add_case(conn, scratch_set, "答得上的")
+        await _add_case(conn, scratch_set, "答不上的")
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+    try:
+        await runner.run_eval(run_id)
+
+        assert [s["user_input"] for s in ragas_samples] == ["答得上的"], \
+            "拒答题不该送 ragas —— 它两项按构造得 0，会把均值整个拉下去"
+        metrics = (await _run_row(run_id))["metrics"]
+        metrics = json.loads(metrics) if isinstance(metrics, str) else metrics
+        assert metrics["ragas_scored_cases"] == 1, "均值算在几道上要落在整轮汇总里"
+        # 拒答在自己的口径里照旧：2 道 knowledge 题里拒了 1 道
+        assert metrics["refused_count"] == 1
+        assert metrics["refusal_rate"] == 0.5
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)

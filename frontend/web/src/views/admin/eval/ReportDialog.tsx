@@ -90,7 +90,13 @@ export function ReportDialog({ detail, onClose }: {
         <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <span>评测集：{detail.set_name ?? '—'}</span>
           <span className="text-muted-foreground">策略：{detail.config_label}</span>
-          <span className="text-muted-foreground">用例 {detail.total_cases ?? 0} 条</span>
+          {/* ⚠️ RAGAS 四项只算在**作答（未拒答）**的题上（拒答不送，见 eval/runner.py），
+              所以分母必须和用例数并排摆着 —— 老轮次没有这个字段，就不显示。 */}
+          <span className="text-muted-foreground">
+            用例 {detail.total_cases ?? 0} 条
+            {typeof report?.ragas_scored_cases === 'number'
+              && `（RAGAS 打分 ${report.ragas_scored_cases} 条）`}
+          </span>
           {detail.status !== 'done' && (
             <span className="text-amber-700 dark:text-amber-500">
               状态：{statusText(detail.status)}
