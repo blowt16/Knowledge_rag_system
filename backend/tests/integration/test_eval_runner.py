@@ -459,3 +459,38 @@ async def test_refused_cases_are_not_sent_to_ragas(scratch_set, monkeypatch,
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_all_none_rows_do_not_count_as_scored(scratch_set, monkeypatch):
+    """★ 分母数的是**真的算出了分的行**，不是 ragas 返回的行数。
+
+    `ragas_runner.py` 的单题失败**不删行**：那一行保留、四项全 `None`
+    （NaN→None，`raise_exceptions=False`），只有某项**整列**都没算出来才进 `errors`。
+    拿 `len(rows)` 当分母就会把全 None 行算成「有分」—— 评审实测 506f109f：
+    63 行里 19 行全 None，四项均值其实只算在 42–43 行上，63 就是那个被误当分母的数。
+    """
+    async def fake(batch, *a, **kw):
+        # 第 1 题判官整题失败（全 None 行），第 2 题正常出分 —— 两行都返回
+        rows = [{"faithfulness": None, "answer_relevancy": None,
+                 "context_precision": None, "context_recall": None},
+                {"faithfulness": 1.0, "answer_relevancy": 1.0,
+                 "context_precision": 1.0, "context_recall": 1.0}]
+        return {"available": True, "ok": True, "rows": rows,
+                "means": {}, "errors": [], "ms": 0}
+
+    monkeypatch.setattr(runner.ragas_service, "score_samples", fake)
+    _graph_returning(monkeypatch, {"题一": _final(["d1"]), "题二": _final(["d1"])})
+    async with db.tx() as conn:
+        await _add_case(conn, scratch_set, "题一")
+        await _add_case(conn, scratch_set, "题二")
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+    try:
+        await runner.run_eval(run_id)
+
+        metrics = (await _run_row(run_id))["metrics"]
+        metrics = json.loads(metrics) if isinstance(metrics, str) else metrics
+        assert metrics["ragas_scored_cases"] == 1, \
+            "全 None 的行没算出分，不能进分母（63 vs 42–43 的那个错）"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)

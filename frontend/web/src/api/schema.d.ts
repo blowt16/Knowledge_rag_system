@@ -1366,6 +1366,8 @@ export interface components {
              * @default false
              */
             passed: boolean;
+            /** Scored Cases */
+            scored_cases?: number | null;
         };
         /** EvalRunCreated */
         EvalRunCreated: {

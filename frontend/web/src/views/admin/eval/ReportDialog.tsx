@@ -91,7 +91,9 @@ export function ReportDialog({ detail, onClose }: {
           <span>评测集：{detail.set_name ?? '—'}</span>
           <span className="text-muted-foreground">策略：{detail.config_label}</span>
           {/* ⚠️ RAGAS 四项只算在**作答（未拒答）**的题上（拒答不送，见 eval/runner.py），
-              所以分母必须和用例数并排摆着 —— 老轮次没有这个字段，就不显示。 */}
+              所以分母必须和用例数并排摆着 —— 老轮次没有这个字段，就不显示。
+              这是**整轮**的计数（有几道题拿到了分）；每张卡各自的均值分母在卡片上
+              （单题判官失败的行值全 None、不算有分，各指标可以不同）。 */}
           <span className="text-muted-foreground">
             用例 {detail.total_cases ?? 0} 条
             {typeof report?.ragas_scored_cases === 'number'
@@ -149,9 +151,13 @@ export function ReportDialog({ detail, onClose }: {
                     : c.passed ? 'text-success' : 'text-destructive'
                 }`}
                    title={missing ? (report?.ragas_errors?.join('；') || missingWhy) : undefined}>
+                  {/* ⚠️ 分母就写在**这张卡自己的分数旁边**（`scored_cases`，服务端算的）：
+                      各指标的均值分母可以不同（判官偶发单题失败）—— 决不拿整轮的大数字盖上来。 */}
                   {missing
                     ? missingWhy
-                    : `${c.passed ? '达标' : '未达标'}（≥ ${c.threshold}）`}
+                    : `${c.passed ? '达标' : '未达标'}（≥ ${c.threshold}`
+                      + (typeof c.scored_cases === 'number' ? `，${c.scored_cases} 题有分` : '')
+                      + '）'}
                 </p>
               </div>
             )

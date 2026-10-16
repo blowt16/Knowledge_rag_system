@@ -368,9 +368,15 @@ def _aggregate(results: list[dict], ragas: dict) -> dict:
         "ragas_errors": ragas.get("errors") or [],
         # ★ 上面四项均值**只算在作答（未拒答）的题上** —— 把真实分母记下来，
         #   否则 6 题算出来的均值会被当成 10 题的读（报告页的结论句要念它）。
-        #   取 `rows` 而不是送出去的样本数：ragas 整批挂掉时 rows 是空的，
-        #   这里的 0 与「均值其实没算出来」一致。
-        "ragas_scored_cases": len(ragas.get("rows") or []),
+        #   ⚠️ 数的是**真的算出了分的行**（至少一项非 None），不是返回的行数：
+        #   `tools/ragas_runner.py` 的单题失败**不删行**（NaN→None、保留该行，
+        #   只在该项**整列**都没算出来时才进 errors）—— 拿 `len(rows)` 当分母会
+        #   把全 None 行算成「有分」（评审实测 506f109f：63 行里 19 行全 None，
+        #   均值其实只算在 42–43 行上）。ragas 整批挂掉时 rows 是空的，
+        #   这里的 0 与「一个均值都没算出来」一致。
+        "ragas_scored_cases": sum(
+            1 for r in (ragas.get("rows") or [])
+            if any(v is not None for v in r.values())),
     }
     # 拒答率的分母按 §9.0 的 M4-D2 口径：**只数 route='knowledge' 的轮次**
     knowledge = [r for r in ok if r["metrics"].get("route") == "knowledge"]

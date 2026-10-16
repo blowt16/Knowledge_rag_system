@@ -72,10 +72,11 @@ function ragasIssue(row: EvalCompareRow): string | null {
   }
   if (errs) return `部分指标没算出来：${errs}`
   // ⚠️ 还有第三种「空」：环境没问题、也没报错，四项却全是「—」——
-  //    通常是没有可评分样本（缺参考答案/上下文）。不说明的话，
+  //    这一轮本来就没有可评分的样本（缺标准答案、没有检索上下文，
+  //    或整轮都拒答了 —— 拒答不送 ragas，见 eval/runner.py）。不说明的话，
   //    看表的人只能看到四个「—」，照样得去查库。
   if (RAGAS_KEYS.every(k => row.values[k] === null || row.values[k] === undefined)) {
-    return 'ragas 没产出分数（这一轮没有可评分的样本）'
+    return 'ragas 没产出分数（这一轮没有可评分的样本：缺标准答案、没有检索上下文，或都拒答了）'
   }
   return null
 }

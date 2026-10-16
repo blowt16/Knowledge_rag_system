@@ -237,14 +237,23 @@ def test_report_carries_the_ragas_denominator():
 
 
 def test_denominator_is_absent_for_old_runs():
-    """老轮次没有这个字段 → `None`，**不是 0**（0 会被读成「一道都没算」）。"""
+    """老轮次没有这个字段 → `None`，**不是 0**（0 会被读成「一道都没算」）。
+    结论句也照旧不念分母 —— 当时的口径是另一套（拒答也送了 ragas）。
+    卡片上的 `scored_cases` 是**现算的**（描述的就是卡片的均值本身），不受影响。
+    """
     out = report.build(_run(), [_case("a", **{k: 0.9 for k in RAGAS_KEYS})])
     assert out["report"]["ragas_scored_cases"] is None
+    assert "题有分" not in out["report"]["verdict"]
 
 
 def test_verdict_names_the_denominator_when_everything_passes():
-    """结论句要把「几分之几」念出来 —— 这是报告页唯一一句话，漏了就没人知道分母。"""
-    cases = [_case("a", **{k: 0.9 for k in RAGAS_KEYS})]
+    """结论句要把「几分之几」念出来 —— 这是报告页唯一一句话，漏了就没人知道分母。
+
+    ⚠️ 分母念的是**四张卡各自的非 None 计数**（不是整轮 `ragas_scored_cases`）：
+       两者在正常轮次上相等；单题判官失败时卡片的更小，句子必须念小的那个
+       （见下一条的「各指标 2–3」）。
+    """
+    cases = [_case(f"c{i}", **{k: 0.9 for k in RAGAS_KEYS}) for i in range(6)]
     verdict = report.build(
         _run(means={k: 0.9 for k in RAGAS_KEYS}, scored=6, cases=10),
         cases)["report"]["verdict"]
@@ -252,10 +261,47 @@ def test_verdict_names_the_denominator_when_everything_passes():
 
 
 def test_verdict_names_the_denominator_when_something_missed():
-    cases = [_case("a", context_recall=0.5, context_precision=0.9,
-                   faithfulness=0.9, answer_relevancy=0.9)]
+    cases = [_case(f"c{i}", context_recall=0.5, context_precision=0.9,
+                   faithfulness=0.9, answer_relevancy=0.9) for i in range(3)]
     verdict = report.build(_run(scored=3, cases=4), cases)["report"]["verdict"]
     assert verdict == "有未达标（3/4 题有分）：上下文召回 0.5000（差 0.2000 到 0.7）。"
+
+
+def test_card_carries_its_own_denominator():
+    """★ 每张卡带上「这张卡的均值算在几道题上」。
+
+    与整轮 `ragas_scored_cases`（本轮有几道题拿到了分）**不是一回事**：
+    单题判官失败时那一行保留、值全 None（`tools/ragas_runner.py` 的 NaN→None），
+    各指标的有分题数可以不同 —— 评审实测 506f109f：召回/精度/忠实度 42、相关性 43，
+    而整轮计数是 44。均值旁边必须是它自己的分母。
+    """
+    cases = [
+        _case("a", context_recall=0.9, context_precision=0.9, faithfulness=0.9,
+              answer_relevancy=0.9),
+        _case("b", context_recall=0.9, context_precision=0.9, faithfulness=0.9,
+              answer_relevancy=0.9),
+        _case("c", context_recall=0.9, context_precision=0.9, answer_relevancy=0.9),
+    ]
+    out = report.build(_run(means={k: 0.9 for k in RAGAS_KEYS}, scored=3, cases=3), cases)
+    cards = {c["key"]: c for c in out["report"]["metrics"]}
+    assert cards["context_recall"]["scored_cases"] == 3
+    assert cards["faithfulness"]["scored_cases"] == 2, \
+        "c 题没算出忠实度 —— 这张卡的分母是 2，不能拿 3 盖上去"
+
+
+def test_verdict_names_the_range_when_metrics_scored_differently():
+    """各指标的有分题数不同（判官偶发单题失败）→ 结论句念**范围**：
+    决不把大样本的数字盖在小样本的均值上（这正是 63 那类错的最小残留版）。"""
+    cases = [
+        _case("a", context_recall=0.9, context_precision=0.9, faithfulness=0.9,
+              answer_relevancy=0.9),
+        _case("b", context_recall=0.9, context_precision=0.9, faithfulness=0.9,
+              answer_relevancy=0.9),
+        _case("c", context_recall=0.9, context_precision=0.9, answer_relevancy=0.9),
+    ]
+    verdict = report.build(_run(means={k: 0.9 for k in RAGAS_KEYS}, scored=3, cases=4),
+                           cases)["report"]["verdict"]
+    assert verdict == "四项指标都在合理区间（各指标 2–3/4 题有分）。"
 
 
 def test_verdict_names_the_ones_that_missed():

@@ -406,8 +406,9 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
         raise HTTPException(404, detail=f"这些 run 不存在：{missing}")
 
     # 指标全集：所有 run 出现过的键，**按固定顺序**（不然表头会随数据乱跳）
-    # ⚠️ `ragas_scored_cases` 要进表：RAGAS 均值只算作答的题，两行分母不同时
-    #    直接比四项分数就是错的 —— 分母得看得见（口径见 eval/report.py）
+    # ⚠️ `ragas_scored_cases` 要进表：RAGAS 均值只算在**真的算出了分**的作答
+    #    题上（拒答不送、判官整题失败的也不算），两行分母不同时直接比四项分数
+    #    就是错的 —— 分母得看得见（口径见 eval/report.py）
     preferred = ["recall_at_k", "mrr", "avg_ms", "refusal_rate",
                  "unauthorized_hits", "uncited_ratio", "citation_invalid",
                  "cases", "failed", "answered_count", "knowledge_count",

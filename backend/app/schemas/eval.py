@@ -82,6 +82,11 @@ class EvalReportMetric(BaseModel):
     score: float | None = None
     threshold: float
     passed: bool = False
+    #: ★ 这张卡的均值**实际算在几道题上**（该项非 None 的题数）。与整轮
+    #: `ragas_scored_cases`（本轮有几道题拿到了分）可能不同 —— 单题判官失败的行
+    #: 会保留、值全是 None（`tools/ragas_runner.py`），各指标的样本数可以不一样
+    #: （评审实测 506f109f：召回/精度/忠实度 42、相关性 43）。老轮次没有这个字段。
+    scored_cases: int | None = None
 
 
 class EvalReportCase(BaseModel):
@@ -107,8 +112,9 @@ class EvalReport(BaseModel):
     #: （环境不在 / 有指标没算出来 / 没有可评分样本）。没有它们就是哑谜。
     ragas_available: bool | None = None
     ragas_errors: list[str] = []
-    #: RAGAS 四项均值的**分母**（只算作答的题，拒答不送）。老轮次没有 → `None`。
-    #: 前端拿它与「用例 N 条」并排显示 —— 6 题的均值不能被当成 10 题的读。
+    #: 本轮**真的算出了 RAGAS 分的题数**（只算作答的题，拒答不送；单题判官失败、
+    #: 值全 None 的行也不算）。老轮次没有 → `None`。前端拿它与「用例 N 条」并排
+    #: 显示 —— 6 题的均值不能被当成 10 题的读。各卡片各自的计数见 `EvalReportMetric`。
     ragas_scored_cases: int | None = None
 
 

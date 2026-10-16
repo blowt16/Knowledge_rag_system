@@ -25,9 +25,14 @@
 RAGAS 四项只算在**作答（未拒答）**的题上（拒答不送，见 `eval/runner.py`）：
 拒答在 faithfulness / answer_relevancy 上按构造得 0，混进来就是拿**拒答率**
 冒充**答案质量**（实测那一轮 answer_relevancy 10 题 0.5494、6 道作答题 0.9157）。
-所以整轮汇总带 `ragas_scored_cases`，报告透出它、结论句把它念成
-`（6/10 题有分）` —— 6 题的均值不能被当成 10 题的读。老轮次没有这个键，
-结论句照旧不念分母（历史数据是当时的真实口径）。
+所以整轮汇总带 `ragas_scored_cases`（**真的算出了分的行数** —— 单题判官失败
+时那一行保留、值全 None，不算有分，见 `eval/runner.py`），报告透出它、
+结论句把它念成 `（6/10 题有分）` —— 6 题的均值不能被当成 10 题的读。
+
+但**每张卡的均值分母可以不同**（判官偶发单题失败，评审实测 42–43 而整轮计数 44）：
+所以卡片自己带 `scored_cases`，结论句念的是四张卡的计数（不一致时报范围
+`（各指标 42–43/90 题有分）`）——均值旁边永远是它**自己的**分母。
+老轮次没有 `ragas_scored_cases` 键，结论句照旧不念分母（历史数据是当时的口径）。
 
 ## 键名拍平
 
@@ -137,6 +142,12 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
             # 缺项时 `passed` 只能是 False —— 但它没有「没达标」的意思，
             # 前端在 `score is None` 时显示「—」而不是红色的「未达标」。
             "passed": score is not None and score >= THRESHOLDS[key],
+            # ★ 这张卡的均值**实际算在几道题上**。与整轮的 `ragas_scored_cases`
+            #   （本轮有几道题拿到了分）不是一回事：单题判官失败时那一行保留、
+            #   值全 None（`tools/ragas_runner.py` 的 NaN→None），各指标可以不同
+            #   （评审实测 506f109f：召回/精度/忠实度 42、相关性 43，整轮计数 44）。
+            #   卡片上写着、结论句念范围 —— 均值旁边必须是它自己的分母。
+            "scored_cases": len(scores),
         })
 
     # **四项齐全才出综合得分**；缺任何一项显示「—」并说明缺哪项
@@ -181,19 +192,30 @@ def _reason(errors: list[str]) -> str:
     return f"{first[:_MAX_REASON_CHARS]}…（完整输出见 ragas_errors 字段与后端日志）"
 
 
-def _denominator(scored: int | None, cases: int | None) -> str:
+def _denominator(scored: int | None, cases: int | None,
+                 counts: list[int] | None = None) -> str:
     """结论句里的分母尾巴，如 `（6/10 题有分）`。
 
     ⚠️ RAGAS 四项**只算在作答（未拒答）的题上**（拒答不送，见 `eval/runner.py`）。
        不把分母念出来，6 题算出来的均值就会被当成 10 题的读 ——
        实测那一轮 answer_relevancy 10 题 0.5494、6 道作答题 0.9157。
-       老轮次没有这两个数 → 给空串（不硬编一个分母）。
+
+    ⚠️ 念出来的数字不是整轮的 `scored`，而是 **`counts`（四张卡各自的非 None 计数）**：
+       单题判官失败的行会保留、值全 None（`tools/ragas_runner.py` 的 NaN→None），
+       各指标的均值分母可以不同（评审实测 506f109f：42–43，整轮计数却是 44 ——
+       直接念 44 就是拿大样本的数字盖在小样本的均值上）。各指标不一致时报范围。
+       老轮次没有 `scored` 这个键 → 给空串（不硬编一个分母）。
     """
     if scored is None:
         return ""
+    if counts:
+        lo, hi = min(counts), max(counts)
+        n = str(lo) if lo == hi else f"各指标 {lo}–{hi}"
+    else:
+        n = str(scored)
     if cases is None:
-        return f"（{scored} 题有分）"
-    return f"（{scored}/{cases} 题有分）"
+        return f"（{n} 题有分）"
+    return f"（{n}/{cases} 题有分）"
 
 
 def _verdict(cards: list[dict], available: Any, errors: list[str],
@@ -217,7 +239,7 @@ def _verdict(cards: list[dict], available: Any, errors: list[str],
         return (f"缺少{names} —— 这几项没有可评分的样本"
                 "（缺标准答案、没有检索上下文，或都拒答了），综合得分先不给。")
 
-    denom = _denominator(scored, cases)
+    denom = _denominator(scored, cases, [c["scored_cases"] for c in cards])
     failed = [c for c in cards if not c["passed"]]
     if not failed:
         return f"四项指标都在合理区间{denom}。"
