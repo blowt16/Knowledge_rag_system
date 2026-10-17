@@ -14,6 +14,21 @@ from app.retrieval import reranker
 
 
 @pytest.fixture(autouse=True)
+def _pin_cross_encoder(monkeypatch):
+    """这些用例测的是 **cross_encoder** 后端，必须显式钉住。
+
+    ⚠️ 为什么不能靠 app.yaml：`_pcfg` 的优先级是「后端专属 → 共用默认」，
+       而配置现在可能切到 `jina_listwise`。不钉住的话：
+         · 阈值用例 patch 的 `reranker.min_score` 会被 `jina_listwise.min_score`
+           覆盖 —— 测试变成在测另一套配置，还看起来全绿；
+         · 预热用例 mock 的 `CrossEncoder` 根本不会被调用（走的是 Jina 分支）。
+       2026-10-17 切后端时正是这样挂了 8 条。
+    """
+    monkeypatch.setattr(reranker, "backend", lambda: "cross_encoder")
+
+
+
+@pytest.fixture(autouse=True)
 def _reset_model_state():
     """模型是模块级全局；用例必须自己清理，否则相互污染。"""
     reranker._model = None
