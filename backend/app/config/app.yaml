@@ -63,10 +63,26 @@ retrieval:
   rrf_weight: 1.0
 
 reranker:
+  # 精排后端。切换模型**只改这一行** —— 模型路径/阈值/长度跟着 profile 走。
+  #   cross_encoder : BAAI bge-reranker-v2-m3（pointwise，CrossEncoder）
+  #   jina_listwise : Jina reranker v3.5（listwise，AutoModel + trust_remote_code）
+  #
+  # ⚠️ 两个后端的分数**刻度不同**，阈值不能混用：bge 的 0.3 套到 Jina 上会把候选全砍光
+  #    （2026-10-17 实测：Jina 对相关块给 0.28–0.50、无关块给 −0.09–0.05）。
+  backend: cross_encoder
+
+  # —— 共用默认（cross_encoder 直接用这些）——
   model_path: models/BAAI/bge-reranker-v2-m3
   device: cuda
   batch_size: 10
   max_length: 512
+  # 后端专属覆盖：**只写与上面不同的项**，没写的继承上面的默认。
+  jina_listwise:
+    model_path: models/jinaai/jina-reranker-v3.5
+    # 实测（2026-10-17，6 条表格题）：阈值 0.1 → 目标块 5/6 通过、无关块 0 误放；
+    # 沿用 0.3 → 0/6（全砍）。0.0 → 5/6 但会放进一条无关块（0.047）。
+    min_score: 0.1
+    max_length: 2048
   # GPU 信号量：同时处理几个请求（显存不足会直接 OOM，必须有）
   max_concurrency: 2
   # 分数阈值：低于该分的 chunk 直接丢弃（全滤掉 → 零成本拒答）。
