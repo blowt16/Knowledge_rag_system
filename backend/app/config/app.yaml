@@ -63,33 +63,46 @@ retrieval:
   rrf_weight: 1.0
 
 reranker:
-  # 精排后端。切换模型**只改这一行** —— 模型路径/阈值/长度跟着 profile 走。
-  #   cross_encoder : BAAI bge-reranker-v2-m3（pointwise，CrossEncoder）
-  #   jina_listwise : Jina reranker v3.5（listwise，AutoModel + trust_remote_code）
-  #
-  # ⚠️ 两个后端的分数**刻度不同**，阈值不能混用：bge 的 0.3 套到 Jina 上会把候选全砍光
-  #    （2026-10-17 实测：Jina 对相关块给 0.28–0.50、无关块给 −0.09–0.05）。
+  # 精排后端。切换模型**只改这一行**，其余全部在下面的 profile 里。
+  #   cross_encoder : BAAI bge-reranker-v2-m3（pointwise，sentence-transformers）
+  #   jina_listwise : Jina Reranker v3.5（listwise，transformers + trust_remote_code）
   backend: jina_listwise
 
-  # —— 共用默认（cross_encoder 直接用这些）——
-  model_path: models/BAAI/bge-reranker-v2-m3
-  device: cuda
-  batch_size: 10
-  max_length: 512
-  # 后端专属覆盖：**只写与上面不同的项**，没写的继承上面的默认。
+  # ============================================================
+  # 后端 A：BAAI bge-reranker-v2-m3 —— pointwise 交叉编码器
+  # ============================================================
+  cross_encoder:
+    model_path: models/BAAI/bge-reranker-v2-m3
+    device: cuda
+    batch_size: 10
+    max_length: 512
+    # 分数阈值：低于该分的 chunk 直接丢弃（全滤掉 → 零成本拒答）。
+    # 0.3 的来历：2026-10-14 用 eval_min20 夹具 294 个候选全量打分实测 ——
+    # 噪声 chunk 下四分位 0.101、中位数 0.476，期望命中 chunk 中位数 0.885，
+    # 0.2–0.6 扫描 Recall@5 零损失。0.3 恰好裁在噪声分布的下 1/4 尾上。设 0 关闭。
+    min_score: 0.3
+
+  # ============================================================
+  # 后端 B：Jina Reranker v3.5 —— listwise（整批一次前向、文档间互相注意）
+  # ============================================================
   jina_listwise:
     model_path: models/jinaai/jina-reranker-v3.5
-    # 实测（2026-10-17，6 条表格题）：阈值 0.1 → 目标块 5/6 通过、无关块 0 误放；
-    # 沿用 0.3 → 0/6（全砍）。0.0 → 5/6 但会放进一条无关块（0.047）。
-    min_score: 0.1
+    device: cuda
+    # listwise 不用 batch_size（整批一起算），保留该键只为两层配置同构
+    batch_size: 10
+    # 模型支持 131K，但语料里的 chunk 都很短；2048 够用且省显存
     max_length: 2048
+    # ⚠️ **刻度与 bge 完全不同，不能沿用 0.3**：
+    #    2026-10-17 实测 6 条表格题 —— 阈值 0.1 → 目标块 5/6 通过、无关块 0 误放；
+    #    沿用 0.3 → 0/6（全砍）；0.0 → 5/6 但会放进一条无关块（0.047）。
+    #    Jina 对相关块给 0.28–0.50、对无关块给 −0.09–0.05。
+    min_score: 0.1
+
+  # ============================================================
+  # 与模型无关的共用项
+  # ============================================================
   # GPU 信号量：同时处理几个请求（显存不足会直接 OOM，必须有）
   max_concurrency: 2
-  # 分数阈值：低于该分的 chunk 直接丢弃（全滤掉 → 零成本拒答）。
-  # 默认 0.3：2026-10-14 用 eval_min20 夹具 294 个候选全量打分实测 ——
-  # 噪声 chunk 下四分位 0.101、中位数 0.476，期望命中 chunk 中位数 0.885，
-  # 0.2–0.6 扫描 Recall@5 零损失。0.3 恰好裁在噪声分布的下 1/4 尾上。设 0 关闭。
-  min_score: 0.3
 
 # 各节点超时（秒）—— 初始值，M5 用真实流量校准（§3.5.3 节点 6）
 timeouts:

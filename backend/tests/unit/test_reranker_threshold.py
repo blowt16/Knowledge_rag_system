@@ -54,7 +54,7 @@ def _patch_scores(monkeypatch, scores: list[float], min_score: float) -> None:
     real_cfg = reranker.cfg
     monkeypatch.setattr(
         reranker, "cfg",
-        lambda path, default=None: min_score if path == "reranker.min_score"
+        lambda path, default=None: min_score if path == "reranker.cross_encoder.min_score"
         else real_cfg(path, default))
 
 
@@ -108,7 +108,7 @@ def test_degraded_path_does_not_filter(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     real_cfg = reranker.cfg
     monkeypatch.setattr(reranker, "cfg", lambda p, d=None:
-                        0.3 if p == "reranker.min_score" else real_cfg(p, d))
+                        0.3 if p == "reranker.cross_encoder.min_score" else real_cfg(p, d))
 
     result = reranker.rerank_sync("查询", chunks, top_k=5)
 
