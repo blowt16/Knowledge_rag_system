@@ -69,7 +69,7 @@ reranker:
   #
   # ⚠️ 两个后端的分数**刻度不同**，阈值不能混用：bge 的 0.3 套到 Jina 上会把候选全砍光
   #    （2026-10-17 实测：Jina 对相关块给 0.28–0.50、无关块给 −0.09–0.05）。
-  backend: cross_encoder
+  backend: jina_listwise
 
   # —— 共用默认（cross_encoder 直接用这些）——
   model_path: models/BAAI/bge-reranker-v2-m3
