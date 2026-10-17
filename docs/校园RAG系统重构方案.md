@@ -377,9 +377,9 @@ core/deps.py      构造 UserContext
 | 项 | 做法 |
 |---|---|
 | **导出前打码（主要防线）** | 官方钩子 `mask_otel_spans`——它在**导出阶段、数据离开应用之前**跑，逐 span 打码。学号 / 手机号 / 身份证 / 邮箱在**本地就打码**，上传的是打码后文本（打码形如 `[REDACTED:student_id]`） |
-| **节点观测不捕获输入输出** | 节点观测不把正文交给 SDK——本 SDK 版本（实测签名）**没有** `capture_input` / `capture_output` 参数，等价做法是显式传 `input=None, output=None`；异常只写 `metadata={"rag.error": type(e).__name__}`，**不把异常对象交给 SDK**（LLM 异常的 message 可能回显 prompt） |
+| **节点观测只传摘要** | 节点 span 的 `input`/`output` 只放摘要（query、chunk_id / 文档名 / 页码 / 分数、正文前 80 字），完整检索正文与答案正文不上传；本 SDK 版本（实测签名）**没有** `capture_input` / `capture_output` 参数，摘要由 `app/graph/node_io.py` 显式构造。异常只写 `metadata={"rag.error": type(e).__name__}`，**不把异常对象交给 SDK**（LLM 异常的 message 可能回显 prompt） |
 | **访问范围** | Langfuse 云按项目成员权限控制，密钥只进 `.env`；**不对 User 端暴露** |
-| **验收** | 用**本地捕获服务器冒充云端**、断言**实际发出的字节**：原始学号不出现、打码标记出现；并断言节点观测不含输入输出正文（见第六章的测试策略） |
+| **验收** | 用**本地捕获服务器冒充云端**、断言**实际发出的字节**：原始学号不出现、打码标记出现；并断言节点 span 带 input/output 摘要、完整检索正文与答案正文不上传（`test_langfuse_node_span.py` / `test_node_io.py`） |
 
 > ⚠️ **打码规则必须配置化**：`app.yaml` 顶部写明「规则词表必须配置化」，脱敏规则同样不写死在代码里——词表与正则在 `observability.masking.patterns`（`enabled` 可整体关掉）。
 

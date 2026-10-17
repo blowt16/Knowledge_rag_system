@@ -1,7 +1,7 @@
-"""节点 span 的脱敏与生命周期（【方案 §5.1 / §12.1】#5#6）。
+"""节点 span 的 I/O 摘要、脱敏与生命周期（【方案 §5.1 / §12.1】#5#6）。
 
-**核心承诺**：节点观测里**一个字的正文都没有** —— 节点的输入输出全是
-用户提问与检索片段，一旦进 span，日志那边脱敏做得再好也没用。
+**核心承诺**：节点 span 只带**摘要** —— query、chunk_id/文档名/页码/分数、
+正文前 80 字；完整检索正文不上传（节点 state 里可能有几十条片段）。
 
 ⚠️ 上一版栽在「注释声称安全 ≠ 实际安全」（builder.py:93-97）。
 这条测试就是那份承诺的凭据 —— 人工去云端翻是一次性的，测试是每次都跑的。
@@ -14,6 +14,7 @@ import pytest
 
 from app.core import observability
 from app.graph.builder import traced
+from app.graph.state import Chunk
 from tests.lf_capture import CapturingLangfuse
 
 MARKER = "2023123456的缓考申请_正文标记"
@@ -31,22 +32,98 @@ def capture(monkeypatch):
         observability.shutdown()
 
 
-def test_node_span_carries_no_content(capture):
-    """节点的输入/输出都不许出现在发出的字节里。"""
+def test_rerank_span_carries_input_output(capture):
+    """非 LLM 节点也要有 input/output —— 这是 UI 面板的数据源。"""
 
     async def _fake_node(state):
-        return {"answer": MARKER, "context": MARKER,
+        return {"reranked": [Chunk(chunk_id="C2", text="SECOND", score=0.91)],
+                "retrieval_confidence": 0.91,
+                "rerank_degraded": False,
+                "trace": [{"node": "rerank", "ms": 5, "recalled": 1,
+                           "degraded": None}]}
+
+    import asyncio
+    asyncio.run(traced("rerank", _fake_node)({
+        "query": "QUERY_MARKER",
+        "candidates": [Chunk(chunk_id="C1", text="FIRST", score=0.2),
+                       Chunk(chunk_id="C2", text="SECOND", score=0.3)],
+    }))
+    observability.get_client().flush()
+
+    body = capture.body()
+    assert "langfuse.observation.input" in body, "input 属性没发出去"
+    assert "langfuse.observation.output" in body, "output 属性没发出去"
+    assert "QUERY_MARKER" in body, "输入 query 没进 span"
+    assert "C1" in body and "C2" in body, "候选 chunk_id 没进 span"
+
+
+def test_node_io_strings_are_masked(capture):
+    """新增的 input/output 摘要也要过脱敏钩子。"""
+    student_id = "2023123456"
+
+    async def _fake_node(state):
+        return {"reranked": [Chunk(chunk_id="C1",
+                                   text=f"学号{student_id}的申请", score=0.5)],
+                "trace": [{"node": "rerank", "ms": 1, "recalled": 1,
+                           "degraded": None}]}
+
+    import asyncio
+    asyncio.run(traced("rerank", _fake_node)({
+        "query": f"学号{student_id}怎么申请",
+        "candidates": [Chunk(chunk_id="C1",
+                             text=f"学号{student_id}的记录", score=0.2)],
+    }))
+    observability.get_client().flush()
+
+    body = capture.body()
+    assert "langfuse.observation.input" in body, "input 属性没发出去"
+    assert student_id not in body, "新加的 input/output 没走脱敏"
+
+
+def test_chunk_text_is_truncated_in_span(capture):
+    """正文只带前 80 字 —— 完整片段不上传。"""
+    head = "HEAD_MARKER"
+    tail = "TAIL_MARKER"
+    text = head + "x" * 200 + tail
+
+    async def _fake_node(state):
+        return {"candidates": [Chunk(chunk_id="C1", text=text, score=0.1)],
+                "trace": [{"node": "retrieve", "ms": 3, "recalled": 1,
+                           "degraded": None}]}
+
+    import asyncio
+    asyncio.run(traced("retrieve", _fake_node)({
+        "retrieval_queries": [{"text": "Q", "target": "both",
+                               "weight": 1.0, "source": "verbatim"}],
+    }))
+    observability.get_client().flush()
+
+    body = capture.body()
+    assert head in body, "预览开头没进 span"
+    assert tail not in body, "完整正文进了 span"
+
+
+def test_generate_span_does_not_upload_full_context(capture):
+    """上下文全文不上传 —— 只传长度与答案预览。"""
+    context_marker = "CONTEXT_FULL_TEXT_MARKER"
+    answer_tail = "ANSWER_TAIL_MARKER"
+
+    async def _fake_node(state):
+        return {"context": context_marker * 20,
+                "answer": "ANSWER_HEAD" + "y" * 200 + answer_tail,
+                "decision": "ANSWERED",
                 "trace": [{"node": "generate", "ms": 12, "recalled": 3,
                            "degraded": None}]}
 
     import asyncio
-    asyncio.run(traced("generate", _fake_node)({"query": MARKER, "session_id": "s1"}))
+    asyncio.run(traced("generate", _fake_node)({"query": "q"}))
     observability.get_client().flush()
 
     body = capture.body()
     assert body, "没发出任何东西 —— 断言会假通过"
-    assert MARKER not in body, f"节点正文进了 span：\n{body[:500]}"
-    assert "2023123456" not in body, "学号进了 span"
+    assert context_marker not in body, "上下文全文进了 span"
+    assert answer_tail not in body, "答案正文超过预览长度仍进了 span"
+    assert "ANSWER_HEAD" in body, "答案预览没进 span"
 
 
 def test_node_span_records_metadata(capture):

@@ -42,6 +42,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core import observability
 
+from app.graph.node_io import node_input, node_output
 from app.graph.nodes.build_context import build_context_node
 from app.graph.nodes.chat import chat_node
 from app.graph.nodes.cite import cite_node
@@ -82,17 +83,21 @@ def _after_generate(state: RAGState) -> Literal["cite", "__end__"]:
 def traced(node_name: str, fn):
     """给节点套一层 Langfuse 观测（【方案 §5.1】）。
 
-    ⚠️⚠️ **属性里只放"多少钱、几秒、降没降级"，一个字的正文都不放**（【方案 §7】）。
-       节点的输入输出全是用户提问与检索片段 —— 一旦当属性写进去，
-       日志那边脱敏做得再好也没用，云端照样摆着学号姓名。
+    ⚠️⚠️ **metadata 属性里只放"多少钱、几秒、降没降级"，不放正文**（【方案 §7】）。
+       正文只经 `node_io` 的摘要通道进 input/output，且脱敏钩子照样生效。
 
-    ⚠️⚠️ **必须关掉内容捕获**（`@observe` 装饰器那边叫
+    ⚠️ **input/output 只放摘要**（`node_io.py`）：query、chunk_id / 文档名 /
+       页码 / 分数、正文前 80 字。**不把整个 state 传上去** —— 完整检索正文
+       不上云；脱敏钩子对这些字符串同样生效。
+
+    ⚠️ **必须关掉 SDK 的自动内容捕获**（`@observe` 装饰器那边叫
        `capture_input=False, capture_output=False`）：
        Langfuse 默认会把输入输出与异常都记下来（官方：automatically capture
        inputs, outputs, timings, and errors）。不关掉就等于把 state 整个传上去。
        ⚠️ 本 SDK 版本（4.17.0）的 `start_as_current_observation` **没有**这对
        参数（实测签名），这里等价的做法是**显式传 `input=None, output=None`** ——
        别照着上面那行去加参数，会 TypeError。
+       现在 input 由 `node_io.node_input()` 显式给摘要；output 执行完再填。
 
     ⚠️ 异常**只记类型、不记 message**：message 可能回显 prompt。
        实测过「注释声称安全 ≠ 实际安全」的教训（旧 builder.py:93-97），
@@ -121,7 +126,7 @@ def traced(node_name: str, fn):
             failure: BaseException | None = None
             with client.start_as_current_observation(
                 as_type="span", name=f"node.{node_name}",
-                input=None, output=None,
+                input=node_input(node_name, state), output=None,
             ) as obs:
                 try:
                     result = await fn(state)
@@ -132,6 +137,7 @@ def traced(node_name: str, fn):
                     failure = e   # ★ 见上面那条：出了 with 再抛，别在这里 raise
                 else:
                     if isinstance(result, dict):
+                        out = node_output(node_name, result)
                         entries = result.get("trace") or []
                         if entries:
                             last = entries[-1]
@@ -142,7 +148,9 @@ def traced(node_name: str, fn):
                             degraded = last.get("degraded")
                             if degraded:
                                 meta["rag.degraded"] = str(degraded)
-                            obs.update(metadata=meta)
+                            obs.update(metadata=meta, output=out)
+                        else:
+                            obs.update(output=out)
 
             if failure is not None:
                 raise failure
