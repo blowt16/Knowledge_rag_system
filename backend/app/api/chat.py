@@ -8,6 +8,7 @@ SSE 的协议细节与铁律见 `services/chat_service.py` 的模块说明。
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Request
@@ -17,6 +18,8 @@ from app.core import observability
 from app.core.deps import CurrentUser
 from app.schemas.chat import ChatRequest
 from app.services import chat_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -29,6 +32,11 @@ async def chat_stream(body: ChatRequest, user: CurrentUser, request: Request):
     # ⚠️ Starlette 的 StreamingResponse 生成器可能跑在另一个 context 里，
     #    trace 会丢 —— 先取出来，进生成器第一件事就是挂回来（§3.2.3.1）
     trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
+
+    # 排查入口：控制台直接给出本轮 trace_id，与响应头 x-trace-id 同源。
+    # 消息里带一遍是为了在纯文本日志里也能一眼看到。
+    logger.info("对话开始 trace_id=%s", trace_id,
+                extra={"event": "chat.start", "session_id": session_id})
 
     async def generator():
         with observability.attach_trace(trace_id, span_id):
