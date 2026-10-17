@@ -162,12 +162,21 @@ def _predict(query: str, chunks: list[Chunk]) -> list[float]:
     """
     model = _model
     if backend() == "jina_listwise":
-        rows = model.rerank(query, [c.text[:2000] for c in chunks])
+        # 分批：listwise 的 token 数随候选数线性增长，全部候选拼成一条序列时
+        # 24 个候选可达 2.4 万 token —— 6GB 显卡会颠簸到几十秒。每批 10 个
+        # 把峰值显存压回安全区；0 表示不分批（评测对照用）。
+        # ⚠️ 模型返回的 `index` 是**批内**下标，必须加上批起点还原成全局下标。
+        batch = int(_pcfg("batch_candidates", 10) or 0)
+        if batch <= 0:
+            batch = len(chunks) or 1
         scores = [0.0] * len(chunks)
-        for row in rows:
-            i = int(row["index"])
-            if 0 <= i < len(scores):
-                scores[i] = float(row["relevance_score"])
+        for start in range(0, len(chunks), batch):
+            group = chunks[start:start + batch]
+            rows = model.rerank(query, [c.text[:2000] for c in group])
+            for row in rows:
+                i = start + int(row["index"])
+                if 0 <= i < len(scores):
+                    scores[i] = float(row["relevance_score"])
         return scores
 
     batch_size = int(_pcfg("batch_size", 10))

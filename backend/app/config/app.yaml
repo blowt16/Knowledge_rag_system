@@ -54,8 +54,8 @@ retrieval:
   # 固定过采样 + 一次重试（§3.3.4）—— 仅对向量路适用
   oversample_first: 3                     # 首轮 n_results = 3 × K
   oversample_retry: 6                     # 重试 n_results = 6 × K
-  # 融合后进入 rerank 的截断条数
-  fusion_limit: 40
+  # rrf融合后进入 rerank 的截断条数
+  fusion_limit: 15
   # 最终进入 build_context 的条数
   top_k: 5
   rrf_k: 60                               # RRF 的 k —— 消融实验的调参对象
@@ -90,6 +90,10 @@ reranker:
     device: cuda
     # listwise 不用 batch_size（整批一起算），保留该键只为两层配置同构
     batch_size: 10
+    # 分批精排：每批最多多少个候选。listwise 的 token 数随候选数线性增长，
+    # 24 个候选可达 2.4 万 token，6GB 显卡会颠簸到几十秒。10 个一批把峰值
+    # 显存压回安全区；0 表示不分批（仅用于评测对照）。
+    batch_candidates: 10
     # 模型支持 131K，但语料里的 chunk 都很短；2048 够用且省显存
     max_length: 2048
     # ⚠️ **刻度与 bge 完全不同，不能沿用 0.3**：
