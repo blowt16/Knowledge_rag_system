@@ -177,3 +177,89 @@ def test_runner_only_writes_results_through_emit():
     # 只允许两件事：开局把真 stdout 抢下来（模块层定义 + __main__ 里再抢一次），
     # 以及把 sys.stdout 让给 stderr。**不许**有任何「写 sys.stdout」的回退。
     assert set(writes) == {"_real_stdout = sys.stdout", "sys.stdout = sys.stderr"}, writes
+
+
+# ---- 指标分批（2026-10-17）：一批挂了，另一批不陪葬 -------------------
+
+def test_batches_are_retrieval_then_generation():
+    """★ 顺序有意义：先检索侧（不依赖生成质量），后生成侧。"""
+    assert ragas_service.batches_for(list(ragas_service.METRIC_NAMES)) == [
+        ("retrieval", ["context_precision", "context_recall"]),
+        ("generation", ["faithfulness", "answer_relevancy"]),
+    ]
+
+
+def test_only_requested_metrics_are_batched():
+    assert ragas_service.batches_for(["faithfulness"]) == [("generation", ["faithfulness"])]
+
+
+def test_unbatched_metric_is_not_silently_dropped():
+    """将来新增的指标若没进 METRIC_BATCHES，必须单独成批，不能静默丢。"""
+    assert ragas_service.batches_for(["faithfulness", "brand_new"]) == [
+        ("generation", ["faithfulness"]), ("other", ["brand_new"])]
+
+
+async def test_one_batch_failure_keeps_the_other(monkeypatch, tmp_path):
+    """★ 这正是拆批的目的：生成侧挂了，检索侧的结果照样落库。
+
+    2026-10-17 实测背景：四项原来一次算，一次网络卡顿让整批 12 分钟无产出、
+    最终 stdout 0 字节，四项全丢。拆批后失败只损失那一批。
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    calls: list[list[str]] = []
+
+    async def fake_run_batch(python, script, samples, want, timeout):
+        calls.append(list(want))
+        if "faithfulness" in want:
+            return {"ok": False, "rows": [], "means": {},
+                    "errors": ["boom"], "ms": 1}
+        return {"ok": True, "ms": 2,
+                "rows": [{"context_precision": 0.5, "context_recall": 1.0}],
+                "means": {"context_precision": 0.5, "context_recall": 1.0},
+                "errors": []}
+
+    monkeypatch.setattr(ragas_service, "_run_batch", fake_run_batch)
+    monkeypatch.setattr(ragas_service, "venv_python", lambda: _Path(_sys.executable))
+    # ⚠️ 脚本必须**真实存在** —— `score_samples` 会先检查 `script.exists()`，
+    #    路径不存在会走「隔离环境不可用」的早退分支，根本不会调 _run_batch。
+    script = tmp_path / "x.py"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ragas_service, "runner_script", lambda: script)
+
+    result = await ragas_service.score_samples(
+        [{"user_input": "q", "response": "a", "retrieved_contexts": ["c"],
+          "reference": "r"}])
+
+    assert calls == [["context_precision", "context_recall"],
+                     ["faithfulness", "answer_relevancy"]], "两批都要跑"
+    assert result["ok"] is True
+    assert result["rows"][0]["context_recall"] == 1.0, "检索侧必须留下来"
+    assert "faithfulness" not in result["rows"][0]
+    assert any(e.startswith("[generation]") for e in result["errors"]), \
+        f"失败原因必须点名是哪一批：{result['errors']}"
+
+
+async def test_all_batches_failing_returns_empty_rows(monkeypatch, tmp_path):
+    """两批全挂 → 保持既有契约 `rows == []`（报告页据此判「没算出来」）。"""
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    async def fake_run_batch(*a, **k):
+        return {"ok": False, "rows": [], "means": {}, "errors": ["dead"], "ms": 1}
+
+    monkeypatch.setattr(ragas_service, "_run_batch", fake_run_batch)
+    monkeypatch.setattr(ragas_service, "venv_python", lambda: _Path(_sys.executable))
+    # ⚠️ 脚本必须**真实存在** —— `score_samples` 会先检查 `script.exists()`，
+    #    路径不存在会走「隔离环境不可用」的早退分支，根本不会调 _run_batch。
+    script = tmp_path / "x.py"
+    script.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ragas_service, "runner_script", lambda: script)
+
+    result = await ragas_service.score_samples(
+        [{"user_input": "q", "response": "a", "retrieved_contexts": ["c"],
+          "reference": "r"}])
+    assert result["ok"] is False
+    assert result["rows"] == []
+    assert len(result["errors"]) == 2, "两批各报一条"

@@ -91,10 +91,19 @@ def main() -> int:
     env = _load_env()
     from openai import OpenAI
 
+    # ⚠️ **必须显式给超时**。不写时用的是 openai SDK 的默认值
+    #    `Timeout(connect=5.0, read=600, write=600, pool=600)` + `max_retries=2` ——
+    #    即**一次卡住的请求最长阻塞 1800 秒（半小时）**，而本文件没有任何自己的
+    #    超时控制，外层整轮超时又是 3600s。
+    #    2026-10-17 实测：一次网络卡顿让整个子进程 CPU 恒 0、12 分钟无产出、
+    #    最终 stdout 0 字节，四项指标全丢。
+    #    读超时压到 120s：判官单次输出只有几十字，正常几秒就回；120s 不回就该放弃。
     judge = OpenAI(api_key=env.get("DEEPSEEK_API_KEY"),
-                   base_url=env.get("DEEPSEEK_BASE_URL"))
+                   base_url=env.get("DEEPSEEK_BASE_URL"),
+                   timeout=120.0, max_retries=2)
     embedder = OpenAI(api_key=env.get("ALIYUN_ACCESS_KEY"),
-                      base_url=env.get("ALIYUN_BASE_URL"))
+                      base_url=env.get("ALIYUN_BASE_URL"),
+                      timeout=60.0, max_retries=2)
 
     from langchain_openai import OpenAIEmbeddings as LcEmbeddings
     from ragas import EvaluationDataset, SingleTurnSample, evaluate
