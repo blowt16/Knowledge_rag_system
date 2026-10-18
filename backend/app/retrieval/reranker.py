@@ -97,6 +97,12 @@ def _model_dir() -> str:
     return str(resolved if resolved.exists() else path)
 
 
+def model_info() -> dict[str, str]:
+    """当前后端的模型信息（用于启动日志与排障）。"""
+    path = _model_dir()
+    return {"backend": backend(), "model": Path(path).name, "path": path}
+
+
 def _load_model():
     global _model, _load_failed
     if _model is not None or _load_failed:
@@ -105,10 +111,23 @@ def _load_model():
         # 双重检查：等锁期间可能已被预热线程加载完
         if _model is not None or _load_failed:
             return _model
+        kind = "?"
+        model_path = "?"
         try:
             kind = backend()
             max_length = int(_pcfg("max_length", 512))
             device = str(_pcfg("device", "cuda"))
+            model_path = _model_dir()
+            model_name = Path(model_path).name
+            logger.info(
+                "reranker 加载中：backend=%s model=%s path=%s device=%s max_length=%s",
+                kind, model_name, model_path, device, max_length,
+                extra={
+                    "event": "rerank.model_loading",
+                    "backend": kind, "model": model_name,
+                    "path": model_path, "device": device,
+                },
+            )
 
             if kind == "jina_listwise":
                 # Jina v3.5 是 **listwise** 模型：仓库自带 `modeling.py`（JinaForRanking），
@@ -118,7 +137,7 @@ def _load_model():
                 from transformers import AutoModel
 
                 loaded = AutoModel.from_pretrained(
-                    _model_dir(), dtype="auto", trust_remote_code=True)
+                    model_path, dtype="auto", trust_remote_code=True)
                 loaded.eval()
                 if device.startswith("cuda"):
                     loaded = loaded.to(device)
@@ -127,13 +146,25 @@ def _load_model():
                 from sentence_transformers import CrossEncoder
 
                 _model = CrossEncoder(
-                    _model_dir(),
+                    model_path,
                     max_length=max_length,
                     device=device,
                 )
+            logger.info(
+                "reranker 已加载：backend=%s model=%s path=%s device=%s max_length=%s",
+                kind, model_name, model_path, device, max_length,
+                extra={
+                    "event": "rerank.model_loaded",
+                    "backend": kind, "model": model_name,
+                    "path": model_path, "device": device,
+                },
+            )
         except Exception:  # noqa: BLE001
-            logger.exception("reranker 加载失败，后续请求直接降级",
-                             extra={"event": "rerank.load_failed", "node": "rerank"})
+            logger.exception(
+                "reranker 加载失败：backend=%s model=%s path=%s，后续请求直接降级",
+                kind, Path(model_path).name, model_path,
+                extra={"event": "rerank.load_failed", "node": "rerank"},
+            )
             _load_failed = True
             _model = None
     return _model
