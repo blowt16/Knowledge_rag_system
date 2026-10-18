@@ -108,3 +108,23 @@ def test_render_doc12_multi_value_p9():
     assert "国家级特等奖（金奖）30分/项" in sentence
     assert "参考学分" not in sentence, "展开后不得重复分值字段"
     assert "特等奖（金奖）、一、二、三等奖" not in sentence, "展开后不得重复等级格"
+
+
+# ---- 方案 3 Task 4：通用模板补单位 ------------------------------------
+
+def test_render_doc11_adds_units():
+    h = ["文章等级", "第1 作者或通信作者", "第2 作者", "第3 作者"]
+    row = ["SCI", "100", "80", "60"]
+    assert render_sentence(row, row, h, score_cols={1, 2, 3}) == (
+        "文章等级是SCI，第1 作者或通信作者是100分，第2 作者是80分，第3 作者是60分。"
+    )
+
+
+def test_render_doc11_skips_filled_cell_unit():
+    h = ["专利类型", "第1 作者", "第2 作者", "第3 作者", "第4 及以后"]
+    raw = ["发明专利申请受理并公开", "50", "30", "10", ""]
+    filled = ["发明专利申请受理并公开", "50", "30", "10", "30"]
+    mask = [False, False, False, False, True]
+    sentence = render_sentence(raw, filled, h, score_cols={1, 2, 3, 4}, mask_row=mask)
+    assert "第4 及以后是30。" in sentence
+    assert "第4 及以后是30分" not in sentence

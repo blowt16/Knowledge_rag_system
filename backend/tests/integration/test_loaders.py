@@ -313,7 +313,7 @@ def test_doc11_generic_natural_sentence():
     res = load_pdf(pdf)
     page3 = next(p.text for p in res.pages if p.page == 3)
     assert "文章等级是SCI" in page3
-    assert "第1 作者或通信作者是100" in page3
+    assert "第1 作者或通信作者是100分" in page3
 
 
 # ---- 方案 1 Task 3：真实文档多值展开回归 --------------------------------

@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.ingestion.table_render import render_sentence
+from app.ingestion.table_rules import infer_score_columns
 
 
 #: 表格组的裸哨兵。**不再跟列名**；列名已经在每行自然句里。
@@ -385,8 +386,8 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
     ncols = len(table.rows[0])
     # ① 先在**原始行**上判分组行 —— 顺序不能和 ② 换
     prh = [is_projected_row_header(r, ncols) for r in table.rows]
-    # ② 再向下填充合并单元格；掩码留给方案 1/3 做语义判断
-    filled, _mask = forward_fill(table.rows, return_mask=True)
+    # ② 再向下填充合并单元格；掩码给方案 3 跳过填充格补单位
+    filled, mask = forward_fill(table.rows, return_mask=True)
 
     # 列名选择：几何对齐的 col_headers 优先；其次自己的表头；都不行才用列号。
     # 列数不符时**绝不按下标配列名**；用 `列N` 自然句，保留每一格。
@@ -398,12 +399,16 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
         col_headers = [f"列{i + 1}" for i in range(ncols)]
 
     body_budget = budget - len(GROUP_MARK) - 1
+    score_cols = infer_score_columns(table.rows, col_headers)
     lines: list[str] = []
-    for raw_row, filled_row, is_prh in zip(table.rows, filled, prh):
+    for raw_row, filled_row, mask_row, is_prh in zip(
+            table.rows, filled, mask, prh):
         if is_prh:
             # 分组行只是分类分隔，不承载数据；它的值已被 forward_fill 传播。
             continue
-        sentence = render_sentence(raw_row, filled_row, col_headers)
+        sentence = render_sentence(
+            raw_row, filled_row, col_headers,
+            score_cols=score_cols, mask_row=mask_row)
         if sentence:
             lines.append(sentence)
 

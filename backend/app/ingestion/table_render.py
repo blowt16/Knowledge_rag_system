@@ -6,7 +6,9 @@ doc 12 的 6 列评分表用专用模板；其他表格用通用“列名是值�
 """
 from __future__ import annotations
 
-from app.ingestion.table_rules import expand_multi_value_row, grade_cell_index
+from app.ingestion.table_rules import (
+    apply_score_units, expand_multi_value_row, grade_cell_index,
+)
 
 DOC12_HEADERS = {
     "课程类别", "课程项目", "课程内容",
@@ -30,10 +32,12 @@ def _value(row: list[str], headers: list[str | None], name: str) -> str:
 
 
 def render_sentence(raw_row: list[str], filled_row: list[str],
-                    col_headers: list[str | None]) -> str:
+                    col_headers: list[str | None], *,
+                    score_cols=frozenset(), mask_row=None) -> str:
     if DOC12_HEADERS.issubset({h for h in col_headers if h}):
         return _render_doc12(raw_row, filled_row, col_headers)
-    return _render_generic(filled_row, col_headers)
+    return _render_generic(filled_row, col_headers,
+                           score_cols=score_cols, mask_row=mask_row)
 
 
 def _render_doc12(raw_row: list[str], filled_row: list[str],
@@ -77,10 +81,13 @@ def _render_doc12(raw_row: list[str], filled_row: list[str],
 
 
 def _render_generic(filled_row: list[str],
-                    col_headers: list[str | None]) -> str:
+                    col_headers: list[str | None], *,
+                    score_cols=frozenset(), mask_row=None) -> str:
+    values = apply_score_units(
+        filled_row, mask_row or [False] * len(filled_row), score_cols)
     parts: list[str] = []
     for i, h in enumerate(col_headers):
-        value = filled_row[i].strip() if i < len(filled_row) else ""
+        value = values[i].strip() if i < len(values) else ""
         if not value:
             continue
         parts.append(f"{h or f'列{i + 1}'}是{_escape(value)}")
