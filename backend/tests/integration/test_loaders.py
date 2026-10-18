@@ -314,3 +314,20 @@ def test_doc11_generic_natural_sentence():
     page3 = next(p.text for p in res.pages if p.page == 3)
     assert "文章等级是SCI" in page3
     assert "第1 作者或通信作者是100" in page3
+
+
+# ---- 方案 1 Task 3：真实文档多值展开回归 --------------------------------
+
+def test_doc12_multi_value_natural_sentence():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    page10 = next(p.text for p in res.pages if p.page == 10)
+    assert (
+        "文体竞赛：国家级一等奖18分/项；国家级二等奖15分/项；国家级三等奖12分/项"
+        in page10
+    )
+    assert "18、15、12分/项" not in page10, "展开后不应保留原始多值串"
