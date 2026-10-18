@@ -262,8 +262,7 @@ def test_doc11_anchor_near_bottom_is_not_enough():
     assert not is_continuation(cur, prev, page_height=PH)
 
 
-from app.ingestion.tables import GROUP_MARK, SEP, serialize_groups
-from app.ingestion.chunker import _SECONDARY_END, _SENTENCE_END
+from app.ingestion.tables import GROUP_MARK, serialize_groups
 
 
 def _tbl(headers, rows):
@@ -274,12 +273,12 @@ def test_every_row_carries_its_column_names():
     """★核心断言：序列化后每一行都自带完整列名，切到哪都不丢归属。"""
     t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
     groups = serialize_groups(t, budget=500)
-    assert groups[0].splitlines()[1] == "课程内容：无偿献血｜参考学分：2分/次"
+    assert groups[0].splitlines()[1] == "课程内容是无偿献血，参考学分是2分/次。"
 
 
-def test_group_starts_with_header_line():
+def test_group_starts_with_bare_marker_line():
     t = _tbl(["参考学分"], [["2分/次"]])
-    assert serialize_groups(t, budget=500)[0].splitlines()[0].startswith(GROUP_MARK)
+    assert serialize_groups(t, budget=500)[0].splitlines()[0] == GROUP_MARK
 
 
 def test_mismatched_header_count_never_mislabels_columns():
@@ -295,22 +294,19 @@ def test_mismatched_header_count_never_mislabels_columns():
     """
     t = _tbl(["课程类别", "课程内容", "参考学分"],
              [["甲类", "无偿献血", "2分/次", "获奖等级值"]])
-    lines = serialize_groups(t, budget=500)[0].splitlines()
-    header, body = lines[0], lines[1]
+    body = serialize_groups(t, budget=500)[0]
 
-    assert "参考学分：2分/次" not in body, "值不得挂到错位的列名上"
-    assert "课程内容：无偿献血" not in body, "同上：下标配对整体错位"
-    assert body.startswith("列1：甲类"), "应逐格按位置标注"
-    assert "列4：获奖等级值" in body, "第 4 格必须保留，不得被静默丢弃"
-    assert header.count("承上页表头") >= 1, "继承来的表头要留作上下文"
-    assert "参考学分" in header, "上下文里必须还能看到继承的列名"
+    assert "列1是甲类" in body, "应逐格按位置标注"
+    assert "列4是获奖等级值" in body, "第 4 格必须保留，不得被静默丢弃"
+    assert "参考学分是2分/次" not in body, "值不得挂到错位的列名上"
+    assert "课程内容是无偿献血" not in body, "同上：下标配对整体错位"
 
 
 def test_matching_header_count_still_pairs_by_name():
     """对照：列数相符时仍按列名配对 —— 别把上面那条修过头了。"""
     t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
     body = serialize_groups(t, budget=500)[0].splitlines()[1]
-    assert body == "课程内容：无偿献血｜参考学分：2分/次"
+    assert body == "课程内容是无偿献血，参考学分是2分/次。"
 
 
 def test_header_tokens_are_deducted_before_grouping():
@@ -340,17 +336,11 @@ def test_escape_cell_separators():
        断言就成了空转（改这条测试时踩过）。
     """
     t = _tbl(["甲列", "乙列"], [["含｜竖线的值", "含【表头】标记的值"]])
-    groups = serialize_groups(t, budget=500)
-    body = groups[0].splitlines()[1]
-    assert body.count(GROUP_MARK) == 0, "正文里不能出现裸的组标记"
-    assert body.count("｜") == 1, "只应有列间那一个分隔符；格子内的 ｜ 必须被转义"
+    lines = serialize_groups(t, budget=500)[0].splitlines()
+    body = "\n".join(lines[1:])
+    assert GROUP_MARK not in body, "正文里不能出现裸的组标记"
+    assert "｜" not in body, "格子内的 ｜ 必须被转义"
     assert "【" not in body and "】" not in body, "格子内的 【】 必须被转义"
-
-
-def test_serialization_separators_never_break_a_chunk():
-    """★分隔符必须避开切分器的断句字符，否则组会被切碎。"""
-    assert SEP not in _SENTENCE_END
-    assert SEP not in _SECONDARY_END
 
 
 def test_no_data_rows_yields_no_groups():
@@ -369,18 +359,18 @@ def test_projected_row_header_is_skipped_but_its_value_propagates():
         ["", "无偿献血", "2分/次"],
         ["", "捐献造血干细胞", "10分/次"],
     ])
-    body = serialize_groups(t, budget=500)[0].splitlines()
-    assert len(body) == 3, "表头 + 2 条数据行；PRH 不该单独成行"
-    assert body[1] == "课程类别：实践实习与社会工作｜课程内容：无偿献血｜参考学分：2分/次"
-    assert body[2].startswith("课程类别：实践实习与社会工作")
+    lines = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(lines) == 3, "裸哨兵 + 2 条数据行；PRH 不该单独成行"
+    assert lines[1] == "课程类别是实践实习与社会工作，课程内容是无偿献血，参考学分是2分/次。"
+    assert lines[2].startswith("课程类别是实践实习与社会工作")
 
 
 def test_forward_fill_does_not_swallow_first_data_row():
     """填充不能把真实数据行吃掉 —— 首行有数据的行照常输出。"""
     t = _tbl(["课程类别", "参考学分"], [["甲类", "5分"], ["", "3分"]])
-    body = serialize_groups(t, budget=500)[0].splitlines()
-    assert len(body) == 3
-    assert body[1] == "课程类别：甲类｜参考学分：5分"
+    lines = serialize_groups(t, budget=500)[0].splitlines()
+    assert len(lines) == 3
+    assert lines[1] == "课程类别是甲类，参考学分是5分。"
 
 
 from app.ingestion.tables import table_atomic_ranges
@@ -517,3 +507,28 @@ def test_real_doc12_col_headers_align():
             prev = t
     finally:
         doc.close()
+
+
+# ---- 方案乙 Task 4：自然句序列化 --------------------------------
+
+def test_group_starts_with_bare_marker():
+    t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
+    group = serialize_groups(t, budget=500)[0]
+    assert group.splitlines()[0] == GROUP_MARK, "哨兵不能再带列名"
+
+
+def test_rows_are_natural_sentences():
+    t = _tbl(["课程内容", "参考学分"], [["无偿献血", "2分/次"]])
+    body = serialize_groups(t, budget=500)[0]
+    assert "课程内容是无偿献血" in body
+    assert "参考学分是2分/次" in body
+    assert "｜" not in body
+
+
+def test_mismatched_header_count_uses_position_labels():
+    t = _tbl(["课程类别", "课程内容", "参考学分"],
+             [["甲类", "无偿献血", "2分/次", "获奖等级值"]])
+    body = serialize_groups(t, budget=500)[0]
+    assert "列1是甲类" in body
+    assert "列4是获奖等级值" in body
+    assert "参考学分是2分/次" not in body, "列数不符时不得按名字错配"

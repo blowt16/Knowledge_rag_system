@@ -192,8 +192,8 @@ def test_horizontal_documents_keep_doc_number(loaded):
 
 # ---- ⑤ 表格结构化（Task 5）--------------------------------------------
 
-def test_pdf_table_is_serialized_with_column_names():
-    """★表格在 PageText.text 里是键值行，不再是拍平的单格行。"""
+def test_pdf_table_is_serialized_as_natural_sentences():
+    """★表格在 PageText.text 里是自然句，不再是拍平单格或键值行。"""
     from app.ingestion.loaders.pdf import load_pdf
     from app.ingestion.tables import GROUP_MARK
 
@@ -202,16 +202,13 @@ def test_pdf_table_is_serialized_with_column_names():
         pytest.skip("语料不在仓库中")
     res = load_pdf(pdf)
     merged = "\n".join(p.text for p in res.pages)
-    assert GROUP_MARK in merged, "表头行必须出现"
-    # ⚠️ 别断言 `课程内容：无偿献血` —— doc 12 的「无偿献血」落在 p11，
-    #    那是 7 列的表、继承的是 6 列表头，按 Task 3 的裁定走**位置标注**，
-    #    列名形态根本不存在（第一版断言就是照 p8 的形态写的，是错的）。
-    #    真正要守的是：值还在、且被某个标签正确带着。
+    assert GROUP_MARK in merged, "表格组哨兵必须出现"
     assert "无偿献血" in merged, "数据行必须出现"
-    # 列名形态（列数相符的表，如 p8）
-    assert "课程内容：完成相应培训课时" in merged, "列数相符的表应按列名配对"
-    # 位置标注形态（列数不符的表，如 p11）
-    assert "列3：无偿献血" in merged, "列数不符的表应按位置标注，值不得错挂列名"
+    # p8：6 列对齐，走 doc12 专用自然句模板
+    assert "社会主义核心价值观教育：完成相应培训课时" in merged
+    # p11：7 列经几何对齐，内容/等级都在句子里，值不挂错列名
+    assert "参与公益活动 - 无偿献血，参考学分 2分/次" in merged
+    assert "列3：无偿献血" not in merged, "不应再输出键值/位置标签"
 
 
 def test_pdf_table_text_appears_only_once():
@@ -288,7 +285,7 @@ def test_table_group_marker_survives_cleaning():
     from app.ingestion.clean import build_normalized_text
     from app.ingestion.tables import GROUP_MARK
 
-    hdr = GROUP_MARK + "课程类别｜课程项目｜课程内容｜参考学分｜开课单位｜获得学分方式"
-    pages = [(i + 1, f"第{i + 1}页正文。\n{hdr}\n课程类别：甲｜参考学分：5分") for i in range(8)]
+    hdr = GROUP_MARK
+    pages = [(i + 1, f"第{i + 1}页正文。\n{hdr}\n课程类别是甲，参考学分是5分。") for i in range(8)]
     normalized, _ = build_normalized_text(pages)
     assert normalized.count(GROUP_MARK) == 8, "每个表头行都必须留下"

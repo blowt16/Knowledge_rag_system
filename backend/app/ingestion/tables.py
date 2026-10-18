@@ -24,20 +24,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.ingestion.table_render import render_sentence
 
-#: 序列化用的分隔符。
-#:
-#: ⚠️ **只有 `SEP` 需要避开切分器的断句字符**（`chunker._SENTENCE_END` /
-#:    `_SECONDARY_END`）—— 它是列间分隔，落在断句字符上会让 `_best_break`
-#:    从中间断开。`｜`(U+FF5C) 不在那两个集合里，安全。
-#:
-#: ⚠️ `KV`(`：`) 和 `GROUP_MARK` 的尾字符 `】` **确实在 `_SECONDARY_END` 里**
-#:    （实测：`_SECONDARY_END = "，、：)）】」』"`）。**这不影响正确性** ——
-#:    表格组不被切开是靠 Task 4 的 `atomic` 区间保证的，那里是硬边界；
-#:    断句字符只影响组**内部**怎么断，而原子区间根本不给它断的机会。
-#:    别看到这里就以为 KV 需要换 —— 换掉才会破坏「列名：值」的可读性。
-SEP = "｜"          # U+FF5C 全角竖线
-KV = "："           # U+FF1A 全角冒号
+
+#: 表格组的裸哨兵。**不再跟列名**；列名已经在每行自然句里。
+#: `clean.py` 靠它豁免清洗，`table_atomic_ranges` 靠它找组边界 —— 都保持不变。
 GROUP_MARK = "【表头】"
 
 
@@ -370,83 +361,51 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
     return out
 
 
-#: 单元格内容里出现这些字符时的替身 —— 保证正文里**不出现裸的** SEP / GROUP_MARK。
-_ESCAPE = {"｜": "丨", "【": "〔", "】": "〕"}
-
-
-def _escape(cell: str) -> str:
-    for bad, good in _ESCAPE.items():
-        cell = cell.replace(bad, good)
-    return cell
-
-
 def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
-    """把表格按行分组，每组自带表头。
+    """把表格按行分组，每组以裸 `GROUP_MARK` 开头，正文是自然句。
 
-    输出形态（每组是一段文本，组间由调用方用空行分隔）::
+    输出形态（组间由调用方用空行分隔）::
 
-        【表头】课程内容｜参考学分
-        课程内容：无偿献血｜参考学分：2分/次
-        课程内容：捐献造血干细胞｜参考学分：10分/次
+        【表头】
+        课程内容是无偿献血，参考学分是2分/次。
+        课程内容是捐献造血干细胞，参考学分是10分/次。
 
-    ⚠️ **合并单元格的向下填充在这里做**（不在 `inherit_headers` 里）：
+    ⚠️ 合并单元格的向下填充在这里做（不在 `inherit_headers` 里）：
        分组行（PRH）的判定必须在填充**之前** —— 一个只填了第一列的 PRH 行，
        一经向下填充就变成满格，再也认不出来。
 
-    ⚠️ **表头的长度先从预算里扣掉**，再决定每组放几行。
-       Docling #3428 / LightRAG HeaderRecovery 都是这个做法 ——
+    ⚠️ 表头的长度先从预算里扣掉，再决定每组放几行。
        事后往切好的片里拼表头必然超预算。
 
-    ⚠️ 单行超过预算时**自成一组**，宁可整组超预算也不切开 ——
-       切开就等于回到改造前「标签与值分离」的老问题。
+    ⚠️ 单行超过预算时**自成一组**，宁可整组超预算也不切开。
     """
-    if not table.rows:
+    if not table.rows or table.dropped:
         return []
 
     ncols = len(table.rows[0])
     # ① 先在**原始行**上判分组行 —— 顺序不能和 ② 换
     prh = [is_projected_row_header(r, ncols) for r in table.rows]
-    # ② 再向下填充合并单元格
-    filled = forward_fill(table.rows)
+    # ② 再向下填充合并单元格；掩码留给方案 1/3 做语义判断
+    filled, _mask = forward_fill(table.rows, return_mask=True)
 
-    # ⚠️⚠️ **列数不符时绝不按下标配列名。**
-    #
-    # `is_continuation` 允许 ±1 列的容差（实测 doc 12 的 p8 是 6 列、p9–p12 是 7 列，
-    # 多的「获奖等级」列承载真实数据）—— 但**继承到表头不等于能按下标配对**。
-    # 实测按下标硬配会输出：
-    #     …｜课程内容：无偿献血｜开课单位：2分/次｜获得学分方式：团委、各学院
-    # 即把学分值挂到「开课单位」名下、真正的「参考学分」消失、第 7 格被静默丢弃。
-    # 影响 doc 12 的 83 行。**这是「自信的错误标注」——比改造前的拍平文本更糟**，
-    # 因为拍平至少不会说谎，错配会。
-    #
-    # 无法从数据里恢复真实对齐（多出来的列在中间，不在尾部），所以**不猜**：
-    # 逐格按位置标注（`列N`），继承来的表头只作为**上下文**留在表头行里。
-    # 按位置标注永远不会错；按名字错配永远是错的。
-    aligned = bool(table.headers) and len(table.headers) == ncols
-    if aligned:
-        headers = [_escape(h) for h in table.headers]
+    # 列名选择：几何对齐的 col_headers 优先；其次自己的表头；都不行才用列号。
+    # 列数不符时**绝不按下标配列名**；用 `列N` 自然句，保留每一格。
+    if table.col_headers and len(table.col_headers) == ncols:
+        col_headers = list(table.col_headers)
+    elif len(table.headers) == ncols:
+        col_headers = list(table.headers)
     else:
-        headers = [f"列{i + 1}" for i in range(ncols)]
+        col_headers = [f"列{i + 1}" for i in range(ncols)]
 
-    header_line = GROUP_MARK + SEP.join(headers)
-    if table.headers and not aligned:
-        # 承上页继承来的表头仍在，但**不参与逐行配对** —— 明确标出它的身份
-        inherited = SEP.join(_escape(h) for h in table.headers)
-        header_line += f"（承上页表头，列数不符未逐行套用：{inherited}）"
-
-    # 扣掉表头 + 一个换行
-    body_budget = budget - len(header_line) - 1
-
+    body_budget = budget - len(GROUP_MARK) - 1
     lines: list[str] = []
-    for row, is_prh in zip(filled, prh):
+    for raw_row, filled_row, is_prh in zip(table.rows, filled, prh):
         if is_prh:
-            # 分组行只是分类分隔，不承载数据；它的值已被 ② 传播到下面每一行。
-            # 序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
+            # 分组行只是分类分隔，不承载数据；它的值已被 forward_fill 传播。
             continue
-        pairs = [f"{headers[i]}{KV}{_escape(row[i])}"
-                 for i in range(min(len(headers), len(row))) if row[i].strip()]
-        if pairs:
-            lines.append(SEP.join(pairs))
+        sentence = render_sentence(raw_row, filled_row, col_headers)
+        if sentence:
+            lines.append(sentence)
 
     if not lines:
         return []
@@ -457,12 +416,12 @@ def serialize_groups(table: RawTable, *, budget: int) -> list[str]:
     for line in lines:
         cost = len(line) + 1                     # +1 = 换行
         if cur and used + cost > body_budget:
-            groups.append(header_line + "\n" + "\n".join(cur))
+            groups.append(GROUP_MARK + "\n" + "\n".join(cur))
             cur, used = [], 0
         cur.append(line)
         used += cost
     if cur:
-        groups.append(header_line + "\n" + "\n".join(cur))
+        groups.append(GROUP_MARK + "\n" + "\n".join(cur))
     return groups
 
 
