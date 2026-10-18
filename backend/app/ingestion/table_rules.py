@@ -14,6 +14,32 @@ SCOPE_ITEM_RE = re.compile(r"^(?:国家级|区级|校级|院级)$")
 CREDIT_RE = re.compile(r"^[\d、.\s]+分[/／]\S*$")
 MAX_EXPANSION_RATIO = 5.0
 
+#: 空白申请表的字段词。**单靠它们会误伤**，必须再加结构信号。
+FORM_WORDS = ("审核人签字", "学号", "姓名", "合计", "专业", "课号")
+EXAMPLE_RE = re.compile(r"^例\d+$")
+
+
+def is_application_form(rows: list[list[str]]) -> bool:
+    """识别“空白申请表”模板：表头词命中 ≥2，且至少两个结构信号。
+
+    结构信号：首行空表头 ≥4、例N 行 ≥3、有“合计”行。
+    只命中字段词、没有结构信号的正常表不剔除。
+    """
+    if not rows:
+        return False
+    first = rows[0]
+    flat = ["".join(c.split()) for r in rows for c in r]
+    word_hits = sum(1 for w in FORM_WORDS if any(w in x for x in flat if x))
+    empty_header_cells = sum(1 for c in first if not c.strip())
+    example_rows = sum(1 for r in rows if r and EXAMPLE_RE.match(r[0].strip()))
+    has_total = any(r and r[0].strip() == "合计" for r in rows)
+    structural = sum([
+        empty_header_cells >= 4,
+        example_rows >= 3,
+        has_total,
+    ])
+    return word_hits >= 2 and structural >= 2
+
 
 def _split_items(cell: str) -> list[str]:
     return [p.strip() for p in re.split(r"[、,，]", cell) if p.strip()]
