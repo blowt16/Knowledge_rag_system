@@ -21,6 +21,7 @@ PyMuPDF4LLM 与 Docling 都明确不做跨页合并。
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -127,6 +128,87 @@ def forward_fill(rows: list[list[str]], *,
         out.append(new)
         mask.append(new_mask)
     return (out, mask) if return_mask else out
+
+
+#: 表头列对齐的 x 容差。实测 p8→p9/p10/p11/p12 的左边界最大差 10.8pt；
+#: 新增“获奖等级”列离最近表头 66pt 以上，15pt 足够区分。
+X_TOL = 15.0
+#: 跳过表头的代价。远大于任何有效匹配，保证“能匹配的都匹配，匹配不上才跳过”。
+UNMATCHED_PENALTY = 1000.0
+_SCORE_VALUE_RE = re.compile(r"\d+(?:\.\d+)?\s*分")
+_DEPT_VALUE_RE = re.compile(r"学院|团委|中心|党委|部（处）|教务处|处")
+
+
+def _validate_alignment(mapping: list[str | None], rows: list[list[str]]) -> bool:
+    """用列内容校验几何映射：分值列要像分值，单位列要像部门。
+
+    ⚠️ 这里只校验两个最硬的锚；不拿“课程内容/获奖等级”做内容猜测。
+    """
+    checks = (("参考学分", _SCORE_VALUE_RE, 0.9), ("开课单位", _DEPT_VALUE_RE, 0.8))
+    for header, pattern, threshold in checks:
+        if header not in mapping:
+            continue
+        idx = mapping.index(header)
+        vals = [r[idx].strip() for r in rows if idx < len(r) and r[idx].strip()]
+        if vals and sum(bool(pattern.search(v)) for v in vals) / len(vals) < threshold:
+            return False
+    return True
+
+
+def align_headers_by_geometry(prev: RawTable, cur: RawTable) -> list[str | None]:
+    """把上一张表的表头按列 x 左边界对齐到当前表。
+
+    返回长度 = 当前表列数；`None` 表示当前表新增的无名列。
+    不允许匹配超过 `X_TOL` 的列；全部匹配失败时返回 []（调用方回退）。
+    """
+    # ⚠️ 用 prev.col_headers 而不是 prev.headers：p9 继承后 headers 还是 6 个，
+    #    但 col_headers 已经是 7 个（带一个 None）。p10 对齐必须以 7 列为基准。
+    if not prev.col_headers or len(prev.col_headers) != len(prev.col_spans):
+        return []
+    prev_pairs = [(h, span) for h, span in zip(prev.col_headers, prev.col_spans) if h]
+    if not prev_pairs:
+        return []
+    if not cur.col_spans or not cur.rows or len(cur.col_spans) != len(cur.rows[0]):
+        return []
+
+    n, m = len(prev_pairs), len(cur.col_spans)
+    inf = float("inf")
+    dp = [[inf] * (m + 1) for _ in range(n + 1)]
+    back: list[list[tuple[str, int, int] | None]] = [[None] * (m + 1) for _ in range(n + 1)]
+    for j in range(m + 1):
+        dp[0][j] = 0.0
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if dp[i][j - 1] < dp[i][j]:
+                dp[i][j] = dp[i][j - 1]
+                back[i][j] = ("skip_col", i, j - 1)
+            if dp[i - 1][j] + UNMATCHED_PENALTY < dp[i][j]:
+                dp[i][j] = dp[i - 1][j] + UNMATCHED_PENALTY
+                back[i][j] = ("skip_hdr", i - 1, j)
+            diff = abs(prev_pairs[i - 1][1][0] - cur.col_spans[j - 1][0])
+            if diff <= X_TOL and dp[i - 1][j - 1] + diff < dp[i][j]:
+                dp[i][j] = dp[i - 1][j - 1] + diff
+                back[i][j] = ("match", i - 1, j - 1)
+
+    mapping: list[str | None] = [None] * m
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i == 0:
+            j = 0
+            break
+        if j == 0:
+            i = 0
+            break
+        step = back[i][j]
+        if step is None:
+            return []
+        action, pi, pj = step
+        if action == "match":
+            mapping[pj] = prev_pairs[pi][0]
+        i, j = pi, pj
+    if not any(mapping):
+        return []
+    return mapping if _validate_alignment(mapping, cur.rows) else []
 
 
 #: 判定「锚表结束在页面下部」—— 用**页高比例**，不用绝对 pt。
@@ -255,15 +337,21 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
         if not t.rows:
             out.append(t)
             continue
+        ncols = len(t.rows[0])
+        # 列数被 normalize_grid 改动过时，列坐标不再可信。
+        if len(t.col_spans) != ncols:
+            t.col_spans = []
 
         # ① 自带表头
         if t.headers:
+            t.col_headers = list(t.headers) if len(t.headers) == ncols else []
             out.append(t)
             continue
 
         # ② 续页表 → 继承（首行是数据，留着）
         if is_continuation(t, prev, page_height=page_height):
             t.headers = list(prev.headers)
+            t.col_headers = align_headers_by_geometry(prev, t)
             out.append(t)
             continue
 
@@ -271,11 +359,13 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
         if len(t.rows) > 1:
             t.headers = list(t.rows[0])
             t.rows = t.rows[1:]
+            t.col_headers = list(t.headers) if len(t.headers) == ncols else []
             out.append(t)
             continue
 
         # ④ 只有一行：不能当表头（表会变空），降级
         t.headers = []
+        t.col_headers = []
         out.append(t)
     return out
 

@@ -1,8 +1,13 @@
 """表格提取与网格归一（§3.4.1 表格支持）。"""
 from __future__ import annotations
 
+from pathlib import Path
+
+import fitz
+
 from app.ingestion.tables import (
-    RawTable, _col_spans_from_cells, forward_fill, inherit_headers,
+    RawTable, _col_spans_from_cells, align_headers_by_geometry,
+    extract_page_tables, forward_fill, inherit_headers,
     is_continuation, is_projected_row_header, normalize_grid,
 )
 
@@ -446,3 +451,69 @@ def test_forward_fill_returns_mask():
     filled, mask = forward_fill(rows, return_mask=True)
     assert filled == [["a", "x"], ["b", "x"]]
     assert mask == [[False, False], [False, True]]
+
+
+# ---- 方案乙 Task 2：几何表头对齐 --------------------------------
+
+P8 = ["课程类别", "课程项目", "课程内容", "参考学分", "开课单位", "获得学分方式"]
+P8_SPANS = [(30.7, 66.4), (66.4, 158.5), (158.5, 312.0),
+            (312.0, 365.1), (365.1, 439.5), (439.5, 564.5)]
+P9_SPANS = [(30.7, 66.4), (66.4, 158.5), (158.5, 225.3),
+            (225.3, 313.0), (313.0, 371.1), (371.1, 442.3), (442.3, 564.5)]
+P10_SPANS = [(30.6, 66.4), (66.4, 158.5), (158.5, 227.0),
+             (227.0, 307.3), (307.3, 371.1), (371.1, 442.3), (442.3, 564.5)]
+
+DOC12 = Path(__file__).resolve().parents[3] / (
+    "corpus/guet/12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf")
+
+
+def _geo_t(headers, spans, rows=None):
+    return RawTable(page=1, bbox=(0, 0, 0, 0), headers=list(headers),
+                    col_headers=list(headers),
+                    rows=rows or [[""] * len(spans)], col_spans=list(spans))
+
+
+def test_align_doc12_p9():
+    prev = _geo_t(P8, P8_SPANS)
+    cur = _geo_t([], P9_SPANS)
+    assert align_headers_by_geometry(prev, cur) == [
+        "课程类别", "课程项目", "课程内容", None,
+        "参考学分", "开课单位", "获得学分方式",
+    ]
+
+
+def test_align_doc12_p10():
+    prev = _geo_t(P8, P8_SPANS)
+    cur = _geo_t([], P10_SPANS)
+    mapping = align_headers_by_geometry(prev, cur)
+    assert mapping[3] is None
+    assert mapping[4] == "参考学分"
+
+
+def test_align_rejects_out_of_tolerance():
+    prev = _geo_t(P8, P8_SPANS)
+    # 整体平移仍可能让某一列偶然落在 15pt 内（列宽不同）；用完全在远处的
+    # 坐标，确保一个都配不上。
+    cur = _geo_t([], [(1000 + i * 100, 1050 + i * 100) for i in range(7)])
+    assert align_headers_by_geometry(prev, cur) == []
+
+
+def test_real_doc12_col_headers_align():
+    doc = fitz.open(DOC12)
+    prev = None
+    try:
+        for page_no in range(8, 13):
+            page = doc.load_page(page_no - 1)
+            tables = inherit_headers(
+                extract_page_tables(page), prev, page_height=page.rect.height)
+            t = tables[0]
+            if page_no == 8:
+                assert t.col_headers == P8
+            else:
+                assert t.col_headers == [
+                    "课程类别", "课程项目", "课程内容", None,
+                    "参考学分", "开课单位", "获得学分方式",
+                ]
+            prev = t
+    finally:
+        doc.close()
