@@ -47,6 +47,27 @@ class RawTable:
     bbox: tuple[float, float, float, float]
     headers: list[str] = field(default_factory=list)   # 空 = 无表头（续页或识别失败）
     rows: list[list[str]] = field(default_factory=list)
+    col_spans: list[tuple[float, float]] = field(default_factory=list)  # 每列真实 x 区间
+    col_headers: list[str | None] = field(default_factory=list)         # 按列对齐后的表头
+    dropped: bool = False                                              # 整表剔除（空白表单）
+
+
+def _col_spans_from_cells(cells, col_count: int) -> list[tuple[float, float]]:
+    """从 PyMuPDF 的 cell 矩形推导每列的 x 区间。
+
+    取所有 cell 的 x0/x1 并集；只有恰好 `col_count + 1` 个边界时才可信。
+    合并单元格会让边界数量对不上 —— 这时返回空列表，调用方回退，不猜。
+    """
+    boxes = [c for c in (cells or []) if c is not None]
+    if not boxes or col_count <= 0:
+        return []
+    xs = sorted(
+        {round(float(c[0]), 1) for c in boxes}
+        | {round(float(c[2]), 1) for c in boxes}
+    )
+    if len(xs) != col_count + 1:
+        return []
+    return [(xs[i], xs[i + 1]) for i in range(col_count)]
 
 
 def normalize_grid(rows: list[list[str]]) -> list[list[str]]:
@@ -65,18 +86,25 @@ def normalize_grid(rows: list[list[str]]) -> list[list[str]]:
 
 
 def forward_fill(rows: list[list[str]], *,
-                 skip_cols: frozenset[int] = frozenset()) -> list[list[str]]:
+                 skip_cols: frozenset[int] = frozenset(),
+                 return_mask: bool = False):
     """把合并单元格的值**向下填充**到它覆盖的每一行。
 
     ⚠️ 实测踩过：只填前两列不够 —— 「开课单位」列同样是合并的。
        默认填所有列，需要保留空值语义的列用 `skip_cols` 排除。
 
     首行就为空时不填（没有上文可承）。
+
+    `return_mask=True` 时返回 `(filled, mask)`；`mask[i][j]` 表示该格是
+    **填充出来的**（原始为空、从上一行承上）。下游做语义处理时不能把
+    填充值当成原始值。
     """
     out: list[list[str]] = []
+    mask: list[list[bool]] = []
     last: list[str] = []
     for row in rows:
         new = list(row)
+        new_mask = [False] * len(new)
         # ⚠️ **必须先把 last 补齐到本行宽度**。否则 `last[i]` 在首行较短时越界，
         #    而 `last[i:i+1] = [cell]` 在越界时的语义是**追加**（不是赋值），
         #    于是后面所有列的「last」整体左移一格 —— 实测：
@@ -95,8 +123,10 @@ def forward_fill(rows: list[list[str]], *,
                 last[i] = cell
             elif last[i]:
                 new[i] = last[i]
+                new_mask[i] = True
         out.append(new)
-    return out
+        mask.append(new_mask)
+    return (out, mask) if return_mask else out
 
 
 #: 判定「锚表结束在页面下部」—— 用**页高比例**，不用绝对 pt。
@@ -131,9 +161,16 @@ def extract_page_tables(page) -> list[RawTable]:
         if not raw:
             continue
         bbox = tuple(float(v) for v in tab.bbox)
-        out.append(RawTable(page=page.number + 1, bbox=bbox, rows=[
-            [(c or "").replace("\n", "").strip() for c in row] for row in raw
-        ]))
+        out.append(RawTable(
+            page=page.number + 1,
+            bbox=bbox,
+            rows=[
+                [(c or "").replace("\n", "").strip() for c in row]
+                for row in raw
+            ],
+            col_spans=_col_spans_from_cells(
+                getattr(tab, "cells", None), getattr(tab, "col_count", 0)),
+        ))
     return out
 
 

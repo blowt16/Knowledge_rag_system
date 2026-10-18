@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from app.ingestion.tables import (
-    RawTable, forward_fill, inherit_headers, is_continuation,
-    is_projected_row_header, normalize_grid,
+    RawTable, _col_spans_from_cells, forward_fill, inherit_headers,
+    is_continuation, is_projected_row_header, normalize_grid,
 )
 
 
@@ -416,3 +416,33 @@ def test_atomic_ranges_stay_distinct_for_identical_groups():
     assert s1 != s2, "两组必须映射到不同区间，不能都指回第一组"
     assert e1 <= s2, "区间必须递增且两两不重叠"
     assert text[s1:e1] == text[s2:e2] == group
+
+
+# ---- 方案乙 Task 1：列坐标 + 填充掩码 --------------------------------
+
+def test_col_spans_from_real_p9_cells():
+    cells = [
+        (30.7, 0, 66.4, 1),
+        (66.4, 0, 158.5, 1),
+        (158.5, 0, 225.3, 1),
+        (225.3, 0, 313.0, 1),
+        (313.0, 0, 371.1, 1),
+        (371.1, 0, 442.3, 1),
+        (442.3, 0, 564.5, 1),
+    ]
+    assert _col_spans_from_cells(cells, 7) == [
+        (30.7, 66.4), (66.4, 158.5), (158.5, 225.3), (225.3, 313.0),
+        (313.0, 371.1), (371.1, 442.3), (442.3, 564.5),
+    ]
+
+
+def test_col_spans_rejects_inconsistent_grid():
+    cells = [(0, 0, 10, 1), (10, 0, 20, 1)]
+    assert _col_spans_from_cells(cells, 3) == []
+
+
+def test_forward_fill_returns_mask():
+    rows = [["a", "x"], ["b", ""]]
+    filled, mask = forward_fill(rows, return_mask=True)
+    assert filled == [["a", "x"], ["b", "x"]]
+    assert mask == [[False, False], [False, True]]
