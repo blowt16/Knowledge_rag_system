@@ -361,3 +361,16 @@ def test_all_dropped_page_keeps_title_and_residual():
     assert "合计" in text and "77" in text
     for word in ("学号", "姓名", "例1", "审核人签字"):
         assert word not in text
+
+
+def test_doc11_p6_merged_score_rows_are_kept():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    page6 = next(p.text for p in res.pages if p.page == 6)
+    assert "全国高等学校英语专业八级考试" in page6
+    assert "日本语能力测试（JLPT N1）" in page6
+    assert "50分" in page6

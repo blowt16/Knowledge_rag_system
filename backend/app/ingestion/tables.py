@@ -293,8 +293,13 @@ def is_projected_row_header(row: list[str], ncols: int) -> bool:
     用途：`serialize_groups` 跳过它 —— 它只是个分类分隔，不承载数据，
     序列化成 `课程类别：实践实习与社会工作` 这种单键行纯属噪声。
     （它的值已经由 `forward_fill` 传播到下面每一行了。）
+
+    ⚠️ 二列表要特殊对待：doc11 p6 的「类别 | 分值」表里，专八/N1 等证书的
+       分值格是**合并单元格**，抽出来就是「第一格有值、第二格为空」。
+       如果按 PRH 跳过，会静默丢掉 4 行证书分值（实测 0 次出现在正文）。
+       因此要求 `ncols >= 3` 才判 PRH；真实 PRH 行都在 7 列评分表里。
     """
-    if not row or ncols < 2:
+    if not row or ncols < 3:
         return False
     filled = [i for i, c in enumerate(row) if c.strip()]
     return filled == [0]
@@ -325,25 +330,33 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
     """
     out: list[RawTable] = []
     for t in tables:
+        had_spans = bool(t.col_spans)
         t.rows = normalize_grid(t.rows)
         if not t.rows:
             out.append(t)
             continue
         ncols = len(t.rows[0])
-        # 列数被 normalize_grid 改动过时，列坐标不再可信。
+        # 列数被 normalize_grid 改动过时，列坐标不再可信；也不能按位置套表头。
+        normalized_changed = had_spans and len(t.col_spans) != ncols
         if len(t.col_spans) != ncols:
             t.col_spans = []
 
         # ① 自带表头
         if t.headers:
-            t.col_headers = list(t.headers) if len(t.headers) == ncols else []
+            t.col_headers = (
+                [None] * ncols if normalized_changed
+                else list(t.headers) if len(t.headers) == ncols else []
+            )
             out.append(t)
             continue
 
         # ② 续页表 → 继承（首行是数据，留着）
         if is_continuation(t, prev, page_height=page_height):
             t.headers = list(prev.headers)
-            t.col_headers = align_headers_by_geometry(prev, t)
+            t.col_headers = (
+                [None] * ncols if normalized_changed
+                else align_headers_by_geometry(prev, t)
+            )
             out.append(t)
             continue
 
@@ -351,13 +364,16 @@ def inherit_headers(tables: list[RawTable], prev: RawTable | None, *,
         if len(t.rows) > 1:
             t.headers = list(t.rows[0])
             t.rows = t.rows[1:]
-            t.col_headers = list(t.headers) if len(t.headers) == ncols else []
+            t.col_headers = (
+                [None] * ncols if normalized_changed
+                else list(t.headers) if len(t.headers) == ncols else []
+            )
             out.append(t)
             continue
 
         # ④ 只有一行：不能当表头（表会变空），降级
         t.headers = []
-        t.col_headers = []
+        t.col_headers = [None] * ncols if normalized_changed else []
         out.append(t)
     return out
 

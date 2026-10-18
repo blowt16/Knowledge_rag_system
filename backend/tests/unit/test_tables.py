@@ -532,3 +532,23 @@ def test_mismatched_header_count_uses_position_labels():
     assert "列1是甲类" in body
     assert "列4是获奖等级值" in body
     assert "参考学分是2分/次" not in body, "列数不符时不得按名字错配"
+
+
+def test_two_column_certificate_row_is_not_prh():
+    """doc11 p6 的 2 列表：分值格为空是合并单元格，不是分组行。"""
+    assert not is_projected_row_header(["全国高等学校英语专业八级考试≥ 60", ""], 2)
+
+
+def test_normalized_continuation_does_not_pair_headers_by_index():
+    """续页表被 normalize_grid 丢掉一整列后，不能再按位置套表头。"""
+    prev = _t(8, 167.2, 769.8, P8, [["A"] * 6])
+    cur = RawTable(
+        page=9, bbox=(0.0, 62.4, 595.0, 767.0), headers=[],
+        col_spans=list(P9_SPANS),
+        rows=[["科技", "项目", "内容", "等级", "15分/项", "", "方式"]],
+    )
+    out = inherit_headers([cur], prev, page_height=PH)[0]
+    assert out.col_headers == [None] * 6
+    body = serialize_groups(out, budget=500)[0]
+    assert "列1是科技" in body
+    assert "参考学分是" not in body
