@@ -289,3 +289,28 @@ def test_table_group_marker_survives_cleaning():
     pages = [(i + 1, f"第{i + 1}页正文。\n{hdr}\n课程类别是甲，参考学分是5分。") for i in range(8)]
     normalized, _ = build_normalized_text(pages)
     assert normalized.count(GROUP_MARK) == 8, "每个表头行都必须留下"
+
+
+# ---- 方案乙 Task 5：真实文档自然句回归 --------------------------------
+
+def test_doc12_cet6_natural_sentence():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "12_第二课堂成绩单制度实施办法_2025修订_桂电2025-30号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    page12 = next(p.text for p in res.pages if p.page == 12)
+    assert "大学英语及专业英语水平测试：大学英语六级，参考学分 5分/项" in page12
+
+
+def test_doc11_generic_natural_sentence():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    page3 = next(p.text for p in res.pages if p.page == 3)
+    assert "文章等级是SCI" in page3
+    assert "第1 作者或通信作者是100" in page3
