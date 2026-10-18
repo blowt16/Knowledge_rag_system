@@ -19,6 +19,50 @@ FORM_WORDS = ("审核人签字", "学号", "姓名", "合计", "专业", "课号
 EXAMPLE_RE = re.compile(r"^例\d+$")
 
 
+PURE_INT = re.compile(r"^\d+$")
+#: 这些表头下的整数不是分数；整列跳过，不补“分”。
+NON_SCORE_HEADERS = ("序号", "编号", "人数", "年份", "数量", "页码")
+
+
+def infer_score_columns(rows: list[list[str]],
+                        headers: list[str | None]) -> set[int]:
+    """按列推断哪些列是分值列。
+
+    列内 ≥80% 的非空值是纯整数，且都在 0–1000 —— 视为分值列。
+    表头命中 `NON_SCORE_HEADERS` 的整列跳过。
+    """
+    if not rows:
+        return set()
+    ncols = len(rows[0])
+    out: set[int] = set()
+    for i in range(ncols):
+        header = headers[i] if i < len(headers) and headers[i] else ""
+        if any(w in header for w in NON_SCORE_HEADERS):
+            continue
+        vals = [r[i].strip() for r in rows if i < len(r) and r[i].strip()]
+        if not vals:
+            continue
+        ints = [v for v in vals if PURE_INT.match(v)]
+        if len(ints) / len(vals) < 0.8:
+            continue
+        if all(0 <= int(v) <= 1000 for v in ints):
+            out.add(i)
+    return out
+
+
+def apply_score_units(filled_row: list[str], mask_row: list[bool],
+                      score_cols: set[int]) -> list[str]:
+    """给分值列里的裸整数补“分”；`forward_fill` 填出来的格子跳过。"""
+    out = list(filled_row)
+    for i in score_cols:
+        if i >= len(out) or i >= len(mask_row) or mask_row[i]:
+            continue
+        value = out[i].strip()
+        if PURE_INT.match(value):
+            out[i] = value + "分"
+    return out
+
+
 def is_application_form(rows: list[list[str]]) -> bool:
     """识别“空白申请表”模板：表头词命中 ≥2，且至少两个结构信号。
 
