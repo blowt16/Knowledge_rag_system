@@ -331,3 +331,33 @@ def test_doc12_multi_value_natural_sentence():
         in page10
     )
     assert "18、15、12分/项" not in page10, "展开后不应保留原始多值串"
+
+
+# ---- 方案 3 Task 2：空白表单剔除 --------------------------------------
+
+def test_doc11_p8_form_body_removed_but_residual_kept():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    text = next(p.text for p in res.pages if p.page == 8)
+    for word in ("学号", "姓名", "例1", "例6", "审核人签字"):
+        assert word not in text, f"表单主体 {word} 仍在正文"
+    assert "合计" in text and "77" in text, "表外残留按决定保留"
+
+
+def test_all_dropped_page_keeps_title_and_residual():
+    from app.ingestion.loaders.pdf import load_pdf
+
+    pdf = CORPUS / "11_创新创业拓展课程学分认定管理办法_桂电教2026-13号.pdf"
+    if not pdf.exists():
+        pytest.skip("语料不在仓库中")
+    res = load_pdf(pdf)
+    text = next(p.text for p in res.pages if p.page == 8)
+    assert "桂林电子科技大学《创新创业拓展》课程" in text
+    assert "学分认定申请表" in text
+    assert "合计" in text and "77" in text
+    for word in ("学号", "姓名", "例1", "审核人签字"):
+        assert word not in text

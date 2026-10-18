@@ -418,6 +418,7 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
     from app.ingestion.tables import (
         extract_page_tables, inherit_headers, serialize_groups,
     )
+    from app.ingestion.table_rules import is_application_form
     from app.ingestion.chunker import chunk_size_hint
 
     fallback = page_text if page_text is not None else "\n".join(blocks)
@@ -426,8 +427,12 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
     if not tables:
         return fallback, boxes, prev_table
 
+    # 空白申请表：保留 bbox 用于剔除拍平正文，但跳过序列化。
+    for t in tables:
+        t.dropped = is_application_form(t.rows)
+
     tables = inherit_headers(tables, prev_table, page_height=page.rect.height)
-    table_boxes = [t.bbox for t in tables if t.rows]
+    table_boxes = [t.bbox for t in tables]   # 包括 dropped：拍平块也要剔除
     if not table_boxes:
         return fallback, boxes, prev_table
 
@@ -458,6 +463,8 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
     for blk, box in zip(kept_blocks, kept_boxes):
         items.append((box["top"], 0, blk))          # 0 = 正文块
     for t in tables:
+        if t.dropped:
+            continue
         for g in serialize_groups(t, budget=chunk_size_hint()):
             items.append((t.bbox[1], 1, g))         # 1 = 表格组
     # 同一 y 上正文块在前（kind 0 < 1）
@@ -478,8 +485,8 @@ def _text_with_tables(blocks: list[str], boxes: list[dict], page: "fitz.Page",
     #    却**不以其开头**，Task 6「【表头】到下一个空行」的判据当场失效
     #    （实测 doc 11 p3「论文类」后面就是）。收敛口径与 `clean_page` 的
     #    `_MULTI_BLANK_RE` 一致：三个以上换行 → 一个空行。
-    return (re.sub(r"\n{3,}", "\n\n", "\n".join(out)), kept_boxes,
-            (tables[-1] if tables else prev_table))
+    last_kept = next((t for t in reversed(tables) if not t.dropped), prev_table)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)), kept_boxes, last_kept
 
 
 def load_pdf(path: Path, *, image_dir: Path | None = None) -> LoadResult:
