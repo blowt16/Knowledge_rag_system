@@ -191,9 +191,10 @@ export default function EvalSetsPage() {
               {query || sourceFilter ? '没有符合条件的用例' : '这个评测集还没有用例'}
             </p>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
+              {/* 用例多时在卡片内部滚动，页面不跟着无限变长；表头吸顶，滚到中间也知道各列是什么 */}
               <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-card text-left text-muted-foreground">
                   <tr>
                     <th className="py-2 pr-3">问题</th>
                     <th className="py-2 pr-3">标准答案</th>

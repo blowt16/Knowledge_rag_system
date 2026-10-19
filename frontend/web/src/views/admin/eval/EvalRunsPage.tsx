@@ -248,9 +248,10 @@ export default function EvalRunsPage() {
           {runs.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">还没有评测记录</p>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
+              {/* 轮次多时在卡片内部滚动；表头吸顶，滚到中间也知道各列是什么 */}
               <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-card text-left text-muted-foreground">
                   <tr>
                     <th className="py-2 pr-3">任务ID</th>
                     <th className="py-2 pr-3">评测集</th>
