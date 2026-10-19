@@ -213,7 +213,7 @@ input, textarea { font: inherit; }
 .sidebar-foot .icon-btn { margin-left: auto; }
 
 /* ---- 对话区 ---- */
-.chat-area { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-area { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .chat-header {
   display: flex; align-items: center; gap: 12px; flex: none;
   padding: 11px 18px; background: var(--app-card); border-bottom: 1px solid var(--line);
@@ -221,6 +221,46 @@ input, textarea { font: inherit; }
 .escalate-toggle {
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   color: var(--app-muted); margin-left: 4px;
+}
+
+/* ---- 右侧历史提问大纲（参考 DeepSeek 的悬浮 query 列表）----
+   默认只露一排短横线；鼠标移上去/键盘聚焦时弹出白底列表。
+   ⚠️ 面板是 .chat-area 的绝对定位子节点，抽屉展开时它会跟着聊天区一起变窄。 */
+.conv-outline {
+  /* 让开聊天区的竖向滚动条（10px），否则短横线的点击区会盖住滚动条 */
+  position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+  z-index: 6; display: flex; align-items: center;
+}
+.conv-outline-trigger {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+  padding: 8px 6px; border: 0; border-radius: 8px; background: transparent;
+}
+.conv-outline-trigger:hover { background: var(--c-hover); }
+.conv-outline-dash {
+  display: block; width: 11px; height: 2px; border-radius: 1px;
+  background: var(--c-scroll-thumb); transition: width .15s, background .15s;
+}
+.conv-outline-dash.active { width: 16px; background: var(--brand); }
+.conv-outline-panel {
+  position: absolute; right: 34px; top: 50%; transform: translateY(-50%);
+  width: 260px; max-width: calc(100vw - 48px); max-height: 60vh; overflow-y: auto;
+  padding: 6px; background: var(--app-card); border: 1px solid var(--line);
+  border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+  animation: outline-in .14s ease-out;
+}
+@keyframes outline-in {
+  from { opacity: 0; transform: translate(6px, -50%); }
+  to { opacity: 1; transform: translate(0, -50%); }
+}
+.conv-outline-item {
+  display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--app-muted); text-align: left;
+  font-size: 13px; line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conv-outline-item:hover { background: var(--c-hover); color: var(--fg); }
+.conv-outline-item.active {
+  background: var(--c-active); color: var(--fg); font-weight: 550;
 }
 
 /* ⚠️ 滚动容器与「限宽内容列」必须**分成两层**：
@@ -233,7 +273,7 @@ input, textarea { font: inherit; }
 .empty-logo { display: flex; justify-content: center; margin-bottom: 14px; }
 .empty h2 { font-size: 21px; margin: 0 0 8px; font-weight: 600; }
 
-.turn { margin-bottom: 26px; }
+.turn { margin-bottom: 26px; scroll-margin-top: 16px; }
 .msg { display: flex; gap: 10px; align-items: flex-start; }
 .msg.user { justify-content: flex-end; margin-bottom: 12px; }
 .msg.assistant { margin-bottom: 4px; }

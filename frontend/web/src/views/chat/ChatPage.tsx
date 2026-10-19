@@ -101,6 +101,9 @@ export default function ChatPage() {
   //: 而且「删了什么、能不能撤销」这类话原生框里根本写不下。这里还要显示会话标题。
   const [pendingDelete, setPendingDelete] = useState<ConversationItem | null>(null)
   const [deleting, setDeleting] = useState(false)
+  // 当前会话的提问大纲（右侧悬浮面板）
+  const [outlineOpen, setOutlineOpen] = useState(false)
+  const [activeQuery, setActiveQuery] = useState<number | null>(null)
   const abortRef = useRef<(() => void) | null>(null)
   const { user, logout } = useAuth()
   const { theme, toggle: toggleTheme } = useTheme()
@@ -117,6 +120,24 @@ export default function ChatPage() {
   //    而流式渲染的性能问题已经由 `StreamingAnswer` 的分块渲染解决了。
   const mainRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
+  const outlinePanelRef = useRef<HTMLDivElement>(null)
+
+  // 新的一轮进来时，默认高亮最新提问
+  useEffect(() => {
+    setActiveQuery(turns.length ? turns.length - 1 : null)
+  }, [turns.length])
+
+  // 打开大纲时把当前提问滚到面板中间，长会话里不用自己找
+  useEffect(() => {
+    if (!outlineOpen) return
+    const panel = outlinePanelRef.current
+    const active = panel?.querySelector<HTMLElement>('.conv-outline-item.active')
+    if (!panel || !active) return
+    panel.scrollTop = Math.max(
+      0,
+      active.offsetTop - panel.clientHeight / 2 + active.clientHeight / 2,
+    )
+  }, [outlineOpen, activeQuery])
 
   function onStreamScroll() {
     const el = mainRef.current
@@ -277,6 +298,17 @@ export default function ChatPage() {
     }
   }
 
+  /** 跳到指定的一轮提问。关掉贴底标记，避免流式渲染的自动滚动把视口拉回去。 */
+  function scrollToTurn(index: number) {
+    const el = document.getElementById(`turn-${index}`)
+    if (!el) return
+    stickRef.current = false
+    setActiveQuery(index)
+    // 用即时滚动：平滑滚动刚起步时，onStreamScroll 会把「还贴着底」当成
+    // 用户没有上翻，紧接着的渲染又会把视口拉回底部，跳转就失效了。
+    el.scrollIntoView({ block: 'start' })
+  }
+
   /** 新建对话只是清空本地 session_id —— 不调 POST /api/conversations，
    *  否则会话列表里会堆积没有消息的空会话（§3.7.2）。 */
   function newConversation() {
@@ -331,6 +363,11 @@ export default function ChatPage() {
     : convs
   //: 顶部标题跟随当前会话：新对话 → 「新对话」；打开历史会话 → 该会话的标题。
   const currentConv = convs.find((c) => c.id === sessionId) ?? null
+  //: 右侧指示条最多画 12 个短横线；会话很长时按比例取样。
+  const outlineDashes = turns.length <= 12
+    ? turns.map((_, i) => i)
+    : Array.from({ length: 12 }, (_, k) =>
+        Math.round((k * (turns.length - 1)) / 11))
 
   return (
     <div className="app">
@@ -457,8 +494,8 @@ export default function ChatPage() {
               </div>
             )}
 
-            {turns.map((turn) => (
-              <div className="turn" key={turn.id}>
+            {turns.map((turn, index) => (
+              <div className="turn" key={turn.id} id={`turn-${index}`}>
                 {/* 问句：头像在右 */}
                 <div className="msg user">
                   <div className="bubble user">{turn.question}</div>
@@ -574,6 +611,58 @@ export default function ChatPage() {
             </div>
           </div>
         </footer>
+
+        {/* 右侧历史提问大纲：悬停显示，点击跳转到对应提问 */}
+        {turns.length > 0 && (
+          <div
+            className={`conv-outline${outlineOpen ? ' open' : ''}`}
+            onMouseEnter={() => setOutlineOpen(true)}
+            onMouseLeave={() => setOutlineOpen(false)}
+            onFocus={() => setOutlineOpen(true)}
+            onBlur={(e) => {
+              if (!(e.relatedTarget instanceof Node)
+                  || !e.currentTarget.contains(e.relatedTarget)) {
+                setOutlineOpen(false)
+              }
+            }}
+          >
+            <button
+              type="button"
+              className="conv-outline-trigger"
+              aria-label="查看当前对话的所有提问"
+              aria-expanded={outlineOpen}
+              onClick={() => setOutlineOpen(v => !v)}
+            >
+              {outlineDashes.map(i => (
+                <span
+                  key={i}
+                  className={`conv-outline-dash${i === activeQuery ? ' active' : ''}`}
+                />
+              ))}
+            </button>
+
+            {outlineOpen && (
+              <div
+                ref={outlinePanelRef}
+                className="conv-outline-panel"
+                role="navigation"
+                aria-label="当前对话的提问"
+              >
+                {turns.map((turn, i) => (
+                  <button
+                    key={turn.id}
+                    type="button"
+                    className={`conv-outline-item${i === activeQuery ? ' active' : ''}`}
+                    title={turn.question}
+                    onClick={() => scrollToTurn(i)}
+                  >
+                    {turn.question}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 删除会话的确认框 —— 刻意不用 `window.confirm`（见 pendingDelete 的注释）。
