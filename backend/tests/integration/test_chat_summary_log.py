@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.deps import UserContext
 from app.services import chat_service
 from tests.integration.test_stage_events import (
     ScriptedGraph,
     _frames,
+    _never_disconnected,
     script_for,
     session,  # noqa: F401 —— pytest fixture
     task_start,
@@ -47,6 +49,27 @@ async def test_chat_done_logs_summary(session, _install, caplog):
     assert rec.route == "knowledge"
     assert rec.decision == "ANSWERED"
     assert rec.latency_ms >= 0
+
+
+async def test_chat_logs_do_not_leak_query(session, _install, caplog):
+    final = _final()
+    _install(script_for(["resolve", "route", "generate"], final))
+
+    with caplog.at_level(logging.INFO, logger="app.services.chat_service"):
+        frames = [
+            frame async for frame in chat_service.stream_chat(
+                query="SECRET_QUERY_9f3a",
+                session_id=session,
+                is_new_session=False,
+                include_restricted=False,
+                user=UserContext(id="u", username="u", role="student",
+                                 token_version=0),
+                is_disconnected=_never_disconnected,
+            )
+        ]
+
+    assert frames
+    assert "SECRET_QUERY_9f3a" not in caplog.text
 
 
 async def test_chat_first_token_logs_ttft(session, _install, caplog):

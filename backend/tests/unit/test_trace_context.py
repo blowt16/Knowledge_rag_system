@@ -38,6 +38,34 @@ def test_nested_spans_parent_and_depth():
         assert trace.current_stage() == ""
 
 
+async def test_new_trace_does_not_inherit_parent_span():
+    """后台/SSE 里开新 trace 时，不能继承外层已关闭的 span 栈。"""
+    with trace.begin_trace():
+        with trace.trace_span("http"):
+            async def child() -> tuple[int, str, str]:
+                with trace.begin_trace():
+                    with trace.trace_span("inner") as inner:
+                        return inner.depth, inner.parent_span_id, trace.current_stage()
+
+            return_value = await asyncio.create_task(child())
+            assert return_value == (0, "", "inner")
+
+
+async def test_concurrent_traces_do_not_cross():
+    async def worker(tid: str, stage: str) -> tuple[str, str]:
+        with trace.begin_trace(tid):
+            with trace.trace_span(stage):
+                await asyncio.sleep(0)
+                return trace.current_trace_id(), trace.current_stage()
+
+    first, second = await asyncio.gather(
+        worker("a" * 32, "one"),
+        worker("b" * 32, "two"),
+    )
+    assert first == ("a" * 32, "one")
+    assert second == ("b" * 32, "two")
+
+
 async def test_trace_propagates_to_created_task():
     with trace.begin_trace("b" * 32):
         async def child() -> str:

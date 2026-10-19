@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from app.core import trace
 from app.graph.builder import traced
 from app.graph.node_io import node_log_fields
 
@@ -36,3 +37,20 @@ async def test_traced_logs_even_without_langfuse(caplog):
     assert recs, "没有节点完成日志"
     assert recs[-1].stage == "node.route"
     assert recs[-1].route == "knowledge"
+
+
+async def test_traced_chain_emits_stage_done_for_each_node(caplog):
+    async def fake(state):
+        return {
+            "trace": [{"node": "x", "ms": 1, "recalled": 0, "degraded": None}],
+        }
+
+    with caplog.at_level(logging.INFO, logger="app.core.trace"):
+        with trace.begin_trace():
+            for name in ("resolve", "retrieve", "generate"):
+                await traced(name, fake)({"query": "q"})
+
+    done = [r for r in caplog.records if getattr(r, "event", "") == "stage.done"]
+    stages = {r.stage for r in done}
+    assert {"node.resolve", "node.retrieve", "node.generate"} <= stages
+    assert all(r.trace_id for r in done)

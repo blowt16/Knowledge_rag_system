@@ -177,7 +177,9 @@ async def trace_middleware(request: Request, call_next):
             except BaseException as e:  # noqa: BLE001
                 stage.set(ok=False, error=type(e).__name__)
                 raise
-            stage.set(status=response.status_code,
+            route_path = getattr(request.scope.get("route"), "path",
+                                 request.url.path)
+            stage.set(path=route_path, status=response.status_code,
                       ok=response.status_code < 500)
             if response.status_code >= 500:
                 stage.set_level(logging.ERROR)
@@ -192,7 +194,9 @@ async def trace_middleware(request: Request, call_next):
         #     异常一旦穿过 with，`exception.message` 与整个栈就会发到云端。
         with client.start_as_current_observation(
             as_type="span",
-            name=f"{request.method} {request.url.path}",
+            # 路由模板在 call_next 之后才可知；这里用固定名避免把 id 变成
+            # 高基数 span 名，具体路由写进 metadata["http.route"]。
+            name=f"{request.method} http",
             trace_context={"trace_id": tid},
             input=None, output=None,
         ) as span:
@@ -205,9 +209,11 @@ async def trace_middleware(request: Request, call_next):
                 pending = e
 
             if response is not None:
+                route_path = getattr(request.scope.get("route"), "path",
+                                     request.url.path)
                 span.update(metadata={
                     "http.method": request.method,
-                    "http.route": request.url.path,
+                    "http.route": route_path,
                     "http.status_code": response.status_code,
                 })
                 # ★ 5xx 标 ERROR —— Metrics API 没有 HTTP 状态码维度，
@@ -216,11 +222,13 @@ async def trace_middleware(request: Request, call_next):
                     span.update(level="ERROR",
                                 status_message=f"HTTP {response.status_code}")
                     stage.set_level(logging.ERROR)
-                stage.set(status=response.status_code,
+                stage.set(path=route_path, status=response.status_code,
                           ok=response.status_code < 500)
 
                 # ⚠️ 两个 id 必须在 with **内**取：出了 with 观测已结束。
-                span_id = observability.current_span_id()
+                # span_id 用**本地** http span：JSON 日志里的 span_id 也是它，
+                # 这样从响应头能直接对到那一行日志；trace_id 仍是 Langfuse 的 join key。
+                span_id = trace.current_span_id() or observability.current_span_id()
                 response.headers["x-trace-id"] = tid
                 response.headers["traceparent"] = f"00-{tid}-{span_id}-01"
 

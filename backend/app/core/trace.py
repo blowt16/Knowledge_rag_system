@@ -83,14 +83,22 @@ def current_elapsed_ms() -> int:
 
 @contextmanager
 def begin_trace(trace_id: str | None = None) -> Iterator[str]:
+    """开始一条新 trace。
+
+    ⚠️ 必须同时清空 span 栈：SSE 生成器/后台任务会从外层 HTTP 上下文继承
+       ContextVar。只换 trace_id 不清栈，新 trace 的第一个 span 会把外层
+       **已关闭**的 HTTP span 当成父节点（实测 depth=1、parent 指向别的 trace）。
+    """
     tid = trace_id or new_trace_id()
     token = _trace_id.set(tid)
     started_token = _trace_started.set(time.perf_counter())
+    stack_token = _span_stack.set(())
     try:
         yield tid
     finally:
         _trace_id.reset(token)
         _trace_started.reset(started_token)
+        _span_stack.reset(stack_token)
 
 
 def _ms(started: float) -> int:
@@ -140,6 +148,17 @@ def trace_span(name: str, *, layer: str = "stage",
                 pass
         try:
             yield span
+        except GeneratorExit:
+            # 消费者提前关闭流（客户端断连/主动 aclose）：
+            # GeneratorExit 是 BaseException，不会走下面的 Exception 分支。
+            try:
+                logger.log(span.level or level, "完成",
+                           extra=_extra("stage.done", span, ok=True,
+                                        cancelled=True,
+                                        ms=_ms(span.started)))
+            except Exception:  # noqa: BLE001
+                pass
+            raise
         except Exception as e:
             try:
                 logger.error("失败", exc_info=True,

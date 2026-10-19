@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.core import observability
+from app.core import observability, trace
 from app.core.deps import UserContext, current_user
 from app.services import chat_service
 from tests.lf_capture import CapturingLangfuse
@@ -36,6 +36,10 @@ def test_chat_stream_logs_the_same_trace_id_as_response_header(
     from app.main import trace_middleware
 
     async def _fake_stream(**_kwargs):
+        logging.getLogger("test.chat_generator").info(
+            "inside generator",
+            extra={"event": "chat.inside", "trace_id": trace.current_trace_id()},
+        )
         yield 'event: done\ndata: {}\n\n'
 
     monkeypatch.setattr(chat_service, "stream_chat", _fake_stream)
@@ -47,7 +51,7 @@ def test_chat_stream_logs_the_same_trace_id_as_response_header(
         id="u1", username="u1", role="student", token_version=0)
 
     with TestClient(app) as tc:
-        with caplog.at_level(logging.INFO, logger="app.api.chat"):
+        with caplog.at_level(logging.INFO):
             response = tc.post("/api/chat/stream",
                                json={"query": "转专业条件",
                                      "request_id": "test-req-1"})
@@ -61,4 +65,11 @@ def test_chat_stream_logs_the_same_trace_id_as_response_header(
     assert header_trace_id in starts[0].getMessage(), (
         f"日志里的 trace_id 与响应头不一致：{starts[0].getMessage()!r} "
         f"vs {header_trace_id}"
+    )
+
+    inside = [r for r in caplog.records if getattr(r, "event", "") == "chat.inside"]
+    assert inside, "SSE 生成器里没有日志"
+    assert inside[0].trace_id == header_trace_id, (
+        f"生成器里的 trace_id 与响应头不一致：{inside[0].trace_id!r} "
+        f"vs {header_trace_id!r}"
     )

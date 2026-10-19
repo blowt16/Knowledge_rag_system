@@ -257,11 +257,15 @@ def begin_trace(trace_id: str | None = None):
     tid = trace_id or new_trace_id()
     token = _trace_id.set(tid)
     started_token = _trace_started.set(time.perf_counter())
+    # ⚠️ 必须同时清空 span 栈：SSE/后台任务会从外层 HTTP 上下文继承 ContextVar，
+    #    只换 trace_id 会把外层已关闭的 span 当父节点（实测 depth=1、跨 trace）。
+    stack_token = _span_stack.set(())
     try:
         yield tid
     finally:
         _trace_id.reset(token)
         _trace_started.reset(started_token)
+        _span_stack.reset(stack_token)
 ```
 
 - HTTP 中间件：`with trace.begin_trace(tid): ...`
@@ -299,7 +303,9 @@ def current_span_id() -> str:
 - 响应头 `x-trace-id` / `traceparent`
 - Langfuse 平台里的 trace
 
-三者是同一个值。
+三者是同一个 `trace_id`。
+
+响应头 `traceparent` 的 span 段使用**本地** HTTP span id，与 `http` 日志行的 `span_id` 一致；Langfuse 内部仍用自己的 observation id，靠 `trace_id` 关联。
 
 > ⚠️ 这是本方案唯一会改变既有语义的地方：请求内日志的 `trace_id` 从「Langfuse 关闭时全 0」变为「本地生成的真实 ID」。`test_logging_trace_id.py` 需要同步更新；完全不在任何 trace 上下文里的日志仍保持全 0。
 
@@ -400,7 +406,8 @@ status method path
   2. 否则从 `trace` 模块读取当前栈顶。
   它们不放进 `extra`；`depth` 对不在 span 里的汇总行取 0。
 - `ms` / 业务字段仍在 `extra`，避免改变现有消费方。
-- `span_id` 语义保持：Langfuse 可用时是 Langfuse span；不可用时回退到本地栈顶。
+- `span_id` 是**本地阶段 span**（`trace_span` 的 span_id），响应头 `traceparent` 的 span 段也用它，保证「响应头 → 那一行日志」能直接对上；`trace_id` 才是与 Langfuse 对齐的 join key。
+- 早期方案的「`span_id` 用 Langfuse span」已废弃：Langfuse 的 observation id 只有在其 `with` 内可取，而本地 span 在它外面；两者混用会让 header 与日志的 span_id 不一致（评审实测）。
 - 脱敏逻辑不变；`stage` / `depth` / `stage_id` / `parent_stage_id` 加入 `reserved`，避免重复进 `extra`。
 - `ConsoleFormatter` 与 `JsonFormatter` 共享同一份 record；控制台格式器不得修改 `record.__dict__`。
 

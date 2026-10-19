@@ -60,13 +60,14 @@ _CONSOLE_FIELDS = (
     "queries", "candidates", "recalled", "kept", "top", "confidence",
     "degraded", "evidence", "chars", "citations", "reason", "facets",
     "refused", "inputs", "outputs", "rrf_k",
-    "model", "node", "ttft_ms", "tokens_in", "tokens_out", "tokens",
+    "model", "node", "messages", "history", "ttft_ms",
+    "tokens_in", "tokens_out", "tokens",
     "hits", "folded", "retry",
     "pages", "ocr_pages", "tables", "chunks", "batches", "vectors",
     "before_tokens", "after_tokens", "summary_chars",
     "chars_in", "chars_out", "file_type", "supported", "duplicate",
     "size", "source", "dim", "bm25", "doc_id", "version", "task_id",
-    "doc_filename", "run_id",
+    "doc_filename", "chapters", "run_id",
     "case_id", "turn", "hit",
     "status", "method", "path", "error",
 )
@@ -96,12 +97,31 @@ def _scrub(obj: Any) -> Any:
     """递归把敏感键的值换成占位符。"""
     if isinstance(obj, dict):
         return {
-            k: (_REDACTED if k.lower() in _SENSITIVE_KEYS else _scrub(v))
+            # 敏感键里**数字**是数量（messages=3/history=5），不是正文；
+            # 字符串/容器仍然整值打码。
+            k: (_REDACTED
+                if k.lower() in _SENSITIVE_KEYS
+                and not isinstance(v, (int, float, bool))
+                else _scrub(v))
             for k, v in obj.items()
         }
     if isinstance(obj, (list, tuple)):
         return [_scrub(v) for v in obj]
     return obj
+
+
+class _DropLangfuseContextNoise(logging.Filter):
+    """Langfuse 在没有 active span 时会刷 "Context error" WARNING。
+
+    本项目的 local trace 已经兜底；这类噪音会把真正的阶段日志淹没。
+    只丢这一条，其余 Langfuse 告警照常保留。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "No active span in current context" not in record.getMessage()
+
+
+_LANGFUSE_CONTEXT_NOISE = _DropLangfuseContextNoise()
 
 
 def _force_utf8(stream: Any) -> None:
@@ -214,6 +234,11 @@ class ConsoleFormatter(logging.Formatter):
         )
 
         ms = getattr(record, "ms", None)
+        if ms is None:
+            # chat 汇总行带的是 latency_ms / elapsed_ms，不是 span 的 ms
+            ms = getattr(record, "latency_ms", None)
+        if ms is None:
+            ms = getattr(record, "elapsed_ms", None)
         if ms is not None:
             line += f" {self._color(_fmt_ms(ms), 'dim')}"
 
@@ -334,6 +359,7 @@ def install() -> None:
     # Langfuse/OTel 在没有 active span 时会打 "Context error" WARNING；
     # 本项目的 local trace 已经兜底，这类噪音只会淹没真正的阶段日志。
     logging.getLogger("opentelemetry.context").setLevel(logging.ERROR)
+    logging.getLogger("langfuse").addFilter(_LANGFUSE_CONTEXT_NOISE)
 
     # uvicorn：启动/错误日志走应用格式器；访问日志由 http 阶段行负责，
     # 关掉默认 access logger，避免每个请求出现两行。

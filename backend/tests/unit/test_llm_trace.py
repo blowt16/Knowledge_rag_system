@@ -88,6 +88,26 @@ async def test_complete_logs_tokens_without_prompt(monkeypatch, caplog):
     assert "SECRET_PROMPT_9f3a" not in caplog.text
 
 
+async def test_stream_early_close_ends_span(monkeypatch, caplog):
+    """消费者 aclose() 时也必须留下终止日志，不能悬挂一个 stage。"""
+    monkeypatch.setattr(llm.httpx, "AsyncClient", _StreamClient)
+    monkeypatch.setattr(llm, "_base", lambda: "http://example.test")
+    monkeypatch.setattr(llm, "_headers", lambda: {})
+
+    with caplog.at_level(logging.DEBUG, logger="app.core.trace"):
+        gen = llm.stream_raw(
+            [{"role": "user", "content": "SECRET_PROMPT_9f3a"}], timeout=1)
+        assert await gen.__anext__() == "你"
+        await gen.aclose()
+
+    done = [r for r in caplog.records
+            if getattr(r, "stage", "") == "llm"
+            and getattr(r, "event", "") == "stage.done"]
+    assert done, "early close 没有终止日志"
+    assert getattr(done[-1], "cancelled", False) is True
+    assert "SECRET_PROMPT_9f3a" not in caplog.text
+
+
 async def test_stream_logs_ttft_and_tokens(monkeypatch, caplog):
     monkeypatch.setattr(llm.httpx, "AsyncClient", _StreamClient)
     monkeypatch.setattr(llm, "_base", lambda: "http://example.test")
