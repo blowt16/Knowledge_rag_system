@@ -33,7 +33,7 @@ from app.api import documents as documents_api
 from app.api import eval as eval_api
 from app.api import stats as stats_api
 from app.api import users as users_api
-from app.core import observability
+from app.core import observability, trace
 from app.core.config import cfg
 from app.core.exceptions import install_handlers
 from app.core.logging import install as install_logging
@@ -155,71 +155,79 @@ def _incoming_trace_id(carrier: dict[str, str]) -> str | None:
 
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
-    """trace_id 生成与传播（【方案 §5.3】）。
+    """trace_id 生成、传播与 HTTP 阶段日志（【方案 §5.3】）。
 
-    请求头无 traceparent 则新建，有则沿用（便于将来接网关或前端串联）。
+    每次请求都生成（或续接入站）32 位 trace_id；本地 trace 始终有值，
+    Langfuse 启用时通过 `trace_context` 复用同一个 ID。
     """
-    client = observability.get_client()
-
-    if client is None:
-        # 未启用：照常处理请求，只回一个合法占位 id
-        response = await call_next(request)
-        response.headers["x-trace-id"] = observability.current_trace_id()
-        return response
-
     carrier = {k.lower(): v for k, v in request.headers.items()}
     # ⚠️ 入站 traceparent 必须**容错解析**（完全由客户端控制）：畸形一律当作
-    #    「没有传入上下文」，绝不让一行请求头把请求打成 500（实测两条路径，
-    #    详见 `_incoming_trace_id`）。
+    #    「没有传入上下文」，绝不让一行请求头把请求打成 500。
     incoming = _incoming_trace_id(carrier)
-    trace_ctx = {"trace_id": incoming} if incoming else None
+    tid = incoming or trace.new_trace_id()
 
-    with client.start_as_current_observation(
-        as_type="span",
-        name=f"{request.method} {request.url.path}",
-        trace_context=trace_ctx,
-        input=None, output=None,
-    ) as span:
-        # ⚠️⚠️ **异常必须在这里吞掉、到 with 外面再重抛**（Task 5 实测发现）：
-        #     Langfuse 内部用的是 OTel 的 `start_as_current_span`，其 `use_span`
-        #     默认 `record_exception=True`，而 SDK **不暴露关闭它的参数**
-        #     （实测 `start_as_current_observation` 的签名里没有 record_exception）。
-        #     异常一旦穿过 with，`exception.message`（= `str(e)`，可能回显 prompt）
-        #     与整个栈就会发到云端。
-        pending: BaseException | None = None
-        response = None
-        try:
-            response = await call_next(request)
-        except BaseException as e:  # noqa: BLE001
-            span.update(level="ERROR", status_message=type(e).__name__)
-            pending = e
+    with trace.begin_trace(tid), trace.trace_span("http", layer="http") as stage:
+        stage.set(method=request.method, path=request.url.path)
+        client = observability.get_client()
 
-        if response is not None:
-            span.update(metadata={
-                "http.method": request.method,
-                "http.route": request.url.path,
-                "http.status_code": response.status_code,
-            })
-            # ★ 5xx 标 ERROR —— Metrics API **没有 HTTP 状态码维度**（实测 29 个
-            #    合法维度里没有它），错误率面板靠 level 分组读（【方案 §8.3】）。
-            #    ⚠️ 不标的话错误率恒为 0，且不报错。
+        if client is None:
+            # 未启用：照常处理请求，本地 trace 仍然完整
+            try:
+                response = await call_next(request)
+            except BaseException as e:  # noqa: BLE001
+                stage.set(ok=False, error=type(e).__name__)
+                raise
+            stage.set(status=response.status_code,
+                      ok=response.status_code < 500)
             if response.status_code >= 500:
-                span.update(level="ERROR",
-                            status_message=f"HTTP {response.status_code}")
+                stage.set_level(logging.ERROR)
+            response.headers["x-trace-id"] = tid
+            response.headers["traceparent"] = (
+                f"00-{tid}-{trace.current_span_id()}-01")
+            return response
 
-            # ⚠️⚠️ 两个 id 必须在 with **内**取（实测）：出了 with 观测已结束，
-            #     `get_current_trace_id()` 返回 None → 响应头退化成全 0 占位。
-            trace_id = observability.current_trace_id()
-            span_id = observability.current_span_id()
-            response.headers["x-trace-id"] = trace_id
-            # §3.2.3.1「返回前端」：W3C Trace Context 格式回传，便于前端/用户
-            # 报障时直接拿去 Langfuse 搜（span_id 取不到时是全 0，格式仍合法）。
-            response.headers["traceparent"] = f"00-{trace_id}-{span_id}-01"
+        # ⚠️⚠️ **异常必须在这里吞掉、到 with 外面再重抛**：
+        #     Langfuse 内部用的是 OTel 的 `start_as_current_span`，其 `use_span`
+        #     默认 `record_exception=True`，而 SDK **不暴露关闭它的参数**。
+        #     异常一旦穿过 with，`exception.message` 与整个栈就会发到云端。
+        with client.start_as_current_observation(
+            as_type="span",
+            name=f"{request.method} {request.url.path}",
+            trace_context={"trace_id": tid},
+            input=None, output=None,
+        ) as span:
+            pending: BaseException | None = None
+            response = None
+            try:
+                response = await call_next(request)
+            except BaseException as e:  # noqa: BLE001
+                span.update(level="ERROR", status_message=type(e).__name__)
+                pending = e
 
-    if pending is not None:
-        raise pending          # 出了 with 才重抛 —— 见上面那条警告
+            if response is not None:
+                span.update(metadata={
+                    "http.method": request.method,
+                    "http.route": request.url.path,
+                    "http.status_code": response.status_code,
+                })
+                # ★ 5xx 标 ERROR —— Metrics API 没有 HTTP 状态码维度，
+                #    错误率面板靠 level 分组读（【方案 §8.3】）。
+                if response.status_code >= 500:
+                    span.update(level="ERROR",
+                                status_message=f"HTTP {response.status_code}")
+                    stage.set_level(logging.ERROR)
+                stage.set(status=response.status_code,
+                          ok=response.status_code < 500)
 
-    return response
+                # ⚠️ 两个 id 必须在 with **内**取：出了 with 观测已结束。
+                span_id = observability.current_span_id()
+                response.headers["x-trace-id"] = tid
+                response.headers["traceparent"] = f"00-{tid}-{span_id}-01"
+
+        if pending is not None:
+            raise pending          # 出了 with 才重抛 —— 见上面那条警告
+
+        return response
 
 
 @app.get("/health", tags=["meta"])

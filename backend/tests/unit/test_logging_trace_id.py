@@ -65,6 +65,17 @@ def test_trace_id_is_32_hex_when_enabled(monkeypatch):
     assert payload["trace_id"] != "0" * 32
 
 
+def test_local_trace_id_is_used_inside_trace():
+    """请求/任务内使用本地 trace_id，不再退化成全 0。"""
+    from app.core import trace
+
+    with trace.begin_trace():
+        payload = _format("hello")
+
+    assert len(payload["trace_id"]) == 32
+    assert payload["trace_id"] != "0" * 32
+
+
 def test_extra_fields_still_scrubbed():
     """回归：改造不能碰坏既有的 extra 脱敏。"""
     payload = _format("q", query="学号2023123456", event="test")

@@ -41,9 +41,14 @@ class Span:
     started: float
     layer: str = "stage"
     fields: dict[str, Any] = field(default_factory=dict)
+    level: int | None = None
 
     def set(self, **fields: Any) -> None:
         self.fields.update(fields)
+
+    def set_level(self, level: int) -> None:
+        """覆盖本次完成日志的级别（例如 HTTP 5xx 记 ERROR）。"""
+        self.level = level
 
 
 def current_trace_id() -> str:
@@ -146,7 +151,7 @@ def trace_span(name: str, *, layer: str = "stage",
             raise
         else:
             try:
-                logger.log(level, "完成",
+                logger.log(span.level or level, "完成",
                            extra=_extra("stage.done", span, ok=True,
                                         ms=_ms(span.started)))
             except Exception:  # noqa: BLE001

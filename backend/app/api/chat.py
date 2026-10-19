@@ -14,7 +14,7 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from app.core import observability
+from app.core import observability, trace
 from app.core.deps import CurrentUser
 from app.schemas.chat import ChatRequest
 from app.services import chat_service
@@ -31,15 +31,20 @@ async def chat_stream(body: ChatRequest, user: CurrentUser, request: Request):
 
     # ⚠️ Starlette 的 StreamingResponse 生成器可能跑在另一个 context 里，
     #    trace 会丢 —— 先取出来，进生成器第一件事就是挂回来（§3.2.3.1）
-    trace_id, span_id = observability.current_trace_id(), observability.current_span_id()
+    trace_id = observability.current_trace_id()
+    if not trace_id or not trace_id.strip("0"):
+        # 直连测试/无中间件调用时也要有合法 trace，否则日志全是 0
+        trace_id = trace.new_trace_id()
+    span_id = observability.current_span_id()
 
     # 排查入口：控制台直接给出本轮 trace_id，与响应头 x-trace-id 同源。
     # 消息里带一遍是为了在纯文本日志里也能一眼看到。
     logger.info("对话开始 trace_id=%s", trace_id,
-                extra={"event": "chat.start", "session_id": session_id})
+                extra={"event": "chat.start", "session_id": session_id,
+                       "trace_id": trace_id})
 
     async def generator():
-        with observability.attach_trace(trace_id, span_id):
+        with trace.begin_trace(trace_id), observability.attach_trace(trace_id, span_id):
             async for frame in chat_service.stream_chat(
                 query=body.query,
                 session_id=session_id,

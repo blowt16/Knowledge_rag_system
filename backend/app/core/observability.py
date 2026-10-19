@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
 
+from app.core import trace
 from app.core.config import cfg
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,9 @@ def current_trace_id() -> str:
         若同时取 span_id 则扇出翻倍（实测 39 次调用）。
         护栏在第二层直接返回全 0，递归当场切断。
     """
+    local = trace.current_trace_id()
+    if local:
+        return local
     if _client is None or _in_trace_id.get():
         return _ALL_ZERO_TRACE
     token = _in_trace_id.set(True)
@@ -151,12 +155,13 @@ def current_trace_id() -> str:
 def current_span_id() -> str:
     """与 `current_trace_id()` 同构，共用同一个重入护栏（理由见上）。"""
     if _client is None or _in_trace_id.get():
-        return _ALL_ZERO_SPAN
+        return trace.current_span_id() or _ALL_ZERO_SPAN
     token = _in_trace_id.set(True)
     try:
-        return _client.get_current_observation_id() or _ALL_ZERO_SPAN
+        return (_client.get_current_observation_id()
+                or trace.current_span_id() or _ALL_ZERO_SPAN)
     except Exception:  # noqa: BLE001
-        return _ALL_ZERO_SPAN
+        return trace.current_span_id() or _ALL_ZERO_SPAN
     finally:
         _in_trace_id.reset(token)
 
