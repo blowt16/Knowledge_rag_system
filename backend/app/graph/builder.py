@@ -40,9 +40,9 @@ from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 
-from app.core import observability
+from app.core import observability, trace
 
-from app.graph.node_io import node_input, node_output
+from app.graph.node_io import node_input, node_log_fields, node_output
 from app.graph.nodes.build_context import build_context_node
 from app.graph.nodes.chat import chat_node
 from app.graph.nodes.cite import cite_node
@@ -119,42 +119,46 @@ def traced(node_name: str, fn):
         client = observability.get_client()
 
         with observability.node_context(node_name):
-            if client is None:
-                # 未启用（跑测试/CLI）：照常执行，不产生任何观测
-                return await fn(state)
-
-            failure: BaseException | None = None
-            with client.start_as_current_observation(
-                as_type="span", name=f"node.{node_name}",
-                input=node_input(node_name, state), output=None,
-            ) as obs:
-                try:
+            with trace.trace_span(f"node.{node_name}", layer="node") as stage:
+                if client is None:
+                    # 未启用（跑测试/CLI）：不产生云端观测，但本地日志照常
                     result = await fn(state)
-                except Exception as e:  # noqa: BLE001
-                    obs.update(level="ERROR",
-                               status_message=type(e).__name__,
-                               metadata={"rag.error": type(e).__name__})
-                    failure = e   # ★ 见上面那条：出了 with 再抛，别在这里 raise
                 else:
-                    if isinstance(result, dict):
-                        out = node_output(node_name, result)
-                        entries = result.get("trace") or []
-                        if entries:
-                            last = entries[-1]
-                            meta = {
-                                "rag.duration_ms": int(last.get("ms", 0)),
-                                "rag.recalled": int(last.get("recalled", 0)),
-                            }
-                            degraded = last.get("degraded")
-                            if degraded:
-                                meta["rag.degraded"] = str(degraded)
-                            obs.update(metadata=meta, output=out)
+                    failure: BaseException | None = None
+                    with client.start_as_current_observation(
+                        as_type="span", name=f"node.{node_name}",
+                        input=node_input(node_name, state), output=None,
+                    ) as obs:
+                        try:
+                            result = await fn(state)
+                        except Exception as e:  # noqa: BLE001
+                            obs.update(level="ERROR",
+                                       status_message=type(e).__name__,
+                                       metadata={"rag.error": type(e).__name__})
+                            failure = e   # ★ 见上面那条：出了 with 再抛，别在这里 raise
                         else:
-                            obs.update(output=out)
+                            if isinstance(result, dict):
+                                out = node_output(node_name, result)
+                                entries = result.get("trace") or []
+                                if entries:
+                                    last = entries[-1]
+                                    meta = {
+                                        "rag.duration_ms": int(last.get("ms", 0)),
+                                        "rag.recalled": int(last.get("recalled", 0)),
+                                    }
+                                    degraded = last.get("degraded")
+                                    if degraded:
+                                        meta["rag.degraded"] = str(degraded)
+                                    obs.update(metadata=meta, output=out)
+                                else:
+                                    obs.update(output=out)
 
-            if failure is not None:
-                raise failure
-            return result
+                    if failure is not None:
+                        raise failure
+
+                if isinstance(result, dict):
+                    stage.set(**node_log_fields(node_name, result, state))
+                return result
 
     return _wrapper
 
