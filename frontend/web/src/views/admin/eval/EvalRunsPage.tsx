@@ -14,6 +14,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table'
+import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
@@ -201,7 +204,7 @@ export default function EvalRunsPage() {
   const selected = sets.find(s => s.id === setId) ?? null
 
   return (
-    <div className="space-y-6">
+    <div className="flex h-full min-h-0 flex-col gap-6">
       <Card>
         <CardContent className="space-y-3 pt-6">
           <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -243,45 +246,51 @@ export default function EvalRunsPage() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardContent className="space-y-4 pt-6">
+      <Card className="flex min-h-0 flex-1 flex-col">
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-2">
           {runs.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">还没有评测记录</p>
           ) : (
-            <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
-              {/* 轮次多时在卡片内部滚动；表头吸顶，滚到中间也知道各列是什么 */}
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-card text-left text-muted-foreground">
-                  <tr>
-                    <th className="py-2 pr-3">任务ID</th>
-                    <th className="py-2 pr-3">评测集</th>
-                    <th className="py-2 pr-3">状态</th>
-                    <th className="py-2 pr-3">进度</th>
-                    <th className="py-2 pr-3">失败原因</th>
-                    <th className="py-2 pr-3">耗时(ms)</th>
-                    <th className="py-2 pr-3">时间</th>
-                    <th className="py-2">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <div className="-mx-4 min-h-40 flex-1 overflow-auto rounded-md border border-border [&_[data-slot=table-container]]:overflow-visible">
+              {/* 列表撑满卡片剩余高度并左右加宽（-mx-4 抵消 CardContent 的左右内边距）。
+                  外层负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
+                  否则吸顶表头会被那个内层滚动容器挡住。 */}
+              <Table>
+                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:h-9 [&_th]:text-muted-foreground">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="pl-3">任务ID</TableHead>
+                    <TableHead>评测集</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>进度</TableHead>
+                    <TableHead>失败原因</TableHead>
+                    <TableHead>耗时(ms)</TableHead>
+                    <TableHead>时间</TableHead>
+                    <TableHead>操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody className="[&_td]:align-top">
                   {runs.map(r => {
                     const hint = reportHint(r)
                     return (
-                      <tr key={r.run_id} className="border-t border-border">
-                        <td className="py-2 pr-3 font-mono text-xs">{r.run_id.slice(0, 8)}</td>
+                      <TableRow key={r.run_id}>
+                        <TableCell className="pl-3 font-mono text-xs">{r.run_id.slice(0, 8)}</TableCell>
                         {/* 老 `suite` 路径的 run 没有评测集，退回配置标签 */}
-                        <td className="py-2 pr-3">{r.set_name ?? r.config_label}</td>
-                        <td className="py-2 pr-3">
+                        <TableCell className="max-w-xs whitespace-normal!">
+                          {r.set_name ?? r.config_label}
+                        </TableCell>
+                        <TableCell>
                           {STATUS_LABEL[r.status] ?? r.status}
                           <RagasMark metrics={r.metrics} />
-                        </td>
-                        <td className="py-2 pr-3">{progressText(r)}</td>
-                        <td className="max-w-xs py-2 pr-3 text-muted-foreground">{r.error || ''}</td>
-                        <td className="py-2 pr-3">{r.duration_ms ?? '—'}</td>
-                        <td className="py-2 pr-3 whitespace-nowrap text-xs">
+                        </TableCell>
+                        <TableCell>{progressText(r)}</TableCell>
+                        <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">
+                          {r.error || ''}
+                        </TableCell>
+                        <TableCell>{r.duration_ms ?? '—'}</TableCell>
+                        <TableCell className="text-xs">
                           {r.started_at ? new Date(r.started_at).toLocaleString() : '—'}
-                        </td>
-                        <td className="whitespace-nowrap py-2">
+                        </TableCell>
+                        <TableCell>
                           {/* 跑完才可点；提示语带进度（决策 24）。
                               `disabled` 的元素收不到 hover，所以外面的 span 挂在 title 上 */}
                           <span title={hint}>
@@ -294,12 +303,12 @@ export default function EvalRunsPage() {
                             <Button variant="link" disabled={Boolean(hint)}
                                     onClick={() => setPendingDelete(r)}>删除</Button>
                           </span>
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     )
                   })}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
           )}
 

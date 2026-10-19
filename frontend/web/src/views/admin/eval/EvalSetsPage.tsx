@@ -23,6 +23,9 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { listDocuments } from '@/api/admin'
 import type { DocumentItem } from '@/api/admin'
@@ -128,7 +131,7 @@ export default function EvalSetsPage() {
   })
 
   return (
-    <div className="space-y-6">
+    <div className="flex h-full min-h-0 flex-col gap-6">
       {/* ---- 顶部：评测集选择与三个动作 ---- */}
       <Card>
         <CardContent className="flex flex-wrap items-center gap-3 pt-6">
@@ -157,8 +160,8 @@ export default function EvalSetsPage() {
       </Card>
 
       {/* ---- 工具栏 + 列表 ---- */}
-      <Card>
-        <CardContent className="space-y-4 pt-6">
+      <Card className="flex min-h-0 flex-1 flex-col">
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-6">
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <Button variant="outline" disabled={busy || !current}
                     onClick={() => setCaseDialog({ mode: 'create' })}>手工录入</Button>
@@ -191,30 +194,32 @@ export default function EvalSetsPage() {
               {query || sourceFilter ? '没有符合条件的用例' : '这个评测集还没有用例'}
             </p>
           ) : (
-            <div className="max-h-[60vh] overflow-auto rounded-md border border-border">
-              {/* 用例多时在卡片内部滚动，页面不跟着无限变长；表头吸顶，滚到中间也知道各列是什么 */}
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-card text-left text-muted-foreground">
-                  <tr>
-                    <th className="py-2 pr-3">问题</th>
-                    <th className="py-2 pr-3">标准答案</th>
-                    <th className="py-2 pr-3">来源</th>
-                    <th className="py-2 pr-3">参与评测</th>
-                    <th className="py-2 pr-3">备注</th>
-                    <th className="py-2">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
+            <div className="-mx-4 min-h-40 flex-1 overflow-auto rounded-md border border-border [&_[data-slot=table-container]]:overflow-visible">
+              {/* 列表撑满卡片剩余高度并左右加宽（-mx-4 抵消 CardContent 的左右内边距）。
+                  外层负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
+                  否则吸顶表头会被那个内层滚动容器挡住。 */}
+              <Table>
+                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:text-muted-foreground">
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead>问题</TableHead>
+                    <TableHead>标准答案</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead>参与评测</TableHead>
+                    <TableHead>备注</TableHead>
+                    <TableHead>操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody className="[&_td]:align-top">
                   {cases.map(c => (
-                    <tr key={c.id} className="border-t border-border align-top">
-                      <td className="max-w-md py-2 pr-3">{c.question}</td>
-                      <td className="max-w-xs py-2 pr-3 text-muted-foreground">
+                    <TableRow key={c.id}>
+                      <TableCell className="max-w-md whitespace-normal!">{c.question}</TableCell>
+                      <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">
                         {c.ground_truth || '—'}
-                      </td>
-                      <td className="py-2 pr-3">{SOURCE_LABEL[c.source] ?? c.source}</td>
-                      <td className="py-2 pr-3">{c.in_eval ? '是' : '否'}</td>
-                      <td className="max-w-xs py-2 pr-3 text-muted-foreground">{c.note || ''}</td>
-                      <td className="whitespace-nowrap py-2">
+                      </TableCell>
+                      <TableCell>{SOURCE_LABEL[c.source] ?? c.source}</TableCell>
+                      <TableCell>{c.in_eval ? '是' : '否'}</TableCell>
+                      <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">{c.note || ''}</TableCell>
+                      <TableCell>
                         <SourceButton item={c} busy={busy}
                                       onOpen={setSourceOf}
                                       onError={m => setMsg(m)} />
@@ -224,11 +229,11 @@ export default function EvalSetsPage() {
                                 onClick={() => setPendingDelete({ kind: 'case', item: c })}>
                           删除
                         </Button>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   ))}
-                </tbody>
-              </table>
+                </TableBody>
+              </Table>
             </div>
           )}
 
