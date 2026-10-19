@@ -49,7 +49,7 @@ export default function LoginPage() {
       </button>
 
       <form className="card login-card" onSubmit={onSubmit}>
-        <h1>校园 RAG 检索问答系统</h1>
+        <h1>校园政策咨询检索系统</h1>
         <p className="muted">请使用管理员分配的账号登录</p>
 
         <label>

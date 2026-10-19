@@ -52,9 +52,9 @@ export default function AdminLayout() {
       <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-card">
         <div className="px-4 py-5">
           <Link to="/admin" className="text-base font-semibold">
-            管理后台
+            校园政策咨询检索系统
           </Link>
-          <p className="mt-1 text-xs text-muted-foreground">校园 RAG 系统</p>
+          <p className="mt-1 text-xs text-muted-foreground">管理后台</p>
         </div>
         {/* 侧栏整体锁在一屏高，只有导航区自己滚 —— 底部的「去问答 / 退出登录」
             必须永远露在外面，不能跟着长页面一起被顶到屏幕外。 */}

@@ -335,7 +335,7 @@ export default function ChatPage() {
       {/* ---- 侧栏（§4.2.4.3）：新建对话 + 列表 + 逐条管理 ---- */}
       <aside className="sidebar">
         <div className="sidebar-head">
-          <span className="brand">校园 RAG</span>
+          <span className="brand">校园政策咨询检索系统</span>
           <button className="btn-new" onClick={newConversation}
                   disabled={busy} title="新建对话">
             <Plus size={16} /> 新建对话
@@ -429,7 +429,7 @@ export default function ChatPage() {
 
       <div className="chat-area">
         <header className="chat-header">
-          <strong>校园 RAG 检索问答</strong>
+          <strong>新对话</strong>
           {user?.role === 'admin' && (
             <label className="escalate-toggle"
                    title="越权检索受限文档，引用会标记「越权查看」">
@@ -438,9 +438,6 @@ export default function ChatPage() {
               提权检索
             </label>
           )}
-          <span className="muted small">
-            {sessionId ? '已保存的会话' : '新对话'}
-          </span>
         </header>
 
         {/* ⚠️ 滚动容器与「限宽内容列」必须**分成两层**：
