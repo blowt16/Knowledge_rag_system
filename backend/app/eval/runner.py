@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 from app import db
+from app.core import trace
 from app.graph.builder import get_graph
 # ★ 与模型看到的上下文**同一份渲染实现** —— 评测器绝不另抄一份
 from app.graph.nodes.build_context import render_chunk_block
@@ -182,13 +183,20 @@ async def _record_progress(run_id: str, done: int, total: int | None = None) -> 
 
 async def run_eval(run_id: str) -> None:
     """跑一轮评测。**后台任务** —— 立即返回 run_id，进度看 `eval_runs.status`。"""
+    with trace.begin_trace():
+        with trace.trace_span("eval.run", layer="eval", run_id=run_id) as stage:
+            result = await _run_eval(run_id)
+            stage.set(**result)
+
+
+async def _run_eval(run_id: str) -> dict:
     started = time.time()
     try:
         async with db.tx() as conn:
             run = await conn.fetchrow("SELECT * FROM eval_runs WHERE id = $1", run_id)
             if run is None:
                 logger.error("评测 run 不存在", extra={"event": "eval.missing_run", "run_id": run_id})
-                return
+                return {"status": "missing"}
             await conn.execute(
                 "UPDATE eval_runs SET status='running', started_at=now() WHERE id=$1", run_id)
 
@@ -216,7 +224,7 @@ async def run_eval(run_id: str) -> None:
                     run_id, {"error": error}, error)
             logger.warning("评测没有可跑的用例",
                            extra={"event": "eval.no_cases", "set_id": set_id})
-            return
+            return {"status": "failed", "error": error, "cases": 0}
 
         await _record_progress(run_id, 0, len(rows))
 
@@ -235,18 +243,24 @@ async def run_eval(run_id: str) -> None:
                 eval_config=config if isinstance(config, dict) else {},
             )
             t0 = time.perf_counter()
-            try:
-                final = await _drive_to_end(state)
-            except Exception as e:  # noqa: BLE001 —— 单题失败不该拖垮整轮
-                logger.warning("评测用例执行失败：%s", e,
-                               extra={"event": "eval.case_failed", "case_id": case["id"]})
-                # ⚠️ 这里**必须带上 question / ground_truth 快照**：失败的那行不会有
-                #    `metrics`，历史报告里的「问题」列就只能靠快照列填（§3.5）。
-                results.append({"case_id": case["id"], "error": f"{type(e).__name__}: {e}",
-                                "question": case["question"],
-                                "ground_truth": case.get("ground_truth")})
-                await _record_progress(run_id, len(results))
-                continue
+            with trace.trace_span("eval.case", layer="eval", level=logging.DEBUG,
+                                  case_id=case["id"]) as case_stage:
+                try:
+                    final = await _drive_to_end(state)
+                except Exception as e:  # noqa: BLE001 —— 单题失败不该拖垮整轮
+                    logger.warning("评测用例执行失败：%s", e,
+                                   extra={"event": "eval.case_failed",
+                                          "case_id": case["id"]})
+                    # ⚠️ 这里**必须带上 question / ground_truth 快照**：失败的那行不会有
+                    #    `metrics`，历史报告里的「问题」列就只能靠快照列填（§3.5）。
+                    results.append({"case_id": case["id"],
+                                    "error": f"{type(e).__name__}: {e}",
+                                    "question": case["question"],
+                                    "ground_truth": case.get("ground_truth")})
+                    case_stage.set(error=type(e).__name__)
+                    await _record_progress(run_id, len(results))
+                    continue
+                case_stage.set(route=final.get("route", ""))
             elapsed = int((time.perf_counter() - t0) * 1000)
 
             metrics = _case_metrics(final, case, visibility, role)
@@ -320,11 +334,12 @@ async def run_eval(run_id: str) -> None:
                 "done_cases=$3 WHERE id=$1",
                 run_id, summary, len(results))
 
-        logger.info("评测完成", extra={"event": "eval.done", "run_id": run_id,
-                                    "cases": len(results),
-                                    "ms": int((time.time() - started) * 1000)})
+        return {"status": "done", "cases": len(results),
+                "ms": int((time.time() - started) * 1000)}
     except Exception as e:  # noqa: BLE001
-        logger.exception("评测整轮失败", extra={"event": "eval.failed", "run_id": run_id})
+        logger.exception("评测整轮失败", extra={
+            "event": "eval.failed", "stage": "eval.run", "layer": "eval",
+            "run_id": run_id, "error": type(e).__name__})
         try:
             async with db.tx() as conn:
                 why = f"{type(e).__name__}: {e}"
@@ -336,6 +351,7 @@ async def run_eval(run_id: str) -> None:
                     "error=$3 WHERE id=$1", run_id, {"error": why}, why)
         except Exception:  # noqa: BLE001
             pass
+        return {"status": "failed", "error": type(e).__name__}
 
 
 def _aggregate(results: list[dict], ragas: dict) -> dict:

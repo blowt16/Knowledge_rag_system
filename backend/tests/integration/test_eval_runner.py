@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 import pytest
@@ -118,6 +119,24 @@ async def _add_case(conn, set_id, question, *, in_eval=True, expected=None,
 # ============================================================
 # 选题（§5.5）
 # ============================================================
+
+async def test_run_eval_emits_run_and_case_logs(scratch_set, monkeypatch, caplog):
+    """一轮评测至少要有 run 汇总与单题阶段日志。"""
+    _graph_returning(monkeypatch, {"日志题": _final(["d1"])})
+    async with db.tx() as conn:
+        await _add_case(conn, scratch_set, "日志题")
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集")
+    try:
+        with caplog.at_level(logging.DEBUG, logger="app.core.trace"):
+            await runner.run_eval(run_id)
+
+        stages = {getattr(r, "stage", "") for r in caplog.records}
+        assert "eval.run" in stages, f"缺少 eval.run：{sorted(stages)}"
+        assert "eval.case" in stages, f"缺少 eval.case：{sorted(stages)}"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
 
 async def test_set_path_runs_only_in_eval_cases(scratch_set, monkeypatch):
     """`in_eval=false` 不进这一轮 —— 「参与评测」开关因此真正生效。"""
