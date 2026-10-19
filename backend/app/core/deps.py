@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app import db
+from app.core.audit import audit
 from app.core.exceptions import Forbidden, Unauthorized
 from app.core.security import TOKEN_TYPE_ACCESS, decode_token
 
@@ -37,20 +39,30 @@ async def current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> UserContext:
     if credentials is None or not credentials.credentials:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, reason="missing_token")
         raise Unauthorized("缺少访问令牌")
 
     try:
         payload = decode_token(credentials.credentials)
     except pyjwt.ExpiredSignatureError:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, reason="token_expired")
         raise Unauthorized("访问令牌已过期", code="token_expired") from None
     except pyjwt.PyJWTError:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, reason="token_invalid")
         raise Unauthorized("访问令牌无效") from None
 
     if payload.get("type") != TOKEN_TYPE_ACCESS:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, reason="wrong_token_type")
         raise Unauthorized("令牌类型不正确")
 
     user_id = payload.get("sub")
     if not user_id:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, reason="missing_subject")
         raise Unauthorized("令牌缺少主体")
 
     # token_version 比对（§3.7.1）—— 每次请求一次查库，users 表小、主键索引命中
@@ -59,10 +71,17 @@ async def current_user(
             "SELECT id, username, role, token_version FROM users WHERE id = $1", user_id
         )
     if row is None:
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, user_id=user_id,
+              reason="user_not_found")
         raise Unauthorized("用户不存在")
 
     if int(payload.get("tv", -1)) != row["token_version"]:
         # 登出 / 改密 / 改角色 / 重置口令都会自增 token_version
+        audit("auth.token", stage="audit.auth", ok=False,
+              level=logging.WARNING, user_id=row["id"],
+              username=row["username"], role=row["role"],
+              reason="token_revoked")
         raise Unauthorized("令牌已失效，请重新登录", code="token_revoked")
 
     return UserContext(
@@ -99,6 +118,10 @@ def require_role(*roles: str):
 
     async def _guard(user: CurrentUser) -> UserContext:
         if user.role not in roles:
+            audit("auth.forbidden", stage="audit.auth", ok=False,
+                  level=logging.WARNING, actor_id=user.id,
+                  actor_role=user.role, username=user.username,
+                  required_roles=list(roles), reason="forbidden")
             raise Forbidden("权限不足")
         return user
 

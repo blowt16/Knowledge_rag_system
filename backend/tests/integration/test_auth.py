@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -56,19 +57,28 @@ async def _login(client: httpx.AsyncClient, username: str) -> dict:
 
 # ============================================================
 
-async def test_login_returns_token_pair_and_user(client, user):
-    data = await _login(client, user["username"])
+async def test_login_returns_token_pair_and_user(client, user, caplog):
+    with caplog.at_level(logging.INFO, logger="app.audit"):
+        data = await _login(client, user["username"])
     assert data["access_token"] and data["refresh_token"]
     assert data["expires_in"] == int(cfg("auth.access_token_minutes", 15)) * 60
     assert data["user"]["username"] == user["username"]
     assert data["user"]["role"] == "student"
 
+    login = [r for r in caplog.records if getattr(r, "event", "") == "audit.auth.login"]
+    assert login and login[-1].ok is True and login[-1].user_id == user["id"]
 
-async def test_wrong_password_rejected(client, user):
-    r = await client.post("/api/auth/login",
-                          json={"username": user["username"], "password": "wrong"})
+
+async def test_wrong_password_rejected(client, user, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.audit"):
+        r = await client.post("/api/auth/login",
+                              json={"username": user["username"], "password": "wrong"})
     assert r.status_code == 401
     assert r.json()["code"] == "invalid_credentials"
+
+    failed = [r for r in caplog.records if getattr(r, "event", "") == "audit.auth.login"]
+    assert failed and failed[-1].ok is False
+    assert failed[-1].reason == "invalid_credentials"
 
 
 async def test_unknown_user_gives_same_error_as_wrong_password(client):
@@ -87,9 +97,12 @@ async def test_me_with_access_token(client, user):
     assert r.json()["id"] == user["id"]
 
 
-async def test_me_without_token_is_401(client):
-    r = await client.get("/api/auth/me")
+async def test_me_without_token_is_401(client, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.audit"):
+        r = await client.get("/api/auth/me")
     assert r.status_code == 401
+    token = [r for r in caplog.records if getattr(r, "event", "") == "audit.auth.token"]
+    assert token and token[-1].reason == "missing_token"
 
 
 async def test_refresh_issues_new_access_and_does_not_rotate(client, user):

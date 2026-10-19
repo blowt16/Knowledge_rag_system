@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
@@ -376,6 +377,28 @@ async def test_patch_rejects_immutable_fields(client, admin, doc):
         r = await client.patch(f"/api/admin/documents/{doc['id']}",
                                json={field: value}, headers=_h(admin))
         assert r.status_code == 422, f"{field} 不该被接受：{r.text}"
+
+
+async def test_document_update_and_delete_emit_audit(client, admin, doc, caplog):
+    with caplog.at_level(logging.INFO, logger="app.audit"):
+        r = await client.patch(
+            f"/api/admin/documents/{doc['id']}",
+            json={"title": doc["title"] + "_audit"}, headers=_h(admin))
+        assert r.status_code == 200, r.text
+
+        r = await client.delete(
+            f"/api/admin/documents/{doc['id']}", headers=_h(admin))
+        assert r.status_code == 200, r.text
+
+    events = {r.event: r for r in caplog.records
+              if getattr(r, "event", "") in
+              ("audit.document.update", "audit.document.delete")}
+    assert events["audit.document.update"].target_id == doc["id"]
+    assert events["audit.document.update"].actor_id == admin["id"]
+    assert "title" in events["audit.document.update"].changed_fields
+    assert events["audit.document.delete"].target_id == doc["id"]
+    assert events["audit.document.delete"].actor_id == admin["id"]
+    assert events["audit.document.delete"].removed_chroma >= 0
 
 
 async def test_patch_unknown_document_is_404(client, admin):

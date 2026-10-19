@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
 import pytest_asyncio
@@ -423,11 +424,17 @@ async def test_run_detail_survives_a_deleted_case(client, admin):
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
 
 
-async def test_delete_run_takes_its_case_results(client, admin):
+async def test_delete_run_takes_its_case_results(client, admin, caplog):
     """删一轮 = 连它的逐题结果一起删（靠 ON DELETE CASCADE）。"""
     run_id = await _make_finished_run({"ragas_available": True})
-    r = await client.delete(f"/api/admin/eval/runs/{run_id}", headers=admin["headers"])
+    with caplog.at_level(logging.INFO, logger="app.audit"):
+        r = await client.delete(f"/api/admin/eval/runs/{run_id}",
+                                headers=admin["headers"])
     assert r.status_code == 204, r.text
+    deleted = [x for x in caplog.records
+               if getattr(x, "event", "") == "audit.eval.run.delete"]
+    assert deleted and deleted[-1].target_id == run_id
+    assert deleted[-1].cases == 1
     async with db.tx() as conn:
         assert await conn.fetchval("SELECT count(*) FROM eval_runs WHERE id=$1", run_id) == 0
         assert await conn.fetchval(
@@ -454,6 +461,21 @@ async def test_run_list_carries_the_new_columns(client, admin):
 # ============================================================
 # 删除守卫（§5.5）
 # ============================================================
+
+async def test_delete_set_emits_audit(client, admin, caplog):
+    s = await _new_set(client, admin)
+    try:
+        with caplog.at_level(logging.INFO, logger="app.audit"):
+            r = await client.delete(f"/api/admin/eval/sets/{s['id']}",
+                                    headers=admin["headers"])
+        assert r.status_code == 204, r.text
+        deleted = [x for x in caplog.records
+                   if getattr(x, "event", "") == "audit.eval.set.delete"]
+        assert deleted and deleted[-1].target_id == s["id"]
+        assert deleted[-1].set_name == s["name"]
+    finally:
+        await _cleanup_set(s["id"])
+
 
 async def test_deleting_a_set_under_a_running_run_is_409(client, admin):
     s = await _new_set(client, admin)

@@ -22,6 +22,7 @@ from typing import AsyncIterator
 
 from app import db
 from app.core import observability, trace
+from app.core.audit import audit
 from app.core.config import data_dir
 from app.core.exceptions import AppError, NotFound
 from app.ingestion.pipeline import IngestRequest, ingest
@@ -392,7 +393,9 @@ async def update_document(document_id: str, *, title: str | None = None,
                           visibility: str | None = None,
                           visible_roles: list[str] | None = None,
                           effective_date: str | None = None,
-                          status: str | None = None) -> dict:
+                          status: str | None = None,
+                          actor_id: str | None = None,
+                          actor_role: str | None = None) -> dict:
     """改可改字段（§3.7.2 侧的管理端写接口规格）。
 
     ⚠️ **顺序是先 Chroma、后 PG**：两处存储做不到原子，那么失败时应该
@@ -447,26 +450,40 @@ async def update_document(document_id: str, *, title: str | None = None,
                       FROM documents d WHERE d.id = $1""",
                 document_id)
 
-    if not any(changed[f] for f in REINDEX_FIELDS):
-        return _doc_item(await _write_pg())
+    changed_fields = [name for name, is_changed in changed.items() if is_changed]
+    reindexed = any(changed[f] for f in REINDEX_FIELDS)
 
-    index_args = dict(status=new_status, visibility=new_visibility,
-                      visible_roles=new_roles,
-                      effective_date=new_effective.isoformat())
+    if not reindexed:
+        updated = await _write_pg()
+    else:
+        index_args = dict(status=new_status, visibility=new_visibility,
+                          visible_roles=new_roles,
+                          effective_date=new_effective.isoformat())
 
-    # ⚠️ **先写哪一侧取决于方向**（评审 M4-K3）。两处存储做不到原子，所以顺序
-    #    不是随意的：先写「让检索更保守」的那一侧，失败时最坏也停在偏严的一边。
-    #
-    #    原实现一律「先 Chroma 后 PG」，注释声称「最坏情况是偏严」—— 只在
-    #    **收紧**方向成立。放宽（受限→公开）时先写 Chroma：Chroma 已经公开、
-    #    PG 写失败 → 检索对所有人放开，而管理端读 PG 还显示「受限」，
-    #    **管理员被自己看到的界面骗了**。
-    if _tightens(row, new_visibility, new_roles, new_effective, new_status):
-        index_service.rewrite_metadata(document_id, **index_args)
-        return _doc_item(await _write_pg())
+        # ⚠️ **先写哪一侧取决于方向**（评审 M4-K3）。两处存储做不到原子，所以顺序
+        #    不是随意的：先写「让检索更保守」的那一侧，失败时最坏也停在偏严的一边。
+        #
+        #    原实现一律「先 Chroma 后 PG」，注释声称「最坏情况是偏严」—— 只在
+        #    **收紧**方向成立。放宽（受限→公开）时先写 Chroma：Chroma 已经公开、
+        #    PG 写失败 → 检索对所有人放开，而管理端读 PG 还显示「受限」，
+        #    **管理员被自己看到的界面骗了**。
+        if _tightens(row, new_visibility, new_roles, new_effective, new_status):
+            index_service.rewrite_metadata(document_id, **index_args)
+            updated = await _write_pg()
+        else:
+            updated = await _write_pg()
+            index_service.rewrite_metadata(document_id, **index_args)
 
-    updated = await _write_pg()
-    index_service.rewrite_metadata(document_id, **index_args)
+    audit("document.update", stage="audit.document", actor_id=actor_id,
+          actor_role=actor_role, target_id=document_id,
+          title=updated["title"], changed_fields=changed_fields,
+          visibility_before=row["visibility"], visibility_after=new_visibility,
+          status_before=row["status"], status_after=new_status,
+          effective_date_before=str(row["effective_date"]),
+          effective_date_after=str(new_effective),
+          roles_before=",".join(sorted(row["visible_roles"] or [])),
+          roles_after=",".join(sorted(new_roles)),
+          reindexed=reindexed, outcome="ok")
     return _doc_item(updated)
 
 
@@ -488,16 +505,20 @@ def _tightens(row, visibility: str, roles: list[str], effective, status: str) ->
     return True
 
 
-async def set_document_status(document_id: str, status: str) -> dict:
+async def set_document_status(document_id: str, status: str, *,
+                              actor_id: str | None = None,
+                              actor_role: str | None = None) -> dict:
     """启用 / 停用（§3.7.3）。
 
     ⚠️ 停用**当前生效版本**会让上一版「复活」（§3.3.1 的折叠规则）——
        管理端必须在按钮旁显式提示这一点，由前端负责（3b）。
     """
-    return await update_document(document_id, status=status)
+    return await update_document(document_id, status=status,
+                                 actor_id=actor_id, actor_role=actor_role)
 
 
-async def delete_document(document_id: str) -> None:
+async def delete_document(document_id: str, *, actor_id: str | None = None,
+                          actor_role: str | None = None) -> None:
     """**真删**（M4-D3）：Chroma chunk + BM25 条目 + PG 行，**源文件与规范化文本保留**。
 
     依据是 §3.3.1 既有的版本语义「删掉新版即可，旧版自动恢复生效，不用手工 enable」——
@@ -509,8 +530,9 @@ async def delete_document(document_id: str) -> None:
        标注行**保留**（那条标注本身是运维事实），只把指向本档的建议置空。
     """
     async with db.tx() as conn:
-        exists = await conn.fetchval("SELECT 1 FROM documents WHERE id = $1", document_id)
-    if not exists:
+        doc = await conn.fetchrow(
+            "SELECT title, version FROM documents WHERE id = $1", document_id)
+    if doc is None:
         raise NotFound("文档不存在")
 
     # ⚠️ **先把行落到 `disabled` 中间态**（评审 M4-K6）：原实现是
@@ -524,7 +546,7 @@ async def delete_document(document_id: str) -> None:
 
     # 再删索引（内部已按「先取 chunk_id、再删 Chroma、后删 BM25」的正确顺序）。
     # 这一步失败 → 行停在 `disabled`，正是我们要的中间态。
-    index_service.remove_from_index(document_id)
+    removed = index_service.remove_from_index(document_id)
 
     async with db.tx() as conn:
         await conn.execute("DELETE FROM ingestion_tasks WHERE document_id = $1",
@@ -534,5 +556,8 @@ async def delete_document(document_id: str) -> None:
             "WHERE suggested_document_id = $1", document_id)
         await conn.execute("DELETE FROM documents WHERE id = $1", document_id)
 
-    logger.info("文档已删除", extra={"event": "document.deleted",
-                                    "document_id": document_id})
+    audit("document.delete", stage="audit.document", actor_id=actor_id,
+          actor_role=actor_role, target_id=document_id,
+          title=doc["title"], version=doc["version"],
+          removed_chroma=removed.get("chroma", 0),
+          removed_bm25=removed.get("bm25", 0), outcome="ok")

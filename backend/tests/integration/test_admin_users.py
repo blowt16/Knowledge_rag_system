@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import httpx
@@ -230,6 +231,45 @@ async def test_create_user_can_log_in(client, admin):
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM users WHERE id = $1", created["id"])
+
+
+async def test_user_crud_emits_audit_events(client, admin, caplog):
+    username = f"t_{uuid.uuid4().hex[:8]}"
+    created_id = None
+    try:
+        with caplog.at_level(logging.INFO, logger="app.audit"):
+            r = await client.post(
+                "/api/admin/users",
+                json={"username": username, "password": PASSWORD, "role": "student"},
+                headers=_h(admin["token"]))
+            assert r.status_code == 200, r.text
+            created_id = r.json()["id"]
+
+            r = await client.patch(
+                f"/api/admin/users/{created_id}", json={"role": "staff"},
+                headers=_h(admin["token"]))
+            assert r.status_code == 200, r.text
+
+            r = await client.post(
+                f"/api/admin/users/{created_id}/reset-password",
+                json={"password": PASSWORD}, headers=_h(admin["token"]))
+            assert r.status_code == 200, r.text
+
+            r = await client.delete(
+                f"/api/admin/users/{created_id}", headers=_h(admin["token"]))
+            assert r.status_code == 200, r.text
+
+        events = {r.event: r for r in caplog.records
+                  if getattr(r, "event", "").startswith("audit.user.")}
+        assert events["audit.user.create"].target_id == created_id
+        assert events["audit.user.create"].actor_id == admin["id"]
+        assert events["audit.user.update"].changed_fields == ["role"]
+        assert events["audit.user.reset_password"].target_id == created_id
+        assert events["audit.user.delete"].target_id == created_id
+    finally:
+        if created_id:
+            async with db.tx() as conn:
+                await conn.execute("DELETE FROM users WHERE id = $1", created_id)
 
 
 async def test_create_duplicate_username_is_conflict(client, admin, victim):

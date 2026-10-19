@@ -15,6 +15,7 @@ import uuid
 import asyncpg
 
 from app import db
+from app.core.audit import audit
 from app.core.deps import ALL_ROLES
 from app.core.exceptions import AppError, Conflict, NotFound
 from app.core.security import hash_password
@@ -68,7 +69,9 @@ async def list_users(*, role: str | None = None, page: int = 1,
     }
 
 
-async def create_user(*, username: str, password: str, role: str) -> dict:
+async def create_user(*, username: str, password: str, role: str,
+                      actor_id: str | None = None,
+                      actor_role: str | None = None) -> dict:
     """建号（§3.7.3）。首个管理员仍由 CLI 种子脚本创建，本接口管日常账号。"""
     user_id = uuid.uuid4().hex
     try:
@@ -87,17 +90,29 @@ async def create_user(*, username: str, password: str, role: str) -> dict:
                 user_id)
     except asyncpg.UniqueViolationError as e:
         raise Conflict("用户名已存在") from e
+    audit("user.create", stage="audit.user", actor_id=actor_id,
+          actor_role=actor_role, target_id=user_id, username=username,
+          role=role, outcome="ok")
     return _item(row)
 
 
 async def patch_user(user_id: str, *, role: str | None = None,
-                     is_active: bool | None = None) -> dict:
+                     is_active: bool | None = None,
+                     actor_id: str | None = None,
+                     actor_role: str | None = None) -> dict:
     """改角色 / 停用（§4.3 用户管理）。"""
     async with db.tx() as conn:
-        row = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        row = await conn.fetchrow(
+            "SELECT id, role, is_active FROM users WHERE id = $1", user_id)
         if row is None:
             raise NotFound("用户不存在")
+        old_role, old_active = row["role"], bool(row["is_active"])
 
+        changed = []
+        if role is not None and role != old_role:
+            changed.append("role")
+        if is_active is not None and bool(is_active) != old_active:
+            changed.append("is_active")
         if role is not None:
             await conn.execute("UPDATE users SET role = $2 WHERE id = $1", user_id, role)
         if is_active is not None:
@@ -108,10 +123,17 @@ async def patch_user(user_id: str, *, role: str | None = None,
         updated = await conn.fetchrow(
             "SELECT id, username, role, is_active, created_at FROM users WHERE id = $1",
             user_id)
+    audit("user.update", stage="audit.user", actor_id=actor_id,
+          actor_role=actor_role, target_id=user_id,
+          username=updated["username"], changed_fields=changed,
+          role_before=old_role, role_after=updated["role"],
+          active_before=old_active, active_after=bool(updated["is_active"]),
+          outcome="ok")
     return _item(updated)
 
 
-async def delete_user(user_id: str, *, actor_id: str) -> None:
+async def delete_user(user_id: str, *, actor_id: str,
+                      actor_role: str | None = None) -> None:
     """删除用户（§4.3 用户管理）—— **真删**，连带清掉他的会话与消息。
 
     ⚠️ **本模块唯一不自增 `token_version` 的写操作**：行都没了，自增无处可增。
@@ -135,9 +157,16 @@ async def delete_user(user_id: str, *, actor_id: str) -> None:
         raise AppError("不能删除自己的账号")
 
     async with db.tx() as conn:
-        row = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        row = await conn.fetchrow(
+            "SELECT id, username FROM users WHERE id = $1", user_id)
         if row is None:
             raise NotFound("用户不存在")
+
+        conv_count = await conn.fetchval(
+            "SELECT count(*) FROM conversations WHERE user_id = $1", user_id)
+        msg_count = await conn.fetchval(
+            """SELECT count(*) FROM messages WHERE conversation_id IN
+                   (SELECT id FROM conversations WHERE user_id = $1)""", user_id)
 
         await conn.execute(
             """DELETE FROM messages WHERE conversation_id IN
@@ -157,11 +186,18 @@ async def delete_user(user_id: str, *, actor_id: str) -> None:
 
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
+    audit("user.delete", stage="audit.user", actor_id=actor_id,
+          actor_role=actor_role, target_id=user_id, username=row["username"],
+          conversations=conv_count, messages=msg_count, outcome="ok")
 
-async def reset_password(user_id: str, *, password: str) -> dict:
+
+async def reset_password(user_id: str, *, password: str,
+                         actor_id: str | None = None,
+                         actor_role: str | None = None) -> dict:
     """重置口令（§3.7.3）—— 同样撤销该用户全部令牌（§3.7.1）。"""
     async with db.tx() as conn:
-        row = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        row = await conn.fetchrow(
+            "SELECT id, username FROM users WHERE id = $1", user_id)
         if row is None:
             raise NotFound("用户不存在")
 
@@ -172,4 +208,7 @@ async def reset_password(user_id: str, *, password: str) -> dict:
         updated = await conn.fetchrow(
             "SELECT id, username, role, is_active, created_at FROM users WHERE id = $1",
             user_id)
+    audit("user.reset_password", stage="audit.user", actor_id=actor_id,
+          actor_role=actor_role, target_id=user_id,
+          username=row["username"], outcome="ok")
     return _item(updated)

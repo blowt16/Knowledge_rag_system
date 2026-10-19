@@ -76,7 +76,10 @@ def remove_from_index(document_id: str, chunk_ids: list[str] | None = None) -> d
 
     logger.info("补偿删除完成", extra={
         "event": "index.compensate_delete",
-        "node": "ingest",
+        "stage": "index.compensate_delete", "layer": "index",
+        "node": "ingest", "target_id": document_id,
+        "removed_chroma": removed_chroma, "removed_bm25": removed_bm25,
+        "trace_id": trace.current_trace_id(),
     })
     return {"chroma": removed_chroma, "bm25": removed_bm25}
 
@@ -93,28 +96,34 @@ def rewrite_metadata(document_id: str, *, status: str, visibility: str,
        只覆盖了 visibility/effective_date。**停用文档却不重写 metadata，
        检索期的 `status = "active"` 过滤就形同虚设。**
     """
-    rows = vector.get_chunks(document_id, limit=100000)
-    if not rows:
-        return 0
+    with trace.trace_span(
+        "index.rewrite_metadata", layer="index", target_id=document_id,
+        status=status, visibility=visibility,
+    ) as stage:
+        rows = vector.get_chunks(document_id, limit=100000)
+        if not rows:
+            stage.set(chunks=0)
+            return 0
 
-    roles = set(visible_roles or [])
-    ids: list[str] = []
-    metas: list[dict[str, Any]] = []
-    for row in rows:
-        meta = dict(row["metadata"])
-        meta["status"] = status
-        meta["visibility"] = visibility
-        from app.retrieval.filters import date_key
-        meta["effective_date"] = date_key(effective_date)
-        for role in ALL_ROLES:
-            meta[f"vis_{role}"] = role in roles
-        # 去掉读取时解析出来的派生字段，避免写回时结构不对
-        meta.pop("chunk_id", None)
-        ids.append(row["chunk_id"])
-        metas.append(meta)
+        roles = set(visible_roles or [])
+        ids: list[str] = []
+        metas: list[dict[str, Any]] = []
+        for row in rows:
+            meta = dict(row["metadata"])
+            meta["status"] = status
+            meta["visibility"] = visibility
+            from app.retrieval.filters import date_key
+            meta["effective_date"] = date_key(effective_date)
+            for role in ALL_ROLES:
+                meta[f"vis_{role}"] = role in roles
+            # 去掉读取时解析出来的派生字段，避免写回时结构不对
+            meta.pop("chunk_id", None)
+            ids.append(row["chunk_id"])
+            metas.append(meta)
 
-    vector.update_metadata(ids, metas)
-    return len(ids)
+        vector.update_metadata(ids, metas)
+        stage.set(chunks=len(ids))
+        return len(ids)
 
 
 def reindex_document(document_id: str, *, status: str, visibility: str,

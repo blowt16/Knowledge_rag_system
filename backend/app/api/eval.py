@@ -31,6 +31,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app import db
+from app.core.audit import audit
 from app.core.deps import require_role
 from app.core.exceptions import Conflict, NotFound
 from app.eval import config as eval_config
@@ -113,13 +114,27 @@ async def patch_set(set_id: str, payload: EvalSetPatch, user=AdminUser) -> EvalS
 async def delete_set(set_id: str, user=AdminUser) -> Response:
     """删除（连带它的用例；历史 run 不受影响 —— 它存的是 `set_name` 快照）。"""
     async with db.tx() as conn:
+        row = await conn.fetchrow(
+            "SELECT name FROM eval_sets WHERE id = $1", set_id)
+        case_count = (await conn.fetchval(
+            "SELECT count(*) FROM eval_cases WHERE set_id = $1", set_id)
+            if row is not None else 0)
         try:
             await sets.delete_set(conn, set_id)
         except sets.SetNotFound:
             raise NotFound("评测集不存在") from None
         except sets.SetBusy as e:
             # §5.5 的守卫：跑到一半删了它，落库时会外键报错 → 整轮 failed
+            audit("eval.set.delete", stage="audit.eval", ok=False,
+                  level=logging.WARNING, actor_id=user.id,
+                  actor_role=user.role, target_id=set_id,
+                  set_name=(row["name"] if row is not None else None),
+                  reason="busy")
             raise Conflict(str(e)) from None
+    if row is not None:
+        audit("eval.set.delete", stage="audit.eval", actor_id=user.id,
+              actor_role=user.role, target_id=set_id,
+              set_name=row["name"], cases=case_count, outcome="ok")
     return Response(status_code=204)
 
 
@@ -372,12 +387,22 @@ async def delete_run(id: str, user=AdminUser) -> Response:
        真要中止得先有 abort 语义，本轮不做（见方案 §5.3）。
     """
     async with db.tx() as conn:
-        status = await conn.fetchval("SELECT status FROM eval_runs WHERE id = $1", id)
-        if status is None:
+        row = await conn.fetchrow(
+            "SELECT name, status FROM eval_runs WHERE id = $1", id)
+        if row is None:
             raise NotFound("评测不存在")
-        if status in ("pending", "running"):
+        if row["status"] in ("pending", "running"):
+            audit("eval.run.delete", stage="audit.eval", ok=False,
+                  level=logging.WARNING, actor_id=user.id,
+                  actor_role=user.role, target_id=id, run_name=row["name"],
+                  run_status=row["status"], reason="running")
             raise Conflict("这一轮还在跑，删掉它不会真的停下（还在占 GPU）—— 等它结束再删")
+        case_count = await conn.fetchval(
+            "SELECT count(*) FROM eval_case_results WHERE run_id = $1", id)
         await conn.execute("DELETE FROM eval_runs WHERE id = $1", id)
+    audit("eval.run.delete", stage="audit.eval", actor_id=user.id,
+          actor_role=user.role, target_id=id, run_name=row["name"],
+          run_status=row["status"], cases=case_count, outcome="ok")
     return Response(status_code=204)
 
 

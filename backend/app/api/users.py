@@ -46,7 +46,8 @@ async def list_users(
 @router.post("/users", response_model=UserItem)
 async def create_user(body: CreateUserRequest, user=AdminUser) -> UserItem:
     return UserItem(**await users.create_user(
-        username=body.username, password=body.password, role=body.role))
+        username=body.username, password=body.password, role=body.role,
+        actor_id=user.id, actor_role=user.role))
 
 
 @router.patch("/users/{user_id}", response_model=UserItem)
@@ -54,13 +55,16 @@ async def patch_user(user_id: str, body: PatchUserRequest, user=AdminUser) -> Us
     if body.role is None and body.is_active is None:
         raise AppError("至少要给出 role 或 is_active 之一")
     return UserItem(**await users.patch_user(
-        user_id, role=body.role, is_active=body.is_active))
+        user_id, role=body.role, is_active=body.is_active,
+        actor_id=user.id, actor_role=user.role))
 
 
 @router.post("/users/{user_id}/reset-password", response_model=UserItem)
 async def reset_password(user_id: str, body: ResetPasswordRequest,
                          user=AdminUser) -> UserItem:
-    return UserItem(**await users.reset_password(user_id, password=body.password))
+    return UserItem(**await users.reset_password(
+        user_id, password=body.password,
+        actor_id=user.id, actor_role=user.role))
 
 
 @router.delete("/users/{user_id}")
@@ -69,5 +73,5 @@ async def delete_user(user_id: str, user=AdminUser) -> dict:
 
     删自己会被 service 拒掉（400）—— 见 `user_service.delete_user`。
     """
-    await users.delete_user(user_id, actor_id=user.id)
+    await users.delete_user(user_id, actor_id=user.id, actor_role=user.role)
     return {"message": "已删除"}

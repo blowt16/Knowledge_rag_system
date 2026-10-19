@@ -76,6 +76,18 @@ _CONSOLE_FIELDS = (
     "rank", "score", "chunk_id", "document", "page", "marker",
     "query", "resolved_query", "answer_preview",
     "question", "clarify_question", "text",
+    # 审计字段
+    "actor_id", "actor_role", "target_id", "target_type",
+    "username", "user_name", "role", "action", "outcome",
+    "changed_fields", "required_roles", "title", "visibility",
+    "role_before", "role_after", "active_before", "active_after",
+    "visibility_before", "visibility_after",
+    "status_before", "status_after",
+    "effective_date_before", "effective_date_after",
+    "roles_before", "roles_after", "reindexed",
+    "conversations", "messages", "chroma", "bm25",
+    "removed_chroma", "removed_bm25",
+    "set_id", "set_name", "run_id", "run_name", "run_status",
 )
 
 #: 这些字段是正文/问题内容，控制台允许比普通字段更长的展示上限。
@@ -237,7 +249,7 @@ class ConsoleFormatter(logging.Formatter):
             status, status_color = "·", "dim"
 
         message = record.getMessage().replace("\r", " ").replace("\n", " ")
-        level = f"{record.levelname:<7}"
+        level = f"{record.levelname:<8}"
         line = (
             f"{self._color(ts, 'dim')} "
             f"{self._color(level, _LEVEL_COLOR.get(record.levelname, ''))}"
@@ -309,6 +321,12 @@ class JsonFormatter(logging.Formatter):
         parent_stage_id = getattr(record, "parent_stage_id", None) or None
         if parent_stage_id:
             payload["parent_stage_id"] = parent_stage_id
+        layer = getattr(record, "layer", None)
+        if layer:
+            payload["layer"] = layer
+        ok = getattr(record, "ok", None)
+        if ok is not None:
+            payload["ok"] = ok
 
         for key in ("session_id", "user_id", "node", "task_id"):
             value = getattr(record, key, None)

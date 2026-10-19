@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import httpx
@@ -226,14 +227,19 @@ async def test_patch_other_user_is_404_and_does_not_modify(client, users):
     assert body["items"][0]["title"] == "A 的", "越权请求不得真的改到数据"
 
 
-async def test_delete_soft_deletes_own(client, users):
+async def test_delete_soft_deletes_own(client, users, caplog):
     a, _ = users
     sid = uuid.uuid4().hex
     await _mk_conv(sid, a["id"], title="待删")
 
-    r = await client.delete(f"/api/conversations/{sid}", headers=_h(a))
+    with caplog.at_level(logging.INFO, logger="app.audit"):
+        r = await client.delete(f"/api/conversations/{sid}", headers=_h(a))
 
     assert r.status_code == 200, r.text
+    deleted = [x for x in caplog.records
+               if getattr(x, "event", "") == "audit.conversation.delete"]
+    assert deleted and deleted[-1].actor_id == a["id"]
+    assert deleted[-1].target_id == sid
     assert (await client.get("/api/conversations", headers=_h(a))).json()["items"] == []
     async with db.tx() as conn:
         flag = await conn.fetchval("SELECT delete_flag FROM conversations WHERE id = $1",

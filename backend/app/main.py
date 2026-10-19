@@ -180,7 +180,7 @@ async def trace_middleware(request: Request, call_next):
             route_path = getattr(request.scope.get("route"), "path",
                                  request.url.path)
             stage.set(path=route_path, status=response.status_code,
-                      ok=response.status_code < 500)
+                      ok=response.status_code < 400)
             if response.status_code >= 500:
                 stage.set_level(logging.ERROR)
             response.headers["x-trace-id"] = tid
@@ -223,7 +223,7 @@ async def trace_middleware(request: Request, call_next):
                                 status_message=f"HTTP {response.status_code}")
                     stage.set_level(logging.ERROR)
                 stage.set(path=route_path, status=response.status_code,
-                          ok=response.status_code < 500)
+                          ok=response.status_code < 400)
 
                 # ⚠️ 两个 id 必须在 with **内**取：出了 with 观测已结束。
                 # span_id 用**本地** http span：JSON 日志里的 span_id 也是它，

@@ -21,6 +21,7 @@ import uuid
 import asyncpg
 
 from app import db
+from app.core.audit import audit
 from app.core.config import cfg
 from app.core.exceptions import NotFound
 
@@ -172,6 +173,9 @@ async def delete_conversation(session_id: str, user_id: str) -> None:
         )
     if row is None:
         raise NotFound("会话不存在")
+    audit("conversation.delete", stage="audit.conversation",
+          actor_id=user_id, target_id=session_id, session_id=session_id,
+          outcome="ok")
 
 
 async def get_messages(session_id: str, user_id: str) -> list[dict]:

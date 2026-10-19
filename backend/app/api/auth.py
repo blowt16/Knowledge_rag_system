@@ -17,10 +17,13 @@
 
 from __future__ import annotations
 
+import logging
+
 import jwt as pyjwt
 from fastapi import APIRouter, status
 
 from app import db
+from app.core.audit import audit
 from app.core.config import cfg
 from app.core.deps import CurrentUser
 from app.core.exceptions import Unauthorized
@@ -57,15 +60,24 @@ async def login(body: LoginRequest) -> TokenPair:
 
     # 用户不存在与口令错误返回同一条消息 —— 不用错误响应泄露用户名是否存在
     if row is None or not verify_password(body.password, row["password_hash"]):
+        audit("auth.login", stage="audit.auth", ok=False, level=logging.WARNING,
+              username=body.username,
+              user_id=(row["id"] if row is not None else None),
+              reason="invalid_credentials")
         raise Unauthorized("用户名或口令不正确", code="invalid_credentials")
 
     # ⚠️ **停用只在口令校验通过之后才判**：反过来的话，任何猜口令的人
     #    都能从错误消息里区分「这个账号存在但被停用」与「账号不存在」。
     #    口令都对了他本来就知道这个账号存在，这时给一句明确提示才是有用的。
     if not row["is_active"]:
+        audit("auth.login", stage="audit.auth", ok=False, level=logging.WARNING,
+              user_id=row["id"], username=row["username"], role=row["role"],
+              reason="account_disabled")
         raise Unauthorized("账号已停用，请联系管理员", code="account_disabled")
 
     tv = row["token_version"]
+    audit("auth.login", stage="audit.auth", user_id=row["id"],
+          username=row["username"], role=row["role"], outcome="ok")
     return TokenPair(
         access_token=create_access_token(row["id"], row["role"], tv),
         refresh_token=create_refresh_token(row["id"], row["role"], tv),
@@ -79,11 +91,17 @@ async def refresh(body: RefreshRequest) -> TokenPair:
     try:
         payload = decode_token(body.refresh_token)
     except pyjwt.ExpiredSignatureError:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              reason="refresh_expired")
         raise Unauthorized("刷新令牌已过期，请重新登录", code="refresh_expired") from None
     except pyjwt.PyJWTError:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              reason="invalid_token")
         raise Unauthorized("刷新令牌无效") from None
 
     if payload.get("type") != TOKEN_TYPE_REFRESH:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              reason="wrong_token_type")
         raise Unauthorized("令牌类型不正确")
 
     user_id = payload.get("sub")
@@ -94,6 +112,8 @@ async def refresh(body: RefreshRequest) -> TokenPair:
             user_id,
         )
     if row is None:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              user_id=user_id, reason="user_not_found")
         raise Unauthorized("用户不存在")
 
     # ⚠️ 停用也要**在这里**判（M4 评审 K-4）：登录那条路已经堵了，
@@ -102,12 +122,20 @@ async def refresh(body: RefreshRequest) -> TokenPair:
     #    不能只依赖「停用会自增 tv」：那要求每一处写 users 的代码都记得自增，
     #    是个靠约定维持的不变式，而这里是**兜底的那一道**。
     if not row["is_active"]:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              user_id=row["id"], username=row["username"], role=row["role"],
+              reason="account_disabled")
         raise Unauthorized("账号已停用，请联系管理员", code="account_disabled")
 
     # tv 匹配校验：登出后 refresh 也必须失效
     if int(payload.get("tv", -1)) != row["token_version"]:
+        audit("auth.refresh", stage="audit.auth", ok=False, level=logging.WARNING,
+              user_id=row["id"], username=row["username"], role=row["role"],
+              reason="token_revoked")
         raise Unauthorized("刷新令牌已失效，请重新登录", code="token_revoked")
 
+    audit("auth.refresh", stage="audit.auth", user_id=row["id"],
+          username=row["username"], role=row["role"], outcome="ok")
     return TokenPair(
         access_token=create_access_token(row["id"], row["role"], row["token_version"]),
         # 原样返回，不轮换
@@ -128,6 +156,8 @@ async def logout(user: CurrentUser) -> MessageResponse:
         await conn.execute(
             "UPDATE users SET token_version = token_version + 1 WHERE id = $1", user.id
         )
+    audit("auth.logout", stage="audit.auth", actor_id=user.id,
+          actor_role=user.role, username=user.username, outcome="ok")
     return MessageResponse(message="已登出，所有已签发的令牌均已失效")
 
 

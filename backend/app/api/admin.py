@@ -80,22 +80,26 @@ async def patch_document(
     provided = body.model_dump(exclude_unset=True)
     if not provided:
         raise AppError("请求体至少要给一个可改字段")
-    return DocumentItem(**await docs.update_document(document_id, **provided))
+    return DocumentItem(**await docs.update_document(
+        document_id, actor_id=user.id, actor_role=user.role, **provided))
 
 
 @router.post("/documents/{document_id}/disable", response_model=DocumentItem)
 async def disable_document(document_id: str, user=AdminUser) -> DocumentItem:
-    return DocumentItem(**await docs.set_document_status(document_id, "disabled"))
+    return DocumentItem(**await docs.set_document_status(
+        document_id, "disabled", actor_id=user.id, actor_role=user.role))
 
 
 @router.post("/documents/{document_id}/enable", response_model=DocumentItem)
 async def enable_document(document_id: str, user=AdminUser) -> DocumentItem:
-    return DocumentItem(**await docs.set_document_status(document_id, "active"))
+    return DocumentItem(**await docs.set_document_status(
+        document_id, "active", actor_id=user.id, actor_role=user.role))
 
 
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: str, user=AdminUser) -> dict:
-    await docs.delete_document(document_id)
+    await docs.delete_document(document_id, actor_id=user.id,
+                               actor_role=user.role)
     return {"message": "已删除"}
 
 
