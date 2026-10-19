@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, AsyncIterator
 
 import httpx
 
-from app.core import observability
+from app.core import observability, trace
 from app.core.config import cfg, secret
 
 logger = logging.getLogger(__name__)
@@ -95,44 +96,55 @@ async def complete(
         body["response_format"] = {"type": "json_object"}
     _apply_thinking(body)
 
-    client = observability.get_client()
-    obs = None
-    if client is not None:
-        obs = client.start_observation(
-            as_type="generation", name=f"llm.{_current_node()}",
-            model=_model(), input=messages,
-            metadata={"rag.node": _current_node()},
-        )
-    try:
+    usage: dict[str, int] = {}
+    with trace.trace_span(
+        "llm", layer="llm", node=_current_node(), model=_model(),
+        messages=len(messages), max_tokens=body.get("max_tokens"),
+    ) as stage:
+        client = observability.get_client()
+        obs = None
+        if client is not None:
+            obs = client.start_observation(
+                as_type="generation", name=f"llm.{_current_node()}",
+                model=_model(), input=messages,
+                metadata={"rag.node": _current_node()},
+            )
         try:
-            async with httpx.AsyncClient(timeout=timeout) as http:
-                r = await http.post(_base() + "/chat/completions",
-                                    headers=_headers(), json=body)
-        except httpx.TimeoutException as e:
-            raise LLMTimeout(str(e)) from e
-        except httpx.HTTPError as e:
-            raise LLMError(str(e)) from e
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as http:
+                    r = await http.post(_base() + "/chat/completions",
+                                        headers=_headers(), json=body)
+            except httpx.TimeoutException as e:
+                raise LLMTimeout(str(e)) from e
+            except httpx.HTTPError as e:
+                raise LLMError(str(e)) from e
 
-        if r.status_code != 200:
-            raise LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
+            if r.status_code != 200:
+                raise LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
 
-        data = r.json()
-        usage = _usage_details(data.get("usage"))
-        try:
-            content = data["choices"][0]["message"].get("content") or ""
-        except (KeyError, IndexError) as e:
-            raise LLMError(f"响应结构异常：{str(data)[:200]}") from e
-        if obs is not None:
-            obs.update(output=content, usage_details=usage or None)
-        return content
-    except Exception as e:  # noqa: BLE001
-        if obs is not None:
-            obs.update(level="ERROR", status_message=type(e).__name__)
-        raise
-    finally:
-        # ★ 忘 .end() 观测会**静默消失**（实测）—— 必须放 finally
-        if obs is not None:
-            obs.end()
+            data = r.json()
+            usage = _usage_details(data.get("usage"))
+            try:
+                content = data["choices"][0]["message"].get("content") or ""
+            except (KeyError, IndexError) as e:
+                raise LLMError(f"响应结构异常：{str(data)[:200]}") from e
+            if obs is not None:
+                obs.update(output=content, usage_details=usage or None)
+            stage.set(
+                tokens_in=usage.get("input", 0),
+                tokens_out=usage.get("output", 0),
+                tokens=f"{usage.get('input', 0)}/{usage.get('output', 0)}",
+                chars=len(content),
+            )
+            return content
+        except Exception as e:  # noqa: BLE001
+            if obs is not None:
+                obs.update(level="ERROR", status_message=type(e).__name__)
+            raise
+        finally:
+            # ★ 忘 .end() 观测会**静默消失**（实测）—— 必须放 finally
+            if obs is not None:
+                obs.end()
 
 
 async def complete_json(
@@ -198,59 +210,75 @@ async def stream_raw(
     }
     _apply_thinking(body)
 
-    client = observability.get_client()
-    obs = None
-    if client is not None:
-        obs = client.start_observation(
-            as_type="generation", name=f"llm.{_current_node()}",
-            model=_model(), input=messages,
-            metadata={"rag.node": _current_node()},
-        )
+    usage: dict[str, int] = {}
     collected: list[str] = []
-    try:
+    first_token_at: float | None = None
+    with trace.trace_span(
+        "llm", layer="llm", node=_current_node(), model=_model(),
+        messages=len(messages), max_tokens=body.get("max_tokens"), stream=True,
+    ) as stage:
+        client = observability.get_client()
+        obs = None
+        if client is not None:
+            obs = client.start_observation(
+                as_type="generation", name=f"llm.{_current_node()}",
+                model=_model(), input=messages,
+                metadata={"rag.node": _current_node()},
+            )
         try:
-            async with httpx.AsyncClient(timeout=timeout) as http:
-                async with http.stream("POST", _base() + "/chat/completions",
-                                       headers=_headers(), json=body) as response:
-                    if response.status_code != 200:
-                        detail = (await response.aread())[:200]
-                        raise LLMError(f"HTTP {response.status_code}: {detail!r}")
-                    async for line in response.aiter_lines():
-                        if not line or not line.startswith("data:"):
-                            continue
-                        payload = line[5:].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(payload)
-                        except ValueError:
-                            continue
-                        # ★ 先取 usage 再判 choices：带 usage 的那个 chunk 的
-                        #   choices 是空数组，放到下面就被 continue 掉了
-                        usage = _usage_details(chunk.get("usage"))
-                        if usage and obs is not None:
-                            obs.update(usage_details=usage)
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        piece = delta.get("content")
-                        if piece:
-                            collected.append(piece)
-                            yield piece
-        except httpx.TimeoutException as e:
-            raise LLMTimeout(str(e)) from e
-        except httpx.HTTPError as e:
-            raise LLMError(str(e)) from e
-    except Exception as e:  # noqa: BLE001
-        if obs is not None:
-            obs.update(level="ERROR", status_message=type(e).__name__)
-        raise
-    finally:
-        # ★ 流式最容易漏 end —— 实测漏了就静默丢观测
-        if obs is not None:
-            obs.update(output="".join(collected))
-            obs.end()
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as http:
+                    async with http.stream("POST", _base() + "/chat/completions",
+                                           headers=_headers(), json=body) as response:
+                        if response.status_code != 200:
+                            detail = (await response.aread())[:200]
+                            raise LLMError(f"HTTP {response.status_code}: {detail!r}")
+                        async for line in response.aiter_lines():
+                            if not line or not line.startswith("data:"):
+                                continue
+                            payload = line[5:].strip()
+                            if payload == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(payload)
+                            except ValueError:
+                                continue
+                            # ★ 先取 usage 再判 choices：带 usage 的那个 chunk 的
+                            #   choices 是空数组，放到下面就被 continue 掉了
+                            usage = _usage_details(chunk.get("usage"))
+                            if usage and obs is not None:
+                                obs.update(usage_details=usage)
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta") or {}
+                            piece = delta.get("content")
+                            if piece:
+                                if first_token_at is None:
+                                    first_token_at = time.perf_counter()
+                                    stage.set(ttft_ms=int(
+                                        (first_token_at - stage.started) * 1000))
+                                collected.append(piece)
+                                yield piece
+            except httpx.TimeoutException as e:
+                raise LLMTimeout(str(e)) from e
+            except httpx.HTTPError as e:
+                raise LLMError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            if obs is not None:
+                obs.update(level="ERROR", status_message=type(e).__name__)
+            raise
+        finally:
+            # ★ 流式最容易漏 end —— 实测漏了就静默丢观测
+            if obs is not None:
+                obs.update(output="".join(collected))
+                obs.end()
+            stage.set(
+                tokens_in=usage.get("input", 0),
+                tokens_out=usage.get("output", 0),
+                tokens=f"{usage.get('input', 0)}/{usage.get('output', 0)}",
+                chars=sum(len(p) for p in collected),
+            )
 
 
 def is_configured() -> bool:

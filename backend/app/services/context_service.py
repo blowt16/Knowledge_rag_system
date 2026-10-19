@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 
 from app import db
-from app.core import llm
+from app.core import llm, observability
 from app.core.config import cfg
 from app.core.prompts import render
 from app.graph.state import Message, NodeTrace
@@ -224,12 +224,13 @@ async def _summarize(previous: str, merged: list[Message]) -> str:
         previous=(previous or "（无）").strip(),
         messages=_format(merged),
     )
-    text = await llm.complete(
-        [{"role": "user", "content": prompt}],
-        timeout=float(cfg("timeouts.compaction", 20)),
-        # ⚠️ 摘要自身有上限，否则它会一轮比一轮胖，把窗口撑爆
-        max_tokens=_summary_cap(),
-    )
+    with observability.node_context("compaction"):
+        text = await llm.complete(
+            [{"role": "user", "content": prompt}],
+            timeout=float(cfg("timeouts.compaction", 20)),
+            # ⚠️ 摘要自身有上限，否则它会一轮比一轮胖，把窗口撑爆
+            max_tokens=_summary_cap(),
+        )
     return (text or "").strip()
 
 
