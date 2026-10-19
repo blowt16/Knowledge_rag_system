@@ -85,6 +85,31 @@ def test_json_formatter_adds_stage_fields(monkeypatch):
     assert payload["extra"]["ms"] == 12
 
 
+def test_console_shows_content_fields_with_longer_limit():
+    """DEBUG 内容日志的 query/text 允许比普通字段更长。"""
+    fmt = ConsoleFormatter(use_color=False)
+    out = fmt.format(_record(
+        trace_id="a" * 32, stage="rerank.topk", depth=1, event="node.detail",
+        text="x" * 400, score=0.9, chunk_id="c1",
+    ))
+    assert "text=" in out
+    assert "x" * 299 in out
+    assert "x" * 300 not in out
+    assert "chunk_id=c1" in out
+    assert "score=0.9" in out
+
+
+def test_content_fields_are_redacted_in_json():
+    """控制台可以看正文，但 JSON 文件仍按敏感键打码。"""
+    payload = json.loads(JsonFormatter().format(_record(
+        event="node.detail", resolved_query="真实问题", text="片段",
+        answer_preview="答案片段",
+    )))
+    assert payload["extra"]["resolved_query"] == "[REDACTED]"
+    assert payload["extra"]["text"] == "[REDACTED]"
+    assert payload["extra"]["answer_preview"] == "[REDACTED]"
+
+
 def test_langfuse_context_noise_is_filtered_but_real_warnings_remain():
     noise = logging.LogRecord(
         "langfuse", logging.WARNING, __file__, 1,

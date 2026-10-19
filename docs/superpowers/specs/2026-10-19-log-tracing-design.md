@@ -587,10 +587,12 @@ async def _wrapper(state):
 logging:
   level_env: LOG_LEVEL
   default_level: INFO
-  console_level: INFO          # 控制台独立级别（可单独调高/调低）
+  console_level: DEBUG         # handler 最低级别；实际仍受 root 控制
   console_format: text         # text | json
   console_color: auto          # auto | always | never
   console_max_value_chars: 120
+  trace_content: true          # DEBUG 档输出 query / chunk 正文
+  trace_content_max_chars: 300
   dir: logs
   max_bytes: 10485760
   backup_count: 5
@@ -609,9 +611,10 @@ logging:
 
 ### 5.5 隐私与脱敏
 
-**硬约束**
+**硬约束（默认 INFO 档）**
 
 - 不记录：query 原文、resolved_query、answer、prompt、messages、检索正文、context 正文、summary 正文。
+- 例外：显式 `LOG_LEVEL=DEBUG` + `logging.trace_content: true` 时，节点详情可输出 query / 改写 / chunk 正文 / answer 前 300 字（`trace_content_max_chars` 可调）；JSON 文件的 `extra` 仍按敏感键打码。生产环境应设 `trace_content: false` 且不长期开 DEBUG。
 - 可以记录：`query_len`、`query_hash`（复用 `core/logging.py:hash_query()`）、数量、长度、耗时、分数、模型名、路由/决策枚举、文档名、chunk_id。
 - `session_id` / `user_id` 可以记录；它们是内部标识，不是正文。
 - 所有字符串值截断到 `console_max_value_chars`，并去掉 CR/LF，防止日志注入。

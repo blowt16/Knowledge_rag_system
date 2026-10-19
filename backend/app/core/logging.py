@@ -28,7 +28,7 @@ _SENSITIVE_KEYS = {
     "query", "question", "answer", "content", "snippet", "text",
     "prompt", "messages", "history", "context", "resolved_query",
     "password", "token", "access_token", "refresh_token", "authorization",
-    "api_key", "secret", "mineru_token", "jwt",
+    "api_key", "secret", "mineru_token", "jwt", "answer_preview",
 }
 
 _REDACTED = "[REDACTED]"
@@ -56,7 +56,8 @@ _LEVEL_COLOR = {
 #: 控制台字段白名单 —— 其他字段只进 JSON 文件。
 _CONSOLE_FIELDS = (
     "query_len", "query_hash", "session_id", "user_id",
-    "route", "route_source", "decision", "changed", "skipped",
+    "route", "route_source", "source", "target", "decision",
+    "changed", "skipped", "clarify_skipped", "unresolved",
     "queries", "candidates", "recalled", "kept", "top", "confidence",
     "degraded", "evidence", "chars", "citations", "reason", "facets",
     "refused", "inputs", "outputs", "rrf_k",
@@ -66,11 +67,22 @@ _CONSOLE_FIELDS = (
     "pages", "ocr_pages", "tables", "chunks", "batches", "vectors",
     "before_tokens", "after_tokens", "summary_chars",
     "chars_in", "chars_out", "file_type", "supported", "duplicate",
-    "size", "source", "dim", "bm25", "doc_id", "version", "task_id",
+    "size", "dim", "bm25", "doc_id", "version", "task_id",
     "doc_filename", "chapters", "run_id",
     "case_id", "turn", "hit",
     "status", "method", "path", "error",
+    # DEBUG 详情字段（内容字段按 trace_content_max_chars 截断）
+    # text 放最后：chunk 的 rank/score/来源先出，长正文最后。
+    "rank", "score", "chunk_id", "document", "page", "marker",
+    "query", "resolved_query", "answer_preview",
+    "question", "clarify_question", "text",
 )
+
+#: 这些字段是正文/问题内容，控制台允许比普通字段更长的展示上限。
+_CONTENT_FIELDS = {
+    "query", "resolved_query", "text", "answer_preview",
+    "question", "clarify_question",
+}
 
 #: JSON 顶层字段，不能再落进 extra。
 _RESERVED = {
@@ -180,6 +192,7 @@ class ConsoleFormatter(logging.Formatter):
         super().__init__()
         self.use_color = use_color
         self.max_value_chars = int(cfg("logging.console_max_value_chars", 120))
+        self.content_max_chars = int(cfg("logging.trace_content_max_chars", 300))
 
     def _color(self, text: str, name: str) -> str:
         if not self.use_color or not name:
@@ -247,7 +260,9 @@ class ConsoleFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is None or value == "":
                 continue
-            fields.append(f"{key}={_safe_value(value, self.max_value_chars)}")
+            limit = (self.content_max_chars if key in _CONTENT_FIELDS
+                     else self.max_value_chars)
+            fields.append(f"{key}={_safe_value(value, limit)}")
         if fields:
             line += "  " + " ".join(fields)
 

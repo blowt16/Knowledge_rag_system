@@ -406,11 +406,17 @@ observability:
 logging:
   level_env: LOG_LEVEL
   default_level: INFO
-  # 控制台独立级别/格式：控制台给人读，文件给机器读
-  console_level: INFO
+  # 控制台 handler 的最低级别：实际输出仍受 LOG_LEVEL/root 控制。
+  # 设 DEBUG 表示「LOG_LEVEL=DEBUG 时控制台能看到子阶段与 DEBUG 详情」；
+  # 设 INFO 会在 handler 层把 DEBUG 全部丢掉（即使 root 是 DEBUG）。
+  console_level: DEBUG
   console_format: text          # text | json
   console_color: auto           # auto | always | never
   console_max_value_chars: 120
+  # ⚠️ 仅用于本地调试：DEBUG 档会把 query / 改写 / rerank 片段写进控制台；
+  #    INFO 档不会输出。生产环境请设 false，或不要开 DEBUG。
+  trace_content: true
+  trace_content_max_chars: 300
   dir: logs
   max_bytes: 10485760
   backup_count: 5

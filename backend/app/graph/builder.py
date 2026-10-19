@@ -42,7 +42,12 @@ from langgraph.graph import END, START, StateGraph
 
 from app.core import observability, trace
 
-from app.graph.node_io import node_input, node_log_fields, node_output
+from app.graph.node_io import (
+    log_node_details,
+    node_input,
+    node_log_fields,
+    node_output,
+)
 from app.graph.nodes.build_context import build_context_node
 from app.graph.nodes.chat import chat_node
 from app.graph.nodes.cite import cite_node
@@ -158,7 +163,11 @@ def traced(node_name: str, fn):
 
                 if isinstance(result, dict):
                     stage.set(**node_log_fields(node_name, result, state))
-                return result
+
+            # 节点 summary 已由 trace_span 打出；DEBUG 详情排在它后面、缩进一级
+            if isinstance(result, dict):
+                log_node_details(node_name, result, state, depth=stage.depth + 1)
+            return result
 
     return _wrapper
 
