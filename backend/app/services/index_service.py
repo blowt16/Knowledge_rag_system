@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.core import trace
 from app.core.deps import ALL_ROLES
 from app.retrieval import bm25, vector
 from app.retrieval.embedding import embed_texts
@@ -39,16 +40,20 @@ async def build_index(entries: list[IndexEntry]) -> int:
         return 0
 
     texts = [e.text for e in entries]
-    vectors = await embed_texts(texts)
+    with trace.trace_span("ingest.embed", layer="ingest") as stage:
+        vectors = await embed_texts(texts)
+        stage.set(chunks=len(texts),
+                  dim=len(vectors[0]) if vectors else 0)
 
-    vector.upsert(
-        ids=[e.chunk_id for e in entries],
-        embeddings=vectors,
-        documents=texts,
-        metadatas=[e.metadata for e in entries],
-    )
-
-    bm25.add([(e.chunk_id, e.text) for e in entries])
+    with trace.trace_span("ingest.index_write", layer="ingest") as stage:
+        vector.upsert(
+            ids=[e.chunk_id for e in entries],
+            embeddings=vectors,
+            documents=texts,
+            metadatas=[e.metadata for e in entries],
+        )
+        bm25.add([(e.chunk_id, e.text) for e in entries])
+        stage.set(vectors=len(vectors), bm25=len(entries))
     return len(entries)
 
 

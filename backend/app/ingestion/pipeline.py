@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
@@ -49,6 +50,7 @@ from pathlib import Path
 import asyncpg
 
 from app import db
+from app.core import trace
 from app.core.config import cfg, data_dir
 from app.ingestion import versioning
 from app.ingestion.chunker import ChunkSpan, chunk_text, make_chunk_id
@@ -124,21 +126,32 @@ def md5_of(path: Path) -> str:
 
 async def ingest(req: IngestRequest) -> IngestOutcome:
     """摄入一个文件。异常不抛出 —— 一律转成 failed 结果并落库。"""
+    tid = req.trace_id if req.trace_id and req.trace_id.strip("0") else None
+    with trace.begin_trace(tid):
+        return await _ingest(req)
+
+
+async def _ingest(req: IngestRequest) -> IngestOutcome:
     source = req.source_path
     effective = req.effective_date or date.today()
+    started = time.perf_counter()
 
     # ---- ① 格式校验（扩展名 + 内容嗅探）----------------------------
-    ok, hint = is_supported(req.filename, path=source)
+    with trace.trace_span("ingest.validate", layer="ingest") as stage:
+        ok, hint = is_supported(req.filename, path=source)
+        stage.set(file_type=extension_of(req.filename), supported=ok)
     if not ok:
         await _fail_task(req.task_id, hint)
         return IngestOutcome(status="failed", message=hint)
 
     # ---- ② MD5 与判重 ----------------------------------------------
-    digest = md5_of(source)
-    async with db.tx() as conn:
-        await _set_task(conn, req.task_id, status="parsing", progress=5,
-                        message="正在计算指纹")
-        existing = await versioning.find_existing_by_md5(conn, digest)
+    with trace.trace_span("ingest.dedupe", layer="ingest") as stage:
+        digest = md5_of(source)
+        async with db.tx() as conn:
+            await _set_task(conn, req.task_id, status="parsing", progress=5,
+                            message="正在计算指纹")
+            existing = await versioning.find_existing_by_md5(conn, digest)
+        stage.set(md5=digest[:12], duplicate=existing is not None)
 
     if existing is not None:
         async with db.tx() as conn:
@@ -153,25 +166,28 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
     doc_id = uuid.uuid4().hex
     suffix = source.suffix or f".{extension_of(req.filename)}"
     stored = _data_path("uploads") / f"{doc_id}{suffix}"
-    shutil.copy2(source, stored)
 
     title = (req.title or Path(req.filename).stem).strip() or Path(req.filename).stem
 
     try:
-        async with db.tx() as conn:
-            group_id, version = await versioning.resolve_group_and_version(conn, title)
-            await conn.execute(
-                """INSERT INTO documents
-                   (id, doc_group_id, title, filename, file_type, md5, version,
-                    effective_date, status, visibility, visible_roles,
-                    source_path, uploader_id, chunk_count)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'indexing',$9,$10,$11,$12,0)""",
-                doc_id, group_id, title, req.filename,
-                extension_of(req.filename), digest, version, effective,
-                req.visibility, req.visible_roles, str(stored), req.uploader_id,
-            )
-            await _set_task(conn, req.task_id, status="parsing", progress=15,
-                            message="正在解析", document_id=doc_id)
+        with trace.trace_span("ingest.store", layer="ingest") as stage:
+            shutil.copy2(source, stored)
+            async with db.tx() as conn:
+                group_id, version = await versioning.resolve_group_and_version(conn, title)
+                await conn.execute(
+                    """INSERT INTO documents
+                       (id, doc_group_id, title, filename, file_type, md5, version,
+                        effective_date, status, visibility, visible_roles,
+                        source_path, uploader_id, chunk_count)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'indexing',$9,$10,$11,$12,0)""",
+                    doc_id, group_id, title, req.filename,
+                    extension_of(req.filename), digest, version, effective,
+                    req.visibility, req.visible_roles, str(stored), req.uploader_id,
+                )
+                await _set_task(conn, req.task_id, status="parsing", progress=15,
+                                message="正在解析", document_id=doc_id)
+            stage.set(doc_id=doc_id, version=version,
+                      size=source.stat().st_size)
     except asyncpg.UniqueViolationError:
         # UNIQUE(doc_group_id, version) 兜底（§3.3.1）
         message = "版本号冲突：同一文档组被并发上传，请重试"
@@ -182,15 +198,24 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
     written_chunks = 0
     try:
         image_dir = _data_path("extracted_images", doc_id)
-        result = load_document(stored, file_type=extension_of(req.filename),
-                               image_dir=image_dir)
+        with trace.trace_span("ingest.parse", layer="ingest") as stage:
+            result = load_document(stored, file_type=extension_of(req.filename),
+                                   image_dir=image_dir)
+            stage.set(file_type=extension_of(req.filename),
+                      pages=len(result.pages),
+                      ocr_pages=len(result.ocr_pages),
+                      missing_pages=len(result.missing_pages),
+                      source=result.source)
 
         async with db.tx() as conn:
             await _set_task(conn, req.task_id, status="chunking", progress=35,
                             message="正在清洗与分块")
 
-        page_texts = [(p.page, p.text) for p in result.pages]
-        normalized, slices = build_normalized_text(page_texts)
+        with trace.trace_span("ingest.clean", layer="ingest") as stage:
+            page_texts = [(p.page, p.text) for p in result.pages]
+            normalized, slices = build_normalized_text(page_texts)
+            stage.set(chars_in=sum(len(text) for _, text in page_texts),
+                      chars_out=len(normalized), pages=len(page_texts))
         if not normalized.strip():
             raise ValueError("解析后没有任何可用文本")
 
@@ -210,11 +235,13 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
         # 表格组是**原子区间**：`pdf.py` 已把它们按「【表头】… 到下一个空行」
         # 内联进页文本，这里把区间交给切分器 —— 组内不断，也不与正文合块。
         # 不传 `atomic` 时切分行为与改造前逐字一致（Task 4 的回归保护）。
-        spans: list[ChunkSpan] = chunk_text(
-            normalized,
-            boundaries=boundaries,
-            atomic=table_atomic_ranges(normalized),
-        )
+        with trace.trace_span("ingest.chunk", layer="ingest") as stage:
+            spans: list[ChunkSpan] = chunk_text(
+                normalized,
+                boundaries=boundaries,
+                atomic=table_atomic_ranges(normalized),
+            )
+            stage.set(chunks=len(spans), chars=len(normalized))
 
         image_by_page = {p.page: p.image_paths for p in result.pages}
         page_boxes = [b for p in result.pages for b in p.bbox]
@@ -226,18 +253,20 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
             visibility=req.visibility, visible_roles=list(req.visible_roles or []),
         )
 
-        entries: list[IndexEntry] = []
-        for span in spans:
-            chunk_meta = build_chunk_metadata(
-                doc=meta, chunk=span, slices=slices, marks=marks,
-                page_boxes=page_boxes, image_by_page=image_by_page,
-            )
-            entries.append(IndexEntry(
-                chunk_id=make_chunk_id(doc_id, span.chunk_index),
-                chunk_index=span.chunk_index,
-                text=span.text,
-                metadata=chunk_meta,
-            ))
+        with trace.trace_span("ingest.enrich", layer="ingest") as stage:
+            entries: list[IndexEntry] = []
+            for span in spans:
+                chunk_meta = build_chunk_metadata(
+                    doc=meta, chunk=span, slices=slices, marks=marks,
+                    page_boxes=page_boxes, image_by_page=image_by_page,
+                )
+                entries.append(IndexEntry(
+                    chunk_id=make_chunk_id(doc_id, span.chunk_index),
+                    chunk_index=span.chunk_index,
+                    text=span.text,
+                    metadata=chunk_meta,
+                ))
+            stage.set(chunks=len(entries), chapters=len(marks))
 
         # ---- ⑤ 写 Chroma + BM25S -----------------------------------
         async with db.tx() as conn:
@@ -247,17 +276,23 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
         written_chunks = await index_service.build_index(entries)
 
         # ---- ⑥ 最后翻 active（「PostgreSQL 最后」= 翻状态）----------
-        async with db.tx() as conn:
-            await conn.execute(
-                "UPDATE documents SET status = 'active', chunk_count = $2, "
-                "normalized_text_path = $3, updated_at = now() WHERE id = $1",
-                doc_id, written_chunks, str(normalized_path),
-            )
-            await _set_task(conn, req.task_id, status="done", progress=100,
-                            message=f"完成，共 {written_chunks} 个片段")
+        with trace.trace_span("ingest.activate", layer="ingest") as stage:
+            async with db.tx() as conn:
+                await conn.execute(
+                    "UPDATE documents SET status = 'active', chunk_count = $2, "
+                    "normalized_text_path = $3, updated_at = now() WHERE id = $1",
+                    doc_id, written_chunks, str(normalized_path),
+                )
+                await _set_task(conn, req.task_id, status="done", progress=100,
+                                message=f"完成，共 {written_chunks} 个片段")
+            stage.set(doc_id=doc_id, chunks=written_chunks)
 
         logger.info("摄入完成", extra={
-            "event": "ingest.done", "node": "ingest", "task_id": req.task_id,
+            "event": "ingest.done", "stage": "ingest", "layer": "ingest",
+            "task_id": req.task_id, "doc_id": doc_id,
+            "chunks": written_chunks, "pages": len(result.pages),
+            "ms": int((time.perf_counter() - started) * 1000),
+            "trace_id": trace.current_trace_id(),
         })
         return IngestOutcome(status="done", document_id=doc_id,
                              chunk_count=written_chunks,
@@ -265,7 +300,10 @@ async def ingest(req: IngestRequest) -> IngestOutcome:
 
     except Exception as e:  # noqa: BLE001 —— 任何解析/嵌入失败都走补偿删除
         logger.exception("摄入失败，执行补偿删除", extra={
-            "event": "ingest.failed", "node": "ingest", "task_id": req.task_id,
+            "event": "ingest.failed", "stage": "ingest", "layer": "ingest",
+            "task_id": req.task_id, "error": type(e).__name__,
+            "ms": int((time.perf_counter() - started) * 1000),
+            "trace_id": trace.current_trace_id(),
         })
         # 补偿删除：先索引、后 PG；且 PG 侧**只置状态，行永远保留**
         try:

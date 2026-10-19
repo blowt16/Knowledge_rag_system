@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from app import db
-from app.core import observability
+from app.core import observability, trace
 from app.core.config import data_dir
 from app.core.exceptions import AppError, NotFound
 from app.ingestion.pipeline import IngestRequest, ingest
@@ -148,7 +148,16 @@ def schedule_ingest(req: IngestRequest, *, trace_id: str, span_id: str) -> None:
     """
 
     async def _run() -> None:
-        with observability.attach_trace(trace_id, span_id):
+        effective = (trace_id if trace_id and trace_id.strip("0")
+                     else trace.new_trace_id())
+        with trace.begin_trace(effective), observability.attach_trace(
+                effective, span_id):
+            logger.info("开始", extra={
+                "event": "ingest.schedule", "stage": "ingest.schedule",
+                "layer": "ingest", "task_id": req.task_id,
+                "filename": req.filename,
+                "trace_id": trace.current_trace_id(),
+            })
             try:
                 await ingest(req)
             finally:
