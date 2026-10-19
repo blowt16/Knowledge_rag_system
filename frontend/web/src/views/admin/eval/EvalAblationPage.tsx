@@ -236,7 +236,7 @@ export default function EvalAblationPage() {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
+                <thead className="text-left text-muted-foreground [&_th]:text-[15px] [&_th]:font-semibold">
                   <tr>
                     <th className="w-8 py-2"></th>
                     <th className="py-2">配置</th>
@@ -281,7 +281,7 @@ export default function EvalAblationPage() {
               不然文字被挤成竖排；「配置」列 sticky 固定，滚到右边时不丢行标识。 */}
           <CardContent className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="text-left text-muted-foreground">
+              <thead className="text-left text-muted-foreground [&_th]:text-[15px] [&_th]:font-semibold">
                 <tr>
                   <th className="sticky left-0 z-10 bg-card py-2 pr-3 whitespace-nowrap">配置</th>
                   {compare.metrics.map(m => (

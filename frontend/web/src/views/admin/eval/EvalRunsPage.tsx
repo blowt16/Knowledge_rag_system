@@ -251,9 +251,9 @@ export default function EvalRunsPage() {
           {runs.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">还没有评测记录</p>
           ) : (
-            <div className="-mx-4 min-h-40 flex-1 overflow-auto rounded-md border border-border [&_[data-slot=table-container]]:overflow-visible">
-              {/* 列表撑满卡片剩余高度并左右加宽（-mx-4 抵消 CardContent 的左右内边距）。
-                  外层负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
+            <div className="-mx-4 min-h-40 flex-1 overflow-auto [&_[data-slot=table-container]]:overflow-visible">
+              {/* 表格去掉外框、直接平铺在卡片内（-mx-4 抵消 CardContent 的左右内边距）。
+                  外层只负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
                   否则吸顶表头会被那个内层滚动容器挡住。 */}
               <Table>
                 <TableHeader className="sticky top-0 z-10 bg-card [&_th]:h-9 [&_th]:text-muted-foreground">

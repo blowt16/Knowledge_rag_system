@@ -160,8 +160,9 @@ export default function EvalSetsPage() {
       </Card>
 
       {/* ---- 工具栏 + 列表 ---- */}
-      <Card className="flex min-h-0 flex-1 flex-col">
-        <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-6">
+      <Card className="flex min-h-0 flex-1 flex-col gap-0">
+        {/* 工具栏单独一块，底部分隔线与下面的表格分开 */}
+        <div className="border-b border-border px-4 pb-4">
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <Button variant="outline" disabled={busy || !current}
                     onClick={() => setCaseDialog({ mode: 'create' })}>手工录入</Button>
@@ -182,9 +183,10 @@ export default function EvalSetsPage() {
             <Button variant="outline"
                     onClick={() => { setQuery(search); setPage(1) }}>查询</Button>
           </div>
+          {msg && <p className="mt-3 text-sm text-muted-foreground">{msg}</p>}
+        </div>
 
-          {msg && <p className="text-sm text-muted-foreground">{msg}</p>}
-
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-4">
           {!current ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               先在上面的下拉里选一个评测集，或者新建一个
@@ -194,14 +196,14 @@ export default function EvalSetsPage() {
               {query || sourceFilter ? '没有符合条件的用例' : '这个评测集还没有用例'}
             </p>
           ) : (
-            <div className="-mx-4 min-h-40 flex-1 overflow-auto rounded-md border border-border [&_[data-slot=table-container]]:overflow-visible">
-              {/* 列表撑满卡片剩余高度并左右加宽（-mx-4 抵消 CardContent 的左右内边距）。
-                  外层负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
+            <div className="-mx-4 min-h-40 flex-1 overflow-auto [&_[data-slot=table-container]]:overflow-visible">
+              {/* 表格去掉外框、直接平铺在卡片内（-mx-4 抵消 CardContent 的左右内边距）。
+                  外层只负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
                   否则吸顶表头会被那个内层滚动容器挡住。 */}
               <Table>
                 <TableHeader className="sticky top-0 z-10 bg-card [&_th]:text-muted-foreground">
                   <TableRow className="hover:bg-transparent">
-                    <TableHead>问题</TableHead>
+                    <TableHead className="pl-3">问题</TableHead>
                     <TableHead>标准答案</TableHead>
                     <TableHead>来源</TableHead>
                     <TableHead>参与评测</TableHead>
@@ -212,7 +214,7 @@ export default function EvalSetsPage() {
                 <TableBody className="[&_td]:align-top">
                   {cases.map(c => (
                     <TableRow key={c.id}>
-                      <TableCell className="max-w-md whitespace-normal!">{c.question}</TableCell>
+                      <TableCell className="max-w-md whitespace-normal! pl-3">{c.question}</TableCell>
                       <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">
                         {c.ground_truth || '—'}
                       </TableCell>
