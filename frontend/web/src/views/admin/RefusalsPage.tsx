@@ -109,12 +109,15 @@ export default function RefusalsPage() {
                 <TableHead className="w-32">原因</TableHead>
                 <TableHead className="w-40">时间</TableHead>
                 <TableHead className="w-64">标注</TableHead>
-                <TableHead className="w-20">操作</TableHead>
+                {/* 同上：窗口窄时操作列会被横向滚动挤出可视区，固定在右侧 */}
+                <TableHead className="sticky right-0 z-20 w-20 border-l border-border bg-card">
+                  操作
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {items.map((r) => (
-                <TableRow key={r.id}>
+                <TableRow key={r.id} className="group">
                   <TableCell className="max-w-md">{r.question}</TableCell>
                   <TableCell className="text-sm">
                     {r.kind === 'clarify' ? '澄清' : '拒答'}
@@ -133,7 +136,7 @@ export default function RefusalsPage() {
                       ? <span>{r.annotation.note || '（仅指定了建议文档）'}</span>
                       : <span className="text-muted-foreground">未标注</span>}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="sticky right-0 z-10 border-l border-border bg-card group-hover:bg-muted/50">
                     <Button variant="ghost" size="sm"
                             onClick={() => setEditing(r)}>
                       {r.annotation ? '改标注' : '标注'}

@@ -7,6 +7,7 @@
  *    （`is_current`），前端不自己推。
  */
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -15,6 +16,7 @@ import { listDocuments, listVersions } from '@/api/admin'
 import type { DocumentItem } from '@/api/admin'
 
 export default function VersionsPage() {
+  const navigate = useNavigate()
   const [groups, setGroups] = useState<DocumentItem[]>([])
   const [open, setOpen] = useState<string | null>(null)
   const [versions, setVersions] = useState<DocumentItem[]>([])
@@ -60,7 +62,17 @@ export default function VersionsPage() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-xl font-semibold">版本管理</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">版本管理</h1>
+        {/* 这个页面只负责看版本历史；操作入口在文档管理页。
+            放一个显式按钮，避免用户以为按钮丢了。 */}
+        <Button variant="outline" size="sm" onClick={() => navigate('/admin/documents')}>
+          去文档管理操作
+        </Button>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        分块、编辑、停用、删除在「文档管理」页操作；这里只查看各文档的版本历史。
+      </p>
       {error && <p className="text-sm text-destructive">{error}</p>}
 
       <Card>

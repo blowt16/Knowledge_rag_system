@@ -267,12 +267,16 @@ export default function DocumentsPage() {
                 <TableHead className="w-16">版本</TableHead>
                 <TableHead className="w-32">生效日</TableHead>
                 <TableHead className="w-40">上传时间</TableHead>
-                <TableHead className="w-64">操作</TableHead>
+                {/* 操作列固定在右侧：表格列多、窗口窄时它会被横向滚动挤出可视区，
+                    用户会以为按钮消失了。sticky 之后无论怎么横向滚都能点到。 */}
+                <TableHead className="sticky right-0 z-20 w-64 border-l border-border bg-card">
+                  操作
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {items.map((d) => (
-                <TableRow key={d.id}>
+                <TableRow key={d.id} className="group">
                   <TableCell>
                     {/* ⚠️ **只有标题一行**（按负责人要求）。原来下面还有一行
                         `文件名 · 13 块` —— 那行里两样东西现在都有别处去了：
@@ -313,7 +317,7 @@ export default function DocumentsPage() {
                   <TableCell className="text-sm tabular-nums">
                     {fmtUploaded(d.created_at)}
                   </TableCell>
-                  <TableCell className="space-x-1">
+                  <TableCell className="sticky right-0 z-10 space-x-1 border-l border-border bg-card group-hover:bg-muted/50">
                     <Button variant="ghost" size="sm"
                             onClick={() => setChunksOf(d)}>分块</Button>
                     <Button variant="ghost" size="sm"
