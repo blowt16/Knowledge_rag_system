@@ -59,6 +59,7 @@ _CONSOLE_FIELDS = (
     "route", "route_source", "decision", "changed", "skipped",
     "queries", "candidates", "recalled", "kept", "top", "confidence",
     "degraded", "evidence", "chars", "citations", "reason", "facets",
+    "inputs", "outputs", "rrf_k",
     "model", "node", "ttft_ms", "tokens_in", "tokens_out", "tokens",
     "hits", "folded", "retry",
     "pages", "ocr_pages", "tables", "chunks", "batches", "vectors",

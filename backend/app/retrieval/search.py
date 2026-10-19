@@ -24,6 +24,7 @@ from datetime import date
 
 import asyncpg
 
+from app.core import trace
 from app.core.config import cfg
 from app.core.deps import UserContext
 from app.graph.state import Chunk
@@ -207,8 +208,6 @@ async def vector_retrieve(
     k = int(cfg("retrieval.k", 10))
     where = build_where(user, today=day, include_restricted=include_restricted)
 
-    embedding = await embed_query(query_text)
-
     async def _attempt(multiplier: int) -> list[Chunk]:
         hits = vector.query(embedding, where=where, n_results=multiplier * k)
         chunks = [_to_chunk(h) for h in hits]
@@ -216,13 +215,18 @@ async def vector_retrieve(
         latest = await latest_versions(conn, groups, today=day)
         return [c for c in chunks if not c.doc_group_id or c.version == latest.get(c.doc_group_id, c.version)]
 
-    chunks = await _attempt(int(cfg("retrieval.oversample_first", 3)))
-    if len(chunks) < k:
-        # 重试：**整体替换**首次结果（不是叠加），替换后**重新折叠**
-        chunks = await _attempt(int(cfg("retrieval.oversample_retry", 6)))
-        logger.info("向量路召回不足触发重试", extra={
-            "event": "retrieve.oversample_retry", "node": "retrieve",
-        })
+    with trace.trace_span("retrieve.vector", level=logging.DEBUG) as stage:
+        embedding = await embed_query(query_text)
+        chunks = await _attempt(int(cfg("retrieval.oversample_first", 3)))
+        retried = False
+        if len(chunks) < k:
+            # 重试：**整体替换**首次结果（不是叠加），替换后**重新折叠**
+            chunks = await _attempt(int(cfg("retrieval.oversample_retry", 6)))
+            retried = True
+            logger.info("向量路召回不足触发重试", extra={
+                "event": "retrieve.oversample_retry", "node": "retrieve",
+            })
+        stage.set(k=k, hits=len(chunks), folded=len(chunks), retry=retried)
 
     result = chunks[:k]
     await fill_document_titles(conn, result)
@@ -240,7 +244,9 @@ async def bm25_retrieve(
     day = today or date.today()
     k = int(cfg("retrieval.k", 10))
 
-    hits = bm25.search(query_text, k=k * 4)   # 多取一些，过滤后再截断
+    with trace.trace_span("retrieve.bm25", level=logging.DEBUG) as stage:
+        hits = bm25.search(query_text, k=k * 4)   # 多取一些，过滤后再截断
+        stage.set(k=k, hits=len(hits))
     if not hits:
         return []
 

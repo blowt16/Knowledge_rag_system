@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import logging
+
+from app.core import trace
 from app.core.config import cfg
 from app.graph.state import Chunk, RetrievalQuery
 
@@ -32,30 +35,35 @@ def weighted_rrf(
     k = k if k is not None else int(cfg("retrieval.rrf_k", 60))
     limit = limit if limit is not None else int(cfg("retrieval.fusion_limit", 40))
 
-    scores: dict[str, float] = {}
-    best: dict[str, Chunk] = {}
+    with trace.trace_span(
+        "retrieve.rrf", level=logging.DEBUG, rrf_k=k,
+        inputs=sum(len(chunks) for _, chunks in ranked_lists),
+    ) as stage:
+        scores: dict[str, float] = {}
+        best: dict[str, Chunk] = {}
 
-    for query, chunks in ranked_lists:
-        weight = float(query.get("weight", 1.0))
-        for rank, chunk in enumerate(chunks, start=1):
-            key = chunk.chunk_id
-            if not key:
-                continue
-            scores[key] = scores.get(key, 0.0) + weight / (k + rank)
-            # 保留信息最全的那份（同一 chunk 来自不同路时 metadata 相同，
-            # 但向量路带 text、BM25 路可能不带）
-            existing = best.get(key)
-            if existing is None or (not existing.text and chunk.text):
-                best[key] = chunk
+        for query, chunks in ranked_lists:
+            weight = float(query.get("weight", 1.0))
+            for rank, chunk in enumerate(chunks, start=1):
+                key = chunk.chunk_id
+                if not key:
+                    continue
+                scores[key] = scores.get(key, 0.0) + weight / (k + rank)
+                # 保留信息最全的那份（同一 chunk 来自不同路时 metadata 相同，
+                # 但向量路带 text、BM25 路可能不带）
+                existing = best.get(key)
+                if existing is None or (not existing.text and chunk.text):
+                    best[key] = chunk
 
-    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
 
-    out: list[Chunk] = []
-    for chunk_id, score in ordered:
-        chunk = best[chunk_id]
-        chunk.score = score
-        out.append(chunk)
-    return out
+        out: list[Chunk] = []
+        for chunk_id, score in ordered:
+            chunk = best[chunk_id]
+            chunk.score = score
+            out.append(chunk)
+        stage.set(outputs=len(out))
+        return out
 
 
 def fold_versions(

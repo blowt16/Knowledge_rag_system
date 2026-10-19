@@ -16,6 +16,7 @@ import logging
 
 import httpx
 
+from app.core import trace
 from app.core.config import cfg, env, secret
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,10 @@ async def embed_texts(texts: list[str], *, max_retries: int | None = None) -> li
 
 
 async def embed_query(text: str) -> list[float]:
-    vectors = await embed_texts([text])
-    return vectors[0]
+    with trace.trace_span("retrieve.embed_query", level=logging.DEBUG) as stage:
+        vectors = await embed_texts([text])
+        stage.set(dim=len(vectors[0]) if vectors else 0)
+        return vectors[0]
 
 
 def dimension() -> int:

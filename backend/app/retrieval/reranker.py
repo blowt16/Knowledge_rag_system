@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from pathlib import Path
 
+from app.core import trace
 from app.core.config import cfg, repo_path
 from app.graph.state import Chunk
 
@@ -277,4 +278,16 @@ async def rerank(query: str, chunks: list[Chunk], *, top_k: int | None = None) -
     单线程的批处理入口不需要它。
     """
     async with _get_semaphore():
-        return await asyncio.to_thread(rerank_sync, query, chunks, top_k=top_k)
+        with trace.trace_span("rerank", level=logging.DEBUG,
+                              candidates=len(chunks)) as stage:
+            result = await asyncio.to_thread(
+                rerank_sync, query, chunks, top_k=top_k)
+            stage.set(
+                kept=len(result.chunks),
+                top=(round(float(result.chunks[0].score), 4)
+                     if result.chunks else 0.0),
+                confidence=result.confidence,
+                degraded=(result.degraded_kind
+                          or ("degraded" if result.degraded else None)),
+            )
+            return result
