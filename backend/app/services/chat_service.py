@@ -351,7 +351,8 @@ async def stream_chat(
 
         logger.info("完成", extra={
             "event": "chat.done", "stage": "chat", "layer": "chat",
-            "session_id": session_id, "trace_id": trace.current_trace_id(),
+            "ok": True, "session_id": session_id,
+            "trace_id": trace.current_trace_id(),
             "route": final.get("route", ""), "decision": decision,
             "refused": bool(final.get("refused")),
             "latency_ms": latency_ms,

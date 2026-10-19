@@ -130,7 +130,11 @@ async def test_student_gets_404_on_every_endpoint(client, users, docs):
 
 
 async def test_missing_document_is_indistinguishable(client, users, docs):
-    """不存在的 id 与不可见的 id，响应**逐字相同** —— 否则可以用来探测。"""
+    """不存在的 id 与不可见的 id，响应除 per-request trace_id 外**完全相同**。
+
+    ⚠️ `trace_id` 每次请求都不同（本地全链路追踪引入），它不携带文档存在性信息，
+       比较时必须排除；否则这条用例会把「正常的请求关联 id」误判成信息泄露。
+    """
     headers = await _auth(client, users["student"]["username"])
     ghost = uuid.uuid4().hex
 
@@ -138,7 +142,9 @@ async def test_missing_document_is_indistinguishable(client, users, docs):
         r_missing = await client.get(missing, headers=headers)
         r_hidden = await client.get(hidden, headers=headers)
         assert r_missing.status_code == r_hidden.status_code == 404
-        assert r_missing.json() == r_hidden.json(), "两种 404 的响应体不一样，能探测出文档存在"
+        missing_body = {k: v for k, v in r_missing.json().items() if k != "trace_id"}
+        hidden_body = {k: v for k, v in r_hidden.json().items() if k != "trace_id"}
+        assert missing_body == hidden_body, "两种 404 的响应体不一样，能探测出文档存在"
 
 
 async def test_non_admin_escalation_flag_is_ignored(client, users, docs):

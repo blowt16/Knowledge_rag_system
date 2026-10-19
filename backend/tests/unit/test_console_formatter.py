@@ -1,10 +1,11 @@
 """控制台文本格式器与 JSON 新增字段。"""
 from __future__ import annotations
 
+import io
 import json
 import logging
 
-from app.core.logging import ConsoleFormatter, JsonFormatter
+from app.core.logging import ConsoleFormatter, JsonFormatter, _force_utf8
 
 
 def _record(msg: str = "完成", **extra):
@@ -37,6 +38,13 @@ def test_console_truncates_and_strips_newlines():
     assert "\n" not in out
     assert "x" * 121 not in out
     assert "path=" in out
+
+
+def test_force_utf8_reconfigures_gbk_stream():
+    """Windows 控制台默认 GBK 时，✔/✖ 会触发 UnicodeEncodeError。"""
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+    _force_utf8(stream)
+    assert stream.encoding.lower() == "utf-8"
 
 
 def test_console_no_color_when_disabled():

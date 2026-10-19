@@ -59,11 +59,14 @@ _CONSOLE_FIELDS = (
     "route", "route_source", "decision", "changed", "skipped",
     "queries", "candidates", "recalled", "kept", "top", "confidence",
     "degraded", "evidence", "chars", "citations", "reason", "facets",
-    "inputs", "outputs", "rrf_k",
+    "refused", "inputs", "outputs", "rrf_k",
     "model", "node", "ttft_ms", "tokens_in", "tokens_out", "tokens",
     "hits", "folded", "retry",
     "pages", "ocr_pages", "tables", "chunks", "batches", "vectors",
     "before_tokens", "after_tokens", "summary_chars",
+    "chars_in", "chars_out", "file_type", "supported", "duplicate",
+    "size", "source", "dim", "bm25", "doc_id", "version", "task_id",
+    "doc_filename", "run_id",
     "case_id", "turn", "hit",
     "status", "method", "path", "error",
 )
@@ -99,6 +102,14 @@ def _scrub(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_scrub(v) for v in obj]
     return obj
+
+
+def _force_utf8(stream: Any) -> None:
+    """Windows 控制台默认 GBK；控制台里的 ✔/✖ 需要 UTF-8，否则写入时抛异常。"""
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 —— 不支持 reconfigure 的流保持原样
+        pass
 
 
 def _color_enabled() -> bool:
@@ -280,6 +291,8 @@ class JsonFormatter(logging.Formatter):
 
 def install() -> None:
     """安装日志：控制台人读文本 + JSON 文件轮转。"""
+    _force_utf8(sys.stdout)
+    _force_utf8(sys.stderr)
     level = (env(cfg("logging.level_env", "LOG_LEVEL"), None)
              or cfg("logging.default_level", "INFO")).upper()
     console_level = str(cfg("logging.console_level", level)).upper()
@@ -318,6 +331,9 @@ def install() -> None:
     for noisy in ("httpx", "httpcore", "urllib3", "asyncio", "chromadb",
                   "jieba", "bm25s"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Langfuse/OTel 在没有 active span 时会打 "Context error" WARNING；
+    # 本项目的 local trace 已经兜底，这类噪音只会淹没真正的阶段日志。
+    logging.getLogger("opentelemetry.context").setLevel(logging.ERROR)
 
     # uvicorn：启动/错误日志走应用格式器；访问日志由 http 阶段行负责，
     # 关掉默认 access logger，避免每个请求出现两行。

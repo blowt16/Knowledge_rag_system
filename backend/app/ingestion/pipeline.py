@@ -289,7 +289,7 @@ async def _ingest(req: IngestRequest) -> IngestOutcome:
 
         logger.info("摄入完成", extra={
             "event": "ingest.done", "stage": "ingest", "layer": "ingest",
-            "task_id": req.task_id, "doc_id": doc_id,
+            "ok": True, "task_id": req.task_id, "doc_id": doc_id,
             "chunks": written_chunks, "pages": len(result.pages),
             "ms": int((time.perf_counter() - started) * 1000),
             "trace_id": trace.current_trace_id(),

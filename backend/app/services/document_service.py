@@ -155,7 +155,7 @@ def schedule_ingest(req: IngestRequest, *, trace_id: str, span_id: str) -> None:
             logger.info("开始", extra={
                 "event": "ingest.schedule", "stage": "ingest.schedule",
                 "layer": "ingest", "task_id": req.task_id,
-                "filename": req.filename,
+                "doc_filename": req.filename,
                 "trace_id": trace.current_trace_id(),
             })
             try:
