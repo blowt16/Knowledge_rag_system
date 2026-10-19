@@ -8,6 +8,8 @@
  *    比不给数更误导 —— 它看起来像个结论。服务端把缺项给成 `null`，
  *    这里只需要不把 `null` 当成 0 渲染。
  */
+import { useEffect } from 'react'
+
 import { Button } from '@/components/ui/button'
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -79,11 +81,30 @@ export function ReportDialog({ detail, onClose }: {
   const composite = report?.composite_score ?? null
   const missingWhy = whyMissing(report)
 
+  // 确保每次打开都从报告顶部开始：滚到顶 + 把焦点放到标题上。
+  useEffect(() => {
+    const title = document.getElementById('report-dialog-title')
+    const content = title?.closest<HTMLElement>('[data-slot=dialog-content]')
+    if (!title || !content) return
+    const raf = requestAnimationFrame(() => {
+      content.scrollTop = 0
+      title.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="max-h-[88vh] w-[95vw] overflow-y-auto sm:max-w-6xl">
+      {/* ⚠️ 默认焦点会落到最下面的「关闭」按钮，把弹窗滚到底。
+          这里显式把初始焦点放到顶部标题，打开报告时始终从顶部开始看。 */}
+      <DialogContent
+        className="max-h-[88vh] w-[95vw] overflow-y-auto sm:max-w-6xl"
+        initialFocus={() => document.getElementById('report-dialog-title')}
+      >
         <DialogHeader>
-          <DialogTitle>评测报告</DialogTitle>
+          <DialogTitle id="report-dialog-title" tabIndex={-1} className="outline-none">
+            评测报告
+          </DialogTitle>
         </DialogHeader>
 
         {/* 头一行：评测集 / 策略 / 用例数 / 综合得分（§6.6） */}
@@ -178,7 +199,7 @@ export function ReportDialog({ detail, onClose }: {
         {/* 逐题明细 */}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="text-left text-foreground [&_th]:text-[15px] [&_th]:font-semibold">
+            <thead className="bg-secondary/50 text-left text-foreground [&_th]:text-[15px] [&_th]:font-semibold">
               <tr>
                 <th className="py-2 pr-3">问题</th>
                 <th className="py-2 pr-3">标准答案</th>
@@ -195,7 +216,8 @@ export function ReportDialog({ detail, onClose }: {
             </thead>
             <tbody>
               {(detail.cases ?? []).map((row, i) => (
-                <tr key={row.case_id ?? `row-${i}`} className="border-t border-border align-top">
+                <tr key={row.case_id ?? `row-${i}`}
+                    className="border-t border-border align-top even:bg-secondary/30">
                   <td className="max-w-sm py-2 pr-3">{row.question ?? '—'}</td>
                   <td className="max-w-xs py-2 pr-3 text-muted-foreground">
                     {row.ground_truth || '—'}
