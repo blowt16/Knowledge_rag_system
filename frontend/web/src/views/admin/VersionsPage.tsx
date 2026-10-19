@@ -84,7 +84,7 @@ export default function VersionsPage() {
 
               {open === g.doc_group_id && (
                 <table className="mt-2 w-full text-sm">
-                  <thead className="text-[13px] font-semibold text-muted-foreground">
+                  <thead className="text-[13px] font-semibold text-foreground">
                     <tr>
                       <th className="py-1 text-left">版本</th>
                       <th className="text-left">状态</th>

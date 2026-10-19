@@ -71,8 +71,9 @@ export default function AdminDashboard() {
           <CardContent>
             <EChart height={240} option={{
               tooltip: { trigger: 'axis' },
-              legend: { data: ['问答量', '拒答数'] },
-              grid: { left: 40, right: 16, top: 40, bottom: 30 },
+              // 图例放到底部，并给 x 轴刻度留出空间 —— 原来图例和日期挤在同一条线上
+              legend: { data: ['问答量', '拒答数'], bottom: 0 },
+              grid: { left: 40, right: 16, top: 40, bottom: 50 },
               xAxis: {
                 type: 'category',
                 data: (trend?.days ?? []).map((d) => d.date.slice(5)),

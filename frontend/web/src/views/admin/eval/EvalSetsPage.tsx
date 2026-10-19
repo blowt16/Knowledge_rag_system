@@ -201,7 +201,7 @@ export default function EvalSetsPage() {
                   外层只负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
                   否则吸顶表头会被那个内层滚动容器挡住。 */}
               <Table>
-                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:text-muted-foreground">
+                <TableHeader className="sticky top-0 z-10 bg-card">
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="pl-3">问题</TableHead>
                     <TableHead>标准答案</TableHead>
@@ -221,13 +221,14 @@ export default function EvalSetsPage() {
                       <TableCell>{SOURCE_LABEL[c.source] ?? c.source}</TableCell>
                       <TableCell>{c.in_eval ? '是' : '否'}</TableCell>
                       <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">{c.note || ''}</TableCell>
-                      <TableCell>
+                      <TableCell className="space-x-1">
                         <SourceButton item={c} busy={busy}
                                       onOpen={setSourceOf}
                                       onError={m => setMsg(m)} />
-                        <Button variant="link" disabled={busy}
+                        <Button variant="ghost" size="sm" disabled={busy}
                                 onClick={() => setCaseDialog({ mode: 'edit', item: c })}>编辑</Button>
-                        <Button variant="link" disabled={busy}
+                        <Button variant="ghost" size="sm" disabled={busy}
+                                className="text-destructive"
                                 onClick={() => setPendingDelete({ kind: 'case', item: c })}>
                           删除
                         </Button>
@@ -335,7 +336,8 @@ function SourceButton({ item, busy, onOpen, onError }: {
     ? '手工录入的用例没有来源片段'
     : '这条是早期导入的题库，没有留下来源片段'
   return (
-    <Button variant="link" disabled={busy || !hasSnippet} title={hasSnippet ? undefined : hint}
+    <Button variant="ghost" size="sm" disabled={busy || !hasSnippet}
+            title={hasSnippet ? undefined : hint}
             onClick={async () => {
               // ⚠️ 必须自己报错：全局没有任何错误提示，沉默的按钮
               //    在用户眼里就是「点了没反应」= 坏了

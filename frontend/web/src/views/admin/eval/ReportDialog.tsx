@@ -178,7 +178,7 @@ export function ReportDialog({ detail, onClose }: {
         {/* 逐题明细 */}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead className="text-left text-muted-foreground [&_th]:text-[15px] [&_th]:font-semibold">
+            <thead className="text-left text-foreground [&_th]:text-[15px] [&_th]:font-semibold">
               <tr>
                 <th className="py-2 pr-3">问题</th>
                 <th className="py-2 pr-3">标准答案</th>

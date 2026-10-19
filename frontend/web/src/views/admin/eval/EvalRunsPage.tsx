@@ -256,7 +256,7 @@ export default function EvalRunsPage() {
                   外层只负责纵向滚动；内层 shadcn Table 自带的 overflow-x-auto 要改回 visible，
                   否则吸顶表头会被那个内层滚动容器挡住。 */}
               <Table>
-                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:h-9 [&_th]:text-muted-foreground">
+                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:h-9">
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="pl-3">任务ID</TableHead>
                     <TableHead>评测集</TableHead>
@@ -290,17 +290,18 @@ export default function EvalRunsPage() {
                         <TableCell className="text-xs">
                           {r.started_at ? new Date(r.started_at).toLocaleString() : '—'}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="space-x-1">
                           {/* 跑完才可点；提示语带进度（决策 24）。
                               `disabled` 的元素收不到 hover，所以外面的 span 挂在 title 上 */}
                           <span title={hint}>
-                            <Button variant="link" disabled={Boolean(hint)}
+                            <Button variant="ghost" size="sm" disabled={Boolean(hint)}
                                     onClick={() => openReport(r.run_id)}>看报告</Button>
                           </span>
                           {/* 运行中不给删：删行不会停掉后台任务，它还在占 GPU ——
                               服务端也会 409，这里先挡住，别让用户白点一次 */}
                           <span title={hint ?? '删除这一轮（逐题结果会一起删）'}>
-                            <Button variant="link" disabled={Boolean(hint)}
+                            <Button variant="ghost" size="sm" disabled={Boolean(hint)}
+                                    className="text-destructive"
                                     onClick={() => setPendingDelete(r)}>删除</Button>
                           </span>
                         </TableCell>
