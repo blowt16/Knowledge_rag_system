@@ -318,19 +318,18 @@ export default function DocumentsPage() {
                     {fmtUploaded(d.created_at)}
                   </TableCell>
                   <TableCell className="sticky right-0 z-10 space-x-1 border-l border-border bg-card group-hover:bg-muted/50">
-                    <Button variant="ghost" size="sm"
+                    <Button variant="success" size="xs"
                             onClick={() => setChunksOf(d)}>分块</Button>
-                    <Button variant="ghost" size="sm"
+                    <Button variant="info" size="xs"
                             onClick={() => setEditing(d)}>编辑</Button>
                     {d.status === 'active'
-                      ? <Button variant="ghost" size="sm" disabled={busy === d.id}
+                      ? <Button variant="destructive-solid" size="xs" disabled={busy === d.id}
                                 onClick={() => setPendingDisable(d)}>停用</Button>
-                      : <Button variant="ghost" size="sm" disabled={busy === d.id}
+                      : <Button variant="success" size="xs" disabled={busy === d.id}
                                 onClick={() => void run(d.id, () => enableDocument(d.id))}>
                           启用
                         </Button>}
-                    <Button variant="ghost" size="sm"
-                            className="text-destructive"
+                    <Button variant="destructive-solid" size="xs"
                             onClick={() => setPendingDelete(d)}>删除</Button>
                   </TableCell>
                 </TableRow>

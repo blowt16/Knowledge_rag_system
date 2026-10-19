@@ -137,16 +137,16 @@ export default function UsersPage() {
                     {u.created_at?.replace('T', ' ').slice(0, 16) ?? '—'}
                   </TableCell>
                   <TableCell className="space-x-1">
-                    <Button variant="ghost" size="sm"
+                    <Button variant="info" size="xs"
                             onClick={() => setResetting(u)}>重置口令</Button>
                     {u.is_active
-                      ? <Button variant="ghost" size="sm" className="text-destructive"
+                      ? <Button variant="destructive-solid" size="xs"
                                 onClick={() => setPendingDisable(u)}>停用</Button>
-                      : <Button variant="ghost" size="sm"
+                      : <Button variant="success" size="xs"
                                 onClick={() => void run(() => patchUser(u.id, { is_active: true }))}>
                           启用
                         </Button>}
-                    <Button variant="ghost" size="sm" className="text-destructive"
+                    <Button variant="destructive-solid" size="xs"
                             onClick={() => setPendingDelete(u)}>删除</Button>
                   </TableCell>
                 </TableRow>

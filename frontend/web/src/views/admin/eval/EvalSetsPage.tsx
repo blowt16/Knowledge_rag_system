@@ -225,10 +225,9 @@ export default function EvalSetsPage() {
                         <SourceButton item={c} busy={busy}
                                       onOpen={setSourceOf}
                                       onError={m => setMsg(m)} />
-                        <Button variant="ghost" size="sm" disabled={busy}
+                        <Button variant="info" size="xs" disabled={busy}
                                 onClick={() => setCaseDialog({ mode: 'edit', item: c })}>编辑</Button>
-                        <Button variant="ghost" size="sm" disabled={busy}
-                                className="text-destructive"
+                        <Button variant="destructive-solid" size="xs" disabled={busy}
                                 onClick={() => setPendingDelete({ kind: 'case', item: c })}>
                           删除
                         </Button>
@@ -336,7 +335,7 @@ function SourceButton({ item, busy, onOpen, onError }: {
     ? '手工录入的用例没有来源片段'
     : '这条是早期导入的题库，没有留下来源片段'
   return (
-    <Button variant="ghost" size="sm" disabled={busy || !hasSnippet}
+    <Button variant="success" size="xs" disabled={busy || !hasSnippet}
             title={hasSnippet ? undefined : hint}
             onClick={async () => {
               // ⚠️ 必须自己报错：全局没有任何错误提示，沉默的按钮

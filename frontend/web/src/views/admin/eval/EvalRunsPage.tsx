@@ -294,14 +294,13 @@ export default function EvalRunsPage() {
                           {/* 跑完才可点；提示语带进度（决策 24）。
                               `disabled` 的元素收不到 hover，所以外面的 span 挂在 title 上 */}
                           <span title={hint}>
-                            <Button variant="ghost" size="sm" disabled={Boolean(hint)}
+                            <Button variant="success" size="xs" disabled={Boolean(hint)}
                                     onClick={() => openReport(r.run_id)}>看报告</Button>
                           </span>
                           {/* 运行中不给删：删行不会停掉后台任务，它还在占 GPU ——
                               服务端也会 409，这里先挡住，别让用户白点一次 */}
                           <span title={hint ?? '删除这一轮（逐题结果会一起删）'}>
-                            <Button variant="ghost" size="sm" disabled={Boolean(hint)}
-                                    className="text-destructive"
+                            <Button variant="destructive-solid" size="xs" disabled={Boolean(hint)}
                                     onClick={() => setPendingDelete(r)}>删除</Button>
                           </span>
                         </TableCell>

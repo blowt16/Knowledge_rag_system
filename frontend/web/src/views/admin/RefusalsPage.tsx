@@ -137,7 +137,7 @@ export default function RefusalsPage() {
                       : <span className="text-muted-foreground">未标注</span>}
                   </TableCell>
                   <TableCell className="sticky right-0 z-10 border-l border-border bg-card group-hover:bg-muted/50">
-                    <Button variant="ghost" size="sm"
+                    <Button variant="info" size="xs"
                             onClick={() => setEditing(r)}>
                       {r.annotation ? '改标注' : '标注'}
                     </Button>

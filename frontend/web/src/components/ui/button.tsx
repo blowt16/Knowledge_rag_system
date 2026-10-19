@@ -23,12 +23,14 @@ const buttonVariants = cva(
           "bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/20",
         //: 实心绿 —— 评测报告的「达标」配色，与卡片里的绿是同一个 token
         success: "bg-success text-success-foreground hover:bg-success/80",
+        //: 实心蓝 —— 参考图里「编辑 / 标注 / 重置口令」这类操作的配色
+        info: "bg-blue-600 text-white hover:bg-blue-700 focus-visible:border-blue-400 focus-visible:ring-blue-500/30",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
         default:
           "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-        xs: "h-6 gap-1 rounded-[min(var(--radius-md),10px)] px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
+        xs: "h-6 gap-1 rounded px-2 text-xs! in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
         sm: "h-7 gap-1 rounded-[min(var(--radius-md),12px)] px-2.5 text-[0.8rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3.5",
         lg: "h-9 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
         icon: "size-8",
