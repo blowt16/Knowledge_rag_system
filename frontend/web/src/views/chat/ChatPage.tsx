@@ -121,6 +121,7 @@ export default function ChatPage() {
   const mainRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
   const outlinePanelRef = useRef<HTMLDivElement>(null)
+  const outlineCloseTimer = useRef<number | null>(null)
 
   // 新的一轮进来时，默认高亮最新提问
   useEffect(() => {
@@ -138,6 +139,36 @@ export default function ChatPage() {
       active.offsetTop - panel.clientHeight / 2 + active.clientHeight / 2,
     )
   }, [outlineOpen, activeQuery])
+
+  // 鼠标从短横线移到面板时要经过一小段空隙；留一点关闭延迟，
+  // 否则 onMouseLeave 会先把面板卸载掉，用户根本移不进去点 query。
+  useEffect(() => () => {
+    if (outlineCloseTimer.current) window.clearTimeout(outlineCloseTimer.current)
+  }, [])
+
+  function openOutline() {
+    if (outlineCloseTimer.current) {
+      window.clearTimeout(outlineCloseTimer.current)
+      outlineCloseTimer.current = null
+    }
+    setOutlineOpen(true)
+  }
+
+  function closeOutlineSoon() {
+    if (outlineCloseTimer.current) window.clearTimeout(outlineCloseTimer.current)
+    outlineCloseTimer.current = window.setTimeout(() => {
+      setOutlineOpen(false)
+      outlineCloseTimer.current = null
+    }, 150)
+  }
+
+  function toggleOutline() {
+    if (outlineCloseTimer.current) {
+      window.clearTimeout(outlineCloseTimer.current)
+      outlineCloseTimer.current = null
+    }
+    setOutlineOpen(v => !v)
+  }
 
   function onStreamScroll() {
     const el = mainRef.current
@@ -616,9 +647,9 @@ export default function ChatPage() {
         {turns.length > 0 && (
           <div
             className={`conv-outline${outlineOpen ? ' open' : ''}`}
-            onMouseEnter={() => setOutlineOpen(true)}
-            onMouseLeave={() => setOutlineOpen(false)}
-            onFocus={() => setOutlineOpen(true)}
+            onMouseEnter={openOutline}
+            onMouseLeave={closeOutlineSoon}
+            onFocus={openOutline}
             onBlur={(e) => {
               if (!(e.relatedTarget instanceof Node)
                   || !e.currentTarget.contains(e.relatedTarget)) {
@@ -631,7 +662,7 @@ export default function ChatPage() {
               className="conv-outline-trigger"
               aria-label="查看当前对话的所有提问"
               aria-expanded={outlineOpen}
-              onClick={() => setOutlineOpen(v => !v)}
+              onClick={toggleOutline}
             >
               {outlineDashes.map(i => (
                 <span
