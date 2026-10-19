@@ -319,6 +319,14 @@ def install() -> None:
                   "jieba", "bm25s"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    # uvicorn：启动/错误日志走应用格式器；访问日志由 http 阶段行负责，
+    # 关掉默认 access logger，避免每个请求出现两行。
+    for name in ("uvicorn", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
+    logging.getLogger("uvicorn.access").disabled = True
+
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
