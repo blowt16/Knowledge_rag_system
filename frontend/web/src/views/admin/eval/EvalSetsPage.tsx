@@ -219,7 +219,14 @@ export default function EvalSetsPage() {
                         {c.ground_truth || '—'}
                       </TableCell>
                       <TableCell>{SOURCE_LABEL[c.source] ?? c.source}</TableCell>
-                      <TableCell>{c.in_eval ? '是' : '否'}</TableCell>
+                      <TableCell>
+                        <span className={`rounded px-1.5 py-0.5 text-xs ${
+                          c.in_eval
+                            ? 'bg-success/10 text-success'
+                            : 'bg-muted text-muted-foreground'}`}>
+                          {c.in_eval ? '是' : '否'}
+                        </span>
+                      </TableCell>
                       <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">{c.note || ''}</TableCell>
                       <TableCell className="space-x-1">
                         <SourceButton item={c} busy={busy}

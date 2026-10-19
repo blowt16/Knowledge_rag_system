@@ -39,6 +39,14 @@ const STATUS_LABEL: Record<string, string> = {
   pending: '排队中', running: '评测中', done: '已完成', failed: '失败',
 }
 
+/** 状态标签配色 —— 与「文档管理」页的状态标签同一套写法。 */
+const STATUS_TONE: Record<string, string> = {
+  done: 'bg-success/10 text-success',
+  running: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
+  failed: 'bg-destructive/10 text-destructive',
+  pending: 'bg-muted text-muted-foreground',
+}
+
 const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
 
 /**
@@ -89,6 +97,12 @@ function RagasMark({ metrics }: { metrics: Record<string, unknown> | null | unde
       {flag.text}
     </span>
   )
+}
+
+/** 毫秒 → 秒（保留 1 位小数）。服务端下发的是 `duration_ms`。 */
+function fmtDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—'
+  return (ms / 1000).toFixed(1)
 }
 
 /** 进度栏文案：跑满但还没 done，说明 ragas 整批算指标的那一段还在跑（§6.3）。 */
@@ -263,7 +277,7 @@ export default function EvalRunsPage() {
                     <TableHead>状态</TableHead>
                     <TableHead>进度</TableHead>
                     <TableHead>失败原因</TableHead>
-                    <TableHead>耗时(ms)</TableHead>
+                    <TableHead>耗时(s)</TableHead>
                     <TableHead>时间</TableHead>
                     <TableHead>操作</TableHead>
                   </TableRow>
@@ -279,14 +293,17 @@ export default function EvalRunsPage() {
                           {r.set_name ?? r.config_label}
                         </TableCell>
                         <TableCell>
-                          {STATUS_LABEL[r.status] ?? r.status}
+                          <span className={`rounded px-1.5 py-0.5 text-xs ${
+                            STATUS_TONE[r.status] ?? 'bg-muted text-muted-foreground'}`}>
+                            {STATUS_LABEL[r.status] ?? r.status}
+                          </span>
                           <RagasMark metrics={r.metrics} />
                         </TableCell>
                         <TableCell>{progressText(r)}</TableCell>
                         <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">
                           {r.error || ''}
                         </TableCell>
-                        <TableCell>{r.duration_ms ?? '—'}</TableCell>
+                        <TableCell>{fmtDuration(r.duration_ms)}</TableCell>
                         <TableCell className="text-xs">
                           {r.started_at ? new Date(r.started_at).toLocaleString() : '—'}
                         </TableCell>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Moon, MoreHorizontal, Plus, Search, Sun, X } from 'lucide-react'
+import { ArrowUpToLine, Moon, Plus, Search, Sun, X } from 'lucide-react'
 import { streamSse } from '../../api/sse'
 import { getAccessToken } from '../../api/client'
 import {
@@ -329,6 +329,8 @@ export default function ChatPage() {
   const shown = convSearch.trim()
     ? convs.filter((c) => (c.title || '').toLowerCase().includes(convSearch.trim().toLowerCase()))
     : convs
+  //: 顶部标题跟随当前会话：新对话 → 「新对话」；打开历史会话 → 该会话的标题。
+  const currentConv = convs.find((c) => c.id === sessionId) ?? null
 
   return (
     <div className="app">
@@ -390,7 +392,7 @@ export default function ChatPage() {
                 <div className="conv-actions">
                   <button className="icon-btn" title={c.is_top ? '取消置顶' : '置顶'}
                           onClick={() => void toggleTop(c.id, Boolean(c.is_top))}>
-                    <MoreHorizontal size={14} />
+                    <ArrowUpToLine size={14} />
                   </button>
                   <button className="icon-btn" title="重命名"
                           onClick={() => { setRenaming(c.id); setRenameText(c.title || '') }}>
@@ -429,7 +431,9 @@ export default function ChatPage() {
 
       <div className="chat-area">
         <header className="chat-header">
-          <strong>新对话</strong>
+          <strong>
+            {currentConv?.title || (sessionId ? '已保存的会话' : '新对话')}
+          </strong>
           {user?.role === 'admin' && (
             <label className="escalate-toggle"
                    title="越权检索受限文档，引用会标记「越权查看」">
@@ -535,7 +539,9 @@ export default function ChatPage() {
                     <Citations citations={turn.draft.citations} onOpen={openCitation} />
 
                     {turn.draft.done && turn.draft.latencyMs != null && (
-                      <div className="muted small">{turn.draft.latencyMs} ms</div>
+                      <div className="muted small">
+                        {(turn.draft.latencyMs / 1000).toFixed(1)} s
+                      </div>
                     )}
                   </div>
                 </div>

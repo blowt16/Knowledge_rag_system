@@ -30,7 +30,7 @@ import {
 const METRIC_LABEL: Record<string, string> = {
   recall_at_k: 'Recall@5',
   mrr: 'MRR',
-  avg_ms: '平均耗时(ms)',
+  avg_ms: '平均耗时(s)',
   refusal_rate: '拒答率',
   unauthorized_hits: '越权返回',
   uncited_ratio: '无依据结论占比',
@@ -50,6 +50,14 @@ const METRIC_LABEL: Record<string, string> = {
 
 /** 四项 ragas 的 key —— 与 `METRIC_LABEL` 里的保持一致（服务端定的名字）。 */
 const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
+
+/** 状态标签配色 —— 与「文档管理」页的状态标签同一套写法。 */
+const STATUS_TONE: Record<string, string> = {
+  done: 'bg-success/10 text-success',
+  running: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
+  failed: 'bg-destructive/10 text-destructive',
+  pending: 'bg-muted text-muted-foreground',
+}
 
 /**
  * 六个消融开关。**键名必须与 `eval_config.SWITCH_KEYS` 一致**（§6.4）——
@@ -85,6 +93,12 @@ function fmt(v: unknown): string {
   if (v === null || v === undefined) return '—'
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(4)
   return String(v)
+}
+
+/** `avg_ms` 服务端按毫秒下发，展示时换算成秒。 */
+function fmtSeconds(v: unknown): string {
+  if (typeof v !== 'number') return '—'
+  return (v / 1000).toFixed(1)
 }
 
 /** `metrics.ragas.<key>` —— metrics 是自由 JSON，取值要收窄。 */
@@ -257,7 +271,10 @@ export default function EvalAblationPage() {
                       <td className="py-2">{r.config_label}</td>
                       <td className="py-2">{r.role}</td>
                       <td className="py-2">
-                        {r.status === 'running' ? '运行中…' : r.status}
+                        <span className={`rounded px-1.5 py-0.5 text-xs ${
+                          STATUS_TONE[r.status] ?? 'bg-muted text-muted-foreground'}`}>
+                          {r.status === 'running' ? '运行中…' : r.status}
+                        </span>
                       </td>
                       <td className="py-2">{fmt(r.metrics?.recall_at_k)}</td>
                       <td className="py-2">{fmt(r.metrics?.mrr)}</td>
@@ -296,7 +313,9 @@ export default function EvalAblationPage() {
                       {row.config_label}
                     </td>
                     {compare.metrics.map(m => (
-                      <td key={m} className="py-2 pr-3 whitespace-nowrap">{fmt(row.values[m])}</td>
+                      <td key={m} className="py-2 pr-3 whitespace-nowrap">
+                        {m === 'avg_ms' ? fmtSeconds(row.values[m]) : fmt(row.values[m])}
+                      </td>
                     ))}
                   </tr>
                 ))}

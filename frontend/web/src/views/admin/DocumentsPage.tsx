@@ -303,11 +303,11 @@ export default function DocumentsPage() {
                         给公开也上绿色的话，整列全是彩色的，反而什么都看不出来。*/}
                   <TableCell className="text-sm">
                     {d.visibility === 'public' ? (
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                      <span className="rounded bg-success/10 px-1.5 py-0.5 text-xs text-success">
                         公开
                       </span>
                     ) : (
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-xs text-destructive">
                         受限：{(d.visible_roles ?? []).join('、') || '（无）'}
                       </span>
                     )}
