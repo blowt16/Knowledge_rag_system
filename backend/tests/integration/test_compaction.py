@@ -83,11 +83,20 @@ async def _message_count(sid: str) -> int:
 # 往返
 # ============================================================
 
-async def test_load_context_compacts_and_persists(session, monkeypatch):
+async def test_load_context_compacts_and_persists(session, monkeypatch, caplog):
+    import logging
+
     sid, _ = session
     monkeypatch.setattr(CS, "_summarize", _summarizer("摘要"))
 
-    slice_ = await CS.load_context(sid)
+    with caplog.at_level(logging.INFO, logger="app.core.trace"):
+        slice_ = await CS.load_context(sid)
+
+    compact = [r for r in caplog.records
+               if getattr(r, "stage", "") == "context.compact"]
+    assert compact, "没有 context.compact 日志"
+    assert compact[-1].before_tokens > 0
+    assert compact[-1].after_tokens > 0
 
     assert slice_.compacted == 14
     assert slice_.degraded is None

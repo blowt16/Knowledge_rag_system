@@ -33,7 +33,7 @@ import uuid
 from typing import AsyncIterator, Awaitable, Callable
 
 from app import db
-from app.core import observability
+from app.core import observability, trace
 from app.core.config import cfg
 from app.core.deps import UserContext
 from app.graph.builder import get_graph
@@ -210,6 +210,7 @@ async def stream_chat(
         final: dict = {}
         emitted_route = False
         emitted_token = False
+        ttft_ms: int | None = None
         # 节点自己发的 error（generate 的降级、chat/clarify 的上游故障）——
         # `error` 是**终止事件**，见下面的收尾段
         emitted_error = False
@@ -225,7 +226,11 @@ async def stream_chat(
                 # ⚠️ 客户端断连也必须释放锁 —— 否则该会话会永久「正在生成」，
                 #    前端按钮禁用 + 后端拒绝，学生只能重开会话
                 logger.info("客户端断连，终止生成",
-                            extra={"event": "chat.disconnected", "session_id": session_id})
+                            extra={"event": "chat.disconnected", "stage": "chat",
+                                   "layer": "chat", "session_id": session_id,
+                                   "trace_id": trace.current_trace_id(),
+                                   "elapsed_ms": int(
+                                       (time.perf_counter() - started) * 1000)})
                 break
 
             if mode == "values":
@@ -268,6 +273,15 @@ async def stream_chat(
             elif mode == "custom":
                 # generate / chat / clarify 节点边收边发的 token / error
                 if payload.get("type") == "token":
+                    if not emitted_token:
+                        ttft_ms = int((time.perf_counter() - started) * 1000)
+                        logger.info("首字", extra={
+                            "event": "chat.first_token", "stage": "chat",
+                            "layer": "chat", "session_id": session_id,
+                            "trace_id": trace.current_trace_id(),
+                            "ttft_ms": ttft_ms,
+                            "route": final.get("route", ""),
+                        })
                     emitted_token = True
                     yield sse("token", {"text": payload["text"]})
                 elif payload.get("type") == "error":
@@ -286,6 +300,11 @@ async def stream_chat(
         #    降级规则第 ③ 条），发了就把「模型输出坏了」记成「知识库没依据」。
         #    落库照旧：坏掉的这一轮也要能在 qa_logs 里排查。
         if emitted_error:
+            logger.error("中断", extra={
+                "event": "chat.error", "stage": "chat", "layer": "chat",
+                "session_id": session_id, "trace_id": trace.current_trace_id(),
+                "route": final.get("route", ""), "latency_ms": latency_ms,
+            })
             await _persist(session_id, query, final, latency_ms, user, decision,
                            route=final.get("route", ""))
             return
@@ -296,6 +315,12 @@ async def stream_chat(
         # ⚠️ 拒答路径**不要**在这里补发：`answer` 就是服务端拒答文案，
         #    补发会让它在气泡里渲染一遍、`refused` 框里再渲染一遍（M3 评审抓出）。
         if not emitted_token and not final.get("refused") and (final.get("answer") or "").strip():
+            ttft_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("首字", extra={
+                "event": "chat.first_token", "stage": "chat", "layer": "chat",
+                "session_id": session_id, "trace_id": trace.current_trace_id(),
+                "ttft_ms": ttft_ms, "route": final.get("route", ""),
+            })
             yield sse("token", {"text": final["answer"]})
             emitted_token = True
 
@@ -324,11 +349,23 @@ async def stream_chat(
         await _persist(session_id, query, final, latency_ms, user, decision,
                        route=final.get("route", ""))
 
+        logger.info("完成", extra={
+            "event": "chat.done", "stage": "chat", "layer": "chat",
+            "session_id": session_id, "trace_id": trace.current_trace_id(),
+            "route": final.get("route", ""), "decision": decision,
+            "refused": bool(final.get("refused")),
+            "latency_ms": latency_ms,
+            "citations": len(final.get("citations") or []),
+            "ttft_ms": ttft_ms,
+        })
         yield sse("done", {"latency_ms": latency_ms})
 
     except Exception:  # noqa: BLE001 —— 任何异常都转成 error 事件，不发 done
-        logger.exception("问答失败", extra={"event": "chat.failed",
-                                          "session_id": session_id})
+        logger.exception("问答失败", extra={"event": "chat.failed", "stage": "chat",
+                                          "layer": "chat", "session_id": session_id,
+                                          "trace_id": trace.current_trace_id(),
+                                          "elapsed_ms": int(
+                                              (time.perf_counter() - started) * 1000)})
         yield sse("error", {"code": "internal", "message": "服务器内部错误"})
     finally:
         if heartbeat_task is not None:

@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 
 from app import db
-from app.core import llm, observability
+from app.core import llm, observability, trace
 from app.core.config import cfg
 from app.core.prompts import render
 from app.graph.state import Message, NodeTrace
@@ -154,10 +154,6 @@ async def load_context(session_id: str) -> ContextSlice:
         # ⚠️ 两列**同一事务、同一条语句**写 —— 只写一个会让「摘要 + 尾部」
         #    拼不起来（摘要覆盖了 A 段，compressed_count 却还停在原处）
         await _write_back(session_id, new_summary, compressed_count + merged)
-        logger.info("滚动压缩完成", extra={
-            "event": "compaction.done", "node": "compaction",
-            "merged": merged, "before": compressed_count + merged,
-        })
 
     return ContextSlice(summary=new_summary, messages=messages[merged:],
                         compacted=merged, ms=_elapsed(started))
@@ -206,15 +202,23 @@ async def _compact(summary: str, messages: list[Message],
     if merged <= 0:
         return summary, 0
 
-    new_summary = await _summarize(summary, messages[:merged])
-    if not new_summary.strip():
-        # ⚠️ **空摘要绝不能回写**（2026-10-05 评审抓出）：写进去 = 这 N 条消息
-        #    永久消失 —— conversations 只有一列摘要，旧摘要会被就地销毁，
-        #    而没有任何东西代表那批消息。用户侧表现是「助手突然忘了前面聊过什么」，
-        #    且不可恢复。`llm.complete` 对空 content **不抛异常**，
-        #    所以不显式检查就会走「成功」分支（连降级事件都不记）。
-        #    按压缩失败处理：不回写、不推进 compressed_count、由调用方记降级。
-        raise llm.LLMError("摘要模型返回空内容")
+    before_tokens = history_tokens(summary, messages)
+    with trace.trace_span("context.compact", layer="context") as stage:
+        new_summary = await _summarize(summary, messages[:merged])
+        if not new_summary.strip():
+            # ⚠️ **空摘要绝不能回写**（2026-10-05 评审抓出）：写进去 = 这 N 条消息
+            #    永久消失 —— conversations 只有一列摘要，旧摘要会被就地销毁，
+            #    而没有任何东西代表那批消息。用户侧表现是「助手突然忘了前面聊过什么」，
+            #    且不可恢复。`llm.complete` 对空 content **不抛异常**，
+            #    所以不显式检查就会走「成功」分支（连降级事件都不记）。
+            #    按压缩失败处理：不回写、不推进 compressed_count、由调用方记降级。
+            raise llm.LLMError("摘要模型返回空内容")
+        stage.set(
+            before_tokens=before_tokens,
+            after_tokens=history_tokens(new_summary, messages[merged:]),
+            messages=merged,
+            summary_chars=len(new_summary),
+        )
     return new_summary, merged
 
 
