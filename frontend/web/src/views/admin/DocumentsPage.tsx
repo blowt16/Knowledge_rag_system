@@ -296,11 +296,7 @@ export default function DocumentsPage() {
                     </span>
                   </TableCell>
                   <TableCell className="text-sm tabular-nums">{d.chunk_count}</TableCell>
-                  {/* 可见也做成分色标签（与「状态」列一个样式）。
-                      ⚠️ 配色按**该不该引起注意**来，不是按「好不好」：
-                        公开是默认情况、扫一眼就该忽略 → 灰色；
-                        受限是要留意的（配置错了会挡住该看的人）→ 琥珀色。
-                        给公开也上绿色的话，整列全是彩色的，反而什么都看不出来。*/}
+                  {/* 可见也做成分色标签（与「状态」列一个样式）：公开绿、受限红。 */}
                   <TableCell className="text-sm">
                     {d.visibility === 'public' ? (
                       <span className="rounded bg-success/10 px-1.5 py-0.5 text-xs text-success">

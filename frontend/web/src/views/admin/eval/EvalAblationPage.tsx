@@ -51,7 +51,11 @@ const METRIC_LABEL: Record<string, string> = {
 /** 四项 ragas 的 key —— 与 `METRIC_LABEL` 里的保持一致（服务端定的名字）。 */
 const RAGAS_KEYS = ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall']
 
-/** 状态标签配色 —— 与「文档管理」页的状态标签同一套写法。 */
+/** 状态文案与配色 —— 与「批量评测」页保持同一套写法和标签。 */
+const STATUS_LABEL: Record<string, string> = {
+  pending: '排队中', running: '评测中', done: '已完成', failed: '失败',
+}
+
 const STATUS_TONE: Record<string, string> = {
   done: 'bg-success/10 text-success',
   running: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
@@ -273,7 +277,7 @@ export default function EvalAblationPage() {
                       <td className="py-2">
                         <span className={`rounded px-1.5 py-0.5 text-xs ${
                           STATUS_TONE[r.status] ?? 'bg-muted text-muted-foreground'}`}>
-                          {r.status === 'running' ? '运行中…' : r.status}
+                          {STATUS_LABEL[r.status] ?? r.status}
                         </span>
                       </td>
                       <td className="py-2">{fmt(r.metrics?.recall_at_k)}</td>
