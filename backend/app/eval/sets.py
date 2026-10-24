@@ -202,7 +202,8 @@ MAX_PAGE_SIZE = 100
 
 #: `PATCH /cases/{id}` 允许改的列（§5.2）。
 #: ⚠️ `source` / `set_id` / `source_*` **不在内** —— 改了就没有「来源」可言了。
-EDITABLE_CASE_FIELDS = frozenset({"question", "ground_truth", "in_eval", "note"})
+#: `turns` 只对多轮题允许改；改它会同步 `question` 并把用例级 `ground_truth` 置空。
+EDITABLE_CASE_FIELDS = frozenset({"question", "ground_truth", "in_eval", "note", "turns"})
 
 
 class CaseNotFound(LookupError):
@@ -336,7 +337,9 @@ async def list_cases(conn, set_id: str, *, source: str | None = None,
         where.append(f"source = ${len(params)}")
     if q:
         params.append(f"%{q}%")
-        where.append(f"question ILIKE ${len(params)}")
+        # 多轮题的后续轮问题只在 turns 里；只搜 question 会漏掉它们。
+        # 参数已绑定，turns::text 不会拼接用户输入。
+        where.append(f"(question ILIKE ${len(params)} OR turns::text ILIKE ${len(params)})")
     clause = " AND ".join(where)
 
     total = await conn.fetchval(f"SELECT count(*) FROM eval_cases WHERE {clause}", *params)
@@ -353,48 +356,101 @@ def _case_out(row: dict) -> dict:
     """把 JSONB 列解成 Python 对象再往外给。"""
     for field in _JSONB_FIELDS:
         row[field] = _loads(row.get(field))
+    turns = row.get("turns")
+    row["turn_count"] = len(turns) if isinstance(turns, list) else 0
     return row
 
 
-async def create_case(conn, set_id: str, *, question: str,
+def _clean_turns(turns) -> list[dict]:
+    """结构校验：至少 2 轮、每轮问题非空。答案允许为空（前端只提示）。"""
+    if not isinstance(turns, list) or len(turns) < 2:
+        raise ValueError("多轮用例至少需要 2 轮")
+    out: list[dict] = []
+    for i, turn in enumerate(turns, start=1):
+        data = turn.model_dump(mode="json") if hasattr(turn, "model_dump") else dict(turn)
+        question = str(data.get("question") or "").strip()
+        if not question:
+            raise ValueError(f"第 {i} 轮问题不能为空")
+        data["question"] = question
+        out.append(data)
+    return out
+
+
+async def create_case(conn, set_id: str, *, question: str | None = None,
                       ground_truth: str | None = None, in_eval: bool = True,
-                      note: str | None = None) -> dict:
+                      note: str | None = None, case_type: str = "factual",
+                      turns=None) -> dict:
     """手工录入一条用例（§5.2）。
 
-    ⚠️ **弹窗里没有的字段由服务端自己填**，不填就当场报错：
-       - `case_type` 是 `NOT NULL` 且**没有 DEFAULT**（`001_init.sql:222`），
-         而参考图的弹窗只有 问题/标准答案/参与评测/备注 四个字段。
-         手工录入的都是单轮事实题，所以填 `'factual'`。
-       - `expected_doc_ids` **留空** —— 弹窗没这一项。代价是这道题的
-         `recall_at_k` / `mrr` 恒为空（`None`，不是 0），**不参与均值**（§7.6）。
+    - 单轮：`case_type='factual'`，`question` 必填，不能带 `turns`。
+    - 多轮：`case_type='multi_turn'`，`question` 由 `turns[0]` 派生，
+      用例级 `ground_truth` 写 `NULL`（每轮答案只在 `turns` 里）。
+
+    ⚠️ `expected_doc_ids` **留空** —— 弹窗没这一项。代价是这道题的
+       `recall_at_k` / `mrr` 恒为空（`None`，不是 0），**不参与均值**（§7.6）。
     """
-    question = (question or "").strip()
-    if not question:
-        raise ValueError("问题不能为空")
+    if case_type == "multi_turn":
+        turns = _clean_turns(turns)
+        question = turns[0]["question"]
+        ground_truth = None
+    else:
+        if turns:
+            raise ValueError("单轮用例不能带 turns")
+        question = (question or "").strip()
+        if not question:
+            raise ValueError("问题不能为空")
+        case_type = "factual"
     if not await conn.fetchval("SELECT 1 FROM eval_sets WHERE id = $1", set_id):
         raise SetNotFound(set_id)
 
     row = await conn.fetchrow(
         """INSERT INTO eval_cases
-             (id, set_id, question, ground_truth, case_type, suite,
+             (id, set_id, question, ground_truth, case_type, suite, turns,
               source, in_eval, note, expected_doc_ids)
-           VALUES ($1,$2,$3,$4,'factual','full','manual',$5,$6,NULL)
+           VALUES ($1,$2,$3,$4,$5,'full',$6,'manual',$7,$8,NULL)
            RETURNING *""",
-        uuid.uuid4().hex, set_id, question, ground_truth, in_eval, note)
+        uuid.uuid4().hex, set_id, question, ground_truth, case_type,
+        turns, in_eval, note)
+    return _case_out(dict(row))
+
+
+async def get_case(conn, case_id: str) -> dict:
+    row = await conn.fetchrow("SELECT * FROM eval_cases WHERE id = $1", case_id)
+    if row is None:
+        raise CaseNotFound(case_id)
     return _case_out(dict(row))
 
 
 async def update_case(conn, case_id: str, **fields) -> dict:
-    """改一条用例。**只有 `EDITABLE_CASE_FIELDS` 里的列会被写**，其余静默忽略。"""
+    """改一条用例。**只有 `EDITABLE_CASE_FIELDS` 里的列会被写**，其余静默忽略。
+
+    - 单轮题不能改 `turns`；多轮题不能单独改 `question`（由 `turns[0]` 决定）。
+    - 改多轮题的 `turns` 时同步 `question`，并把用例级 `ground_truth` 置空。
+    """
     row = await conn.fetchrow("SELECT * FROM eval_cases WHERE id = $1", case_id)
     if row is None:
         raise CaseNotFound(case_id)
+    existing_type = row["case_type"]
 
     # ⚠️ **不用 `v is not None` 过滤。** 调用方（`PATCH /cases/{id}`）走的是
     #    `model_dump(exclude_unset=True)`：键在就代表「要写这个值」，显式的
     #    `null` 是**清空**的意思。原来把 `None` 当「没传」丢掉，结果是用户在界面上
     #    删光「标准答案」再保存 → 200 + 「已保存」，而库里一个字都没变。
     edits = {k: v for k, v in fields.items() if k in EDITABLE_CASE_FIELDS}
+
+    if "turns" in edits:
+        if existing_type != "multi_turn":
+            raise ValueError("单轮用例不能改 turns")
+        cleaned = _clean_turns(edits["turns"])
+        edits["turns"] = cleaned
+        edits["question"] = cleaned[0]["question"]
+        edits["ground_truth"] = None
+    elif existing_type == "multi_turn" and "question" in edits:
+        raise ValueError("多轮用例的问题由 turns[0] 决定，请改 turns")
+    elif existing_type == "multi_turn" and "ground_truth" in edits:
+        # 多轮题的答案只放 turns；用例级这一列始终 NULL
+        edits["ground_truth"] = None
+
     if "question" in edits:
         # `question` 是 NOT NULL，也是这道题唯一不能空的东西
         if edits["question"] is None:
@@ -474,6 +530,7 @@ async def case_source(conn, case_id: str) -> dict:
         raise CaseNotFound(case_id)
     row = dict(row)
     snippet = row.get("source_snippet")
+    turns = _loads(row.get("turns")) or []
     return {
         "question": row["question"],
         "ground_truth": row.get("ground_truth"),
@@ -483,4 +540,9 @@ async def case_source(conn, case_id: str) -> dict:
         "source_page": row.get("source_page"),
         "source_snippet": snippet,
         "highlight": locate_highlight(snippet, row.get("ground_truth")),
+        "turns": turns,
+        "turn_highlights": [
+            locate_highlight(snippet, (t or {}).get("ground_truth"))
+            for t in turns
+        ],
     }

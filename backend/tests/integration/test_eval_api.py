@@ -225,6 +225,77 @@ async def test_case_list_filters_and_pages(client, admin):
         await _cleanup_set(s["id"])
 
 
+async def test_case_detail_returns_turns(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        r = await client.post(
+            f"/api/admin/eval/sets/{s['id']}/cases",
+            json={"case_type": "multi_turn", "turns": [
+                {"question": "第一问"}, {"question": "第二问"}]},
+            headers=admin["headers"])
+        assert r.status_code == 201, r.text
+        case = r.json()
+        assert case["turn_count"] == 2
+        detail = await client.get(f"/api/admin/eval/cases/{case['id']}",
+                                  headers=admin["headers"])
+        assert detail.status_code == 200, detail.text
+        assert [t["question"] for t in detail.json()["turns"]] == ["第一问", "第二问"]
+    finally:
+        await _cleanup_set(s["id"])
+
+
+async def test_multi_turn_case_rejects_one_turn(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        r = await client.post(
+            f"/api/admin/eval/sets/{s['id']}/cases",
+            json={"case_type": "multi_turn", "turns": [{"question": "只有一轮"}]},
+            headers=admin["headers"])
+        assert r.status_code == 422, r.text
+    finally:
+        await _cleanup_set(s["id"])
+
+
+async def test_patch_multi_question_alone_is_400(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        r = await client.post(
+            f"/api/admin/eval/sets/{s['id']}/cases",
+            json={"case_type": "multi_turn", "turns": [
+                {"question": "第一问"}, {"question": "第二问"}]},
+            headers=admin["headers"])
+        case_id = r.json()["id"]
+        r = await client.patch(f"/api/admin/eval/cases/{case_id}",
+                               json={"question": "单独改"},
+                               headers=admin["headers"])
+        assert r.status_code == 400, r.text
+    finally:
+        await _cleanup_set(s["id"])
+
+
+async def test_generate_request_validates_instruction_and_window(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        base = f"/api/admin/eval/sets/{s['id']}/generate"
+        r = await client.post(base, json={
+            "document_id": "nope", "count": 1,
+            "instruction": "x" * 501,
+        }, headers=admin["headers"])
+        assert r.status_code == 422, r.text
+        r = await client.post(base, json={
+            "document_id": "nope", "count": 1, "mode": "multi",
+            "turns": 5,
+        }, headers=admin["headers"])
+        assert r.status_code == 422, r.text
+        r = await client.post(base, json={
+            "document_id": "nope", "count": 1, "mode": "multi",
+            "window": 4,
+        }, headers=admin["headers"])
+        assert r.status_code == 422, r.text
+    finally:
+        await _cleanup_set(s["id"])
+
+
 async def test_case_source_endpoint(client, admin):
     s = await _new_set(client, admin)
     try:

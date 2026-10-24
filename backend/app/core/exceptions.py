@@ -90,12 +90,25 @@ def install_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_request: Request, exc: RequestValidationError):
+        # ⚠️ Pydantic 的 `ctx.error` 里放的是**异常对象**，不是字符串。
+        #    直接塞进 JSONResponse 会在编码阶段抛 TypeError，把 422 变成 500。
+        #    这里把异常压成字符串，其余原样保留。
+        detail = []
+        for item in exc.errors():
+            item = dict(item)
+            ctx = item.get("ctx")
+            if isinstance(ctx, dict):
+                item["ctx"] = {
+                    k: (str(v) if isinstance(v, BaseException) else v)
+                    for k, v in ctx.items()
+                }
+            detail.append(item)
         return JSONResponse(
             status_code=422,
             content={
                 "code": "validation_error",
                 "message": "请求参数不合法",
-                "detail": exc.errors(),
+                "detail": detail,
                 "trace_id": observability.current_trace_id(),
             },
         )

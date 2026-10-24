@@ -133,6 +133,48 @@ answer_relevancy 上按构造得 0，送进去等于拿**拒答率**冒充**答�
 
 ---
 
+## 单轮 / 多轮评测（2026-10-24）
+
+批量评测页的「对话模式」决定 runner 怎么跑题：
+
+| 模式 | 行为 |
+|---|---|
+| 单轮 | 每道题只跑 `turns[0]`（普通题就是 `question`）；`ground_truth` 用第一轮答案；检索命中用 `turns[0].expected_document` |
+| 多轮 | 带 `turns` 的用例逐轮回放；普通单轮题按一轮跑 |
+
+多轮回放的三个细节：
+
+1. **历史逐轮累加**：用户问题 + 助手答案进 `history`；助手答案里的 `[n]`
+   在进 history 前剥掉，与线上 `context_service` 一致。
+2. **`last_route` / `clarify_chain` / `clarify_total` 现算**：评测器没有
+   `messages` 表，必须从已回放的轮次里数，否则澄清行为与线上不一致。
+3. **不做滚动压缩**：2~4 轮历史可控。这是与线上的**已知差异**，不冒充完全等价。
+
+### RAGAS 送样与回填
+
+- 每一轮满足 `route == "knowledge"`、未拒答、有答案、有检索上下文，就送一条样本。
+- `user_input` 用 **`resolved_query or question`**：追问原句（“那需要什么条件？”）
+  单独看没有主题，会误伤答案相关性。
+- 所有样本在全部用例跑完后**一次性** `score_samples()`。
+- 多轮用 `sample_map: [(case_index, turn_index)]` 把 `rows` 回填到
+  `metrics.turns[i].ragas_*`；**不能**只按用例下标回填 —— 一条多轮用例有多条样本。
+- `reference` 允许为 `None`：无逐轮标准答案的轮次仍可算忠实度/答案相关性，
+  上下文精度/召回返回 `null`，**不进入均值分母**。
+  （实测见设计稿 §13.3：`reference=None` 时只有生成侧两项有分。）
+- 分母口径：
+  - 单轮：`ragas_scored_cases`（题有分）；
+  - 多轮：`ragas_scored_turns`（轮有分）；每张卡还带 `scored_samples` / `sample_unit`。
+  - 报告结论句按 `sample_unit` 念「题有分」或「轮有分」；单/多轮混排不能直接横比。
+
+### 多轮报告的结构指标
+
+整轮 `metrics.multi_turn` 包含：`turns_total`、`turns_completed`、
+`route_accuracy`、`clarify_accuracy`、`retrieval_hit_rate`、
+`resolve_anchor_hit_rate`、`citation_support_rate`、`unsupported_citations`、
+`unsupported_markers`、`turns_with_reference`。
+
+---
+
 ## 已知问题（如实记录）
 
 | # | 问题 | 影响 | 处置 |

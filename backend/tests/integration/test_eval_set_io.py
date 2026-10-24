@@ -154,6 +154,24 @@ async def test_roundtrip_restores_every_field(scratch_set):
             f"{ {k: (v, _subset(after[cid])[k]) for k, v in _subset(want).items() if _subset(after[cid])[k] != v} }")
 
 
+async def test_multi_turn_roundtrip_keeps_turns_and_case_type(scratch_set):
+    turns = [{"question": "第一问", "ground_truth": "答案一"},
+             {"question": "第二问", "ground_truth": "答案二"}]
+    async with db.tx() as conn:
+        await _insert_case(conn, scratch_set, case_type="multi_turn",
+                           ground_truth=None, turns=turns)
+        payload = await sets.export_payload(conn, SET_NAME)
+        await conn.execute("UPDATE eval_cases SET turns=NULL, case_type='refusal',"
+                           " ground_truth='脏' WHERE set_id=$1", scratch_set)
+        await sets.import_payload(conn, payload)
+        row = await conn.fetchrow(
+            "SELECT case_type, turns, ground_truth FROM eval_cases WHERE set_id=$1",
+            scratch_set)
+    assert row["case_type"] == "multi_turn"
+    assert row["turns"] == turns
+    assert row["ground_truth"] is None
+
+
 async def test_export_of_empty_set_is_not_an_error(scratch_set):
     """还没录题的集照常导出（`cases: []`）—— 这是正常动作，不是错误（§5.1）。"""
     async with db.tx() as conn:

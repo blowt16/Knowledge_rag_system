@@ -164,6 +164,70 @@ async def test_case_paging_is_clamped(scratch_set):
         assert got["page_size"] == 100
 
 
+async def test_create_multi_turn_case_derives_question_and_turns(scratch_set):
+    turns = [
+        {"question": "转专业需要什么条件？", "ground_truth": "条件一",
+         "expected_route": "knowledge", "should_clarify": 0},
+        {"question": "那材料呢？", "ground_truth": "材料二",
+         "expected_route": "knowledge", "should_clarify": 0},
+    ]
+    async with db.tx() as conn:
+        case = await sets.create_case(conn, scratch_set["id"], case_type="multi_turn",
+                                      turns=turns)
+        row = dict(await conn.fetchrow("SELECT * FROM eval_cases WHERE id=$1", case["id"]))
+    assert case["question"] == "转专业需要什么条件？"
+    assert row["case_type"] == "multi_turn"
+    assert row["ground_truth"] is None
+    assert case["turn_count"] == 2
+    assert [t["question"] for t in case["turns"]] == ["转专业需要什么条件？", "那材料呢？"]
+
+
+async def test_multi_turn_case_requires_two_turns(scratch_set):
+    async with db.tx() as conn:
+        with pytest.raises(ValueError):
+            await sets.create_case(conn, scratch_set["id"], case_type="multi_turn",
+                                   turns=[{"question": "只有一轮"}])
+
+
+async def test_factual_case_rejects_turns(scratch_set):
+    async with db.tx() as conn:
+        with pytest.raises(ValueError):
+            await sets.create_case(conn, scratch_set["id"], question="q",
+                                   turns=[{"question": "a"}, {"question": "b"}])
+
+
+async def test_patch_multi_turns_syncs_question_and_clears_gt(scratch_set):
+    async with db.tx() as conn:
+        case = await sets.create_case(
+            conn, scratch_set["id"], case_type="multi_turn",
+            turns=[{"question": "第一问", "ground_truth": "答案一"},
+                   {"question": "第二问", "ground_truth": "答案二"}])
+        updated = await sets.update_case(conn, case["id"], turns=[
+            {"question": "改后第一问", "ground_truth": "新答案一"},
+            {"question": "改后第二问", "ground_truth": "新答案二"}])
+    assert updated["question"] == "改后第一问"
+    assert updated["ground_truth"] is None
+    assert updated["turn_count"] == 2
+
+
+async def test_patch_multi_question_alone_is_rejected(scratch_set):
+    async with db.tx() as conn:
+        case = await sets.create_case(
+            conn, scratch_set["id"], case_type="multi_turn",
+            turns=[{"question": "第一问"}, {"question": "第二问"}])
+        with pytest.raises(ValueError, match="turns"):
+            await sets.update_case(conn, case["id"], question="单独改问题")
+
+
+async def test_list_search_finds_later_turns(scratch_set):
+    async with db.tx() as conn:
+        await sets.create_case(
+            conn, scratch_set["id"], case_type="multi_turn",
+            turns=[{"question": "第一问"}, {"question": "缓考材料怎么交？"}])
+        got = await sets.list_cases(conn, scratch_set["id"], q="缓考材料")
+    assert got["total"] == 1
+
+
 async def test_patch_and_delete_case(scratch_set):
     async with db.tx() as conn:
         case = await sets.create_case(conn, scratch_set["id"],
@@ -233,6 +297,27 @@ def test_highlight_returns_none_when_it_does_not_line_up():
     assert sets.locate_highlight("原文", "") is None
     # 只差标点也算对不上（去空白不是去标点）
     assert sets.locate_highlight("学生应当在考试前提出申请", "学生应当在考试前提出申请。") is None
+
+
+async def test_case_source_returns_turn_highlights(scratch_set):
+    snippet = "退役复学学生可以申请免修课程。免修成绩按85分记录。"
+    turns = [
+        {"question": "第一问", "ground_truth": "退役复学学生可以申请免修课程。"},
+        {"question": "第二问", "ground_truth": "免修成绩按85分记录。"},
+    ]
+    async with db.tx() as conn:
+        case = await sets.create_case(conn, scratch_set["id"],
+                                      case_type="multi_turn", turns=turns)
+        await conn.execute(
+            "UPDATE eval_cases SET source_snippet=$2, source='generated', "
+            "source_page=3, source_chunk_id='c1', source_document_id=NULL WHERE id=$1",
+            case["id"], snippet)
+        payload = await sets.case_source(conn, case["id"])
+    assert [t["question"] for t in payload["turns"]] == ["第一问", "第二问"]
+    assert len(payload["turn_highlights"]) == 2
+    for span, turn in zip(payload["turn_highlights"], turns):
+        start, end = span
+        assert snippet[start:end] == turn["ground_truth"]
 
 
 async def test_case_source_payload(scratch_set):

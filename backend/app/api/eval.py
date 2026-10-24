@@ -38,6 +38,7 @@ from app.eval import config as eval_config
 from app.eval import generate, report, runner, sets
 from app.schemas.eval import (
     EvalCaseCreate,
+    EvalCaseDetail,
     EvalCaseItem,
     EvalCasePage,
     EvalCasePatch,
@@ -190,12 +191,27 @@ async def create_case(set_id: str, payload: EvalCaseCreate,
                       user=AdminUser) -> EvalCaseItem:
     async with db.tx() as conn:
         try:
-            row = await sets.create_case(conn, set_id, question=payload.question,
-                                         ground_truth=payload.ground_truth,
-                                         in_eval=payload.in_eval, note=payload.note)
+            row = await sets.create_case(
+                conn, set_id, question=payload.question,
+                ground_truth=payload.ground_truth,
+                in_eval=payload.in_eval, note=payload.note,
+                case_type=payload.case_type, turns=payload.turns)
         except sets.SetNotFound:
             raise NotFound("评测集不存在") from None
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e)) from None
     return EvalCaseItem(**row)
+
+
+@router.get("/cases/{case_id}", response_model=EvalCaseDetail)
+async def get_case(case_id: str, user=AdminUser) -> EvalCaseDetail:
+    """编辑弹窗用：列表不返回整段 `turns`，详情返回。"""
+    async with db.tx() as conn:
+        try:
+            row = await sets.get_case(conn, case_id)
+        except sets.CaseNotFound:
+            raise NotFound("用例不存在") from None
+    return EvalCaseDetail(**row)
 
 
 @router.post("/sets/{set_id}/generate", response_model=EvalGenerateResponse)
@@ -207,7 +223,10 @@ async def generate_cases(set_id: str, payload: EvalGenerateRequest,
     超时返回**部分结果**，已经生成的留在库里 —— 不因为超时把库里的删掉。
     """
     try:
-        stats = await generate.generate_cases(set_id, payload.document_id, payload.count)
+        stats = await generate.generate_cases(
+            set_id, payload.document_id, payload.count,
+            mode=payload.mode, turns=payload.turns, window=payload.window,
+            instruction=payload.instruction)
     except sets.SetNotFound:
         raise NotFound("评测集或文档不存在") from None
     return EvalGenerateResponse(**stats)
@@ -237,6 +256,8 @@ async def patch_case(case_id: str, payload: EvalCasePatch,
                                          **payload.model_dump(exclude_unset=True))
         except sets.CaseNotFound:
             raise NotFound("用例不存在") from None
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e)) from None
     return EvalCaseItem(**row)
 
 

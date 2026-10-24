@@ -700,6 +700,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/eval/cases/{case_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Case
+         * @description 编辑弹窗用：列表不返回整段 `turns`，详情返回。
+         */
+        get: operations["get_case_api_admin_eval_cases__case_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Case
+         * @description 删用例。**历史结果保留**，只是那条结果的 `case_id` 置空（外键 SET NULL）。
+         */
+        delete: operations["delete_case_api_admin_eval_cases__case_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Patch Case
+         * @description 可改的列只有 `question` / `ground_truth` / `in_eval` / `note`（§5.2）。
+         *
+         *     `source` / `set_id` / `source_*` 改了就没有「来源」可言了，schema 里就没有它们。
+         */
+        patch: operations["patch_case_api_admin_eval_cases__case_id__patch"];
+        trace?: never;
+    };
     "/api/admin/eval/sets/{set_id}/generate": {
         parameters: {
             query?: never;
@@ -741,32 +771,6 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
-        trace?: never;
-    };
-    "/api/admin/eval/cases/{case_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /**
-         * Delete Case
-         * @description 删用例。**历史结果保留**，只是那条结果的 `case_id` 置空（外键 SET NULL）。
-         */
-        delete: operations["delete_case_api_admin_eval_cases__case_id__delete"];
-        options?: never;
-        head?: never;
-        /**
-         * Patch Case
-         * @description 可改的列只有 `question` / `ground_truth` / `in_eval` / `note`（§5.2）。
-         *
-         *     `source` / `set_id` / `source_*` 改了就没有「来源」可言了，schema 里就没有它们。
-         */
-        patch: operations["patch_case_api_admin_eval_cases__case_id__patch"];
         trace?: never;
     };
     "/api/admin/eval/run": {
@@ -1107,23 +1111,6 @@ export interface components {
             /** Has More */
             has_more: boolean;
         };
-        /** EvalTurn */
-        EvalTurn: {
-            /** Question */
-            question: string;
-            /** Ground Truth */
-            ground_truth?: string | null;
-            /** Expected Route */
-            expected_route?: "chat" | "clarify" | "knowledge" | null;
-            /** Should Clarify */
-            should_clarify?: (0 | 1) | null;
-            /** Expected Document */
-            expected_document?: string | null;
-            /** Resolved Must Contain Any */
-            resolved_must_contain_any?: string[] | null;
-            /** Note */
-            note?: string | null;
-        };
         /** EvalCaseCreate */
         EvalCaseCreate: {
             /** Question */
@@ -1140,12 +1127,16 @@ export interface components {
             /**
              * Case Type
              * @default factual
+             * @enum {string}
              */
             case_type: "factual" | "multi_turn";
             /** Turns */
             turns?: components["schemas"]["EvalTurn"][] | null;
         };
-        /** EvalCaseDetail */
+        /**
+         * EvalCaseDetail
+         * @description 编辑弹窗用：列表不返回整段 `turns`，详情返回。
+         */
         EvalCaseDetail: {
             /** Id */
             id: string;
@@ -1264,6 +1255,7 @@ export interface components {
          * @description 可改的列（§5.2）。
          *
          *     ⚠️ **没有** `source` / `set_id` / `source_*` —— 改了就没有「来源」可言了。
+         *     ⚠️ `case_type` 不允许改；多轮题的 `question` 由 `turns[0]` 同步。
          */
         EvalCasePatch: {
             /** Question */
@@ -1274,6 +1266,8 @@ export interface components {
             in_eval?: boolean | null;
             /** Note */
             note?: string | null;
+            /** Turns */
+            turns?: components["schemas"]["EvalTurn"][] | null;
         };
         /** EvalCaseSource */
         EvalCaseSource: {
@@ -1349,6 +1343,7 @@ export interface components {
             /**
              * Dialogue Mode
              * @default single
+             * @enum {string}
              */
             dialogue_mode: "single" | "multi";
         };
@@ -1378,6 +1373,7 @@ export interface components {
             /**
              * Mode
              * @default single
+             * @enum {string}
              */
             mode: "single" | "multi";
             /**
@@ -1445,6 +1441,7 @@ export interface components {
             /**
              * Dialogue Mode
              * @default single
+             * @enum {string}
              */
             dialogue_mode: "single" | "multi";
             /** Multi Turn */
@@ -1505,6 +1502,7 @@ export interface components {
             /**
              * Sample Unit
              * @default case
+             * @enum {string}
              */
             sample_unit: "case" | "turn";
         };
@@ -1565,6 +1563,7 @@ export interface components {
             /**
              * Dialogue Mode
              * @default single
+             * @enum {string}
              */
             dialogue_mode: "single" | "multi";
             report?: components["schemas"]["EvalReport"] | null;
@@ -1624,6 +1623,12 @@ export interface components {
             } | null;
             /** Case Ids */
             case_ids?: string[] | null;
+            /**
+             * Dialogue Mode
+             * @default single
+             * @enum {string}
+             */
+            dialogue_mode: "single" | "multi";
         };
         /** EvalRunSummary */
         EvalRunSummary: {
@@ -1673,6 +1678,7 @@ export interface components {
             /**
              * Dialogue Mode
              * @default single
+             * @enum {string}
              */
             dialogue_mode: "single" | "multi";
         };
@@ -1720,6 +1726,26 @@ export interface components {
             name?: string | null;
             /** Description */
             description?: string | null;
+        };
+        /**
+         * EvalTurn
+         * @description 多轮用例的一轮（spec §7.1）。
+         */
+        EvalTurn: {
+            /** Question */
+            question: string;
+            /** Ground Truth */
+            ground_truth?: string | null;
+            /** Expected Route */
+            expected_route?: ("chat" | "clarify" | "knowledge") | null;
+            /** Should Clarify */
+            should_clarify?: (0 | 1) | null;
+            /** Expected Document */
+            expected_document?: string | null;
+            /** Resolved Must Contain Any */
+            resolved_must_contain_any?: string[] | null;
+            /** Note */
+            note?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -3356,42 +3382,7 @@ export interface operations {
             };
         };
     };
-    generate_cases_api_admin_eval_sets__set_id__generate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                set_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["EvalGenerateRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EvalGenerateResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    case_source_api_admin_eval_cases__case_id__source_get: {
+    get_case_api_admin_eval_cases__case_id__get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3408,7 +3399,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["EvalCaseSource"];
+                    "application/json": components["schemas"]["EvalCaseDetail"];
                 };
             };
             /** @description Validation Error */
@@ -3473,6 +3464,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EvalCaseItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    generate_cases_api_admin_eval_sets__set_id__generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalGenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalGenerateResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    case_source_api_admin_eval_cases__case_id__source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalCaseSource"];
                 };
             };
             /** @description Validation Error */

@@ -274,7 +274,10 @@ def _verdict(cards: list[dict], available: Any, errors: list[str],
         names = "、".join(LABELS[k] for k in missing)
         reason = _reason(errors)
         if (unit == "turn" and multi is not None
-                and any(k in missing for k in ("context_recall", "context_precision"))):
+                and any(k in missing for k in ("context_recall", "context_precision"))
+                and available is not False and not errors
+                and int(multi.get("turns_with_reference") or 0)
+                < int(multi.get("turns_total") or 0)):
             n = int(multi.get("turns_with_reference") or 0)
             return (f"{names}没算出来：这两项需要有逐轮标准答案；"
                     f"当前评测集只有 {n} 轮有答案。")

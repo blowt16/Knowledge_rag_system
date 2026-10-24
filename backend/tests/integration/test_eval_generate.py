@@ -220,6 +220,74 @@ async def test_timeout_keeps_what_was_already_generated(scratch_set, fake_corpus
     assert kept == stats["created"], "超时后库里的条数与响应不一致"
 
 
+# ============================================================
+# 多轮生成（§7.3）
+# ============================================================
+
+def _multi_payload(messages):
+    """从 Prompt 里抠出窗口，用窗口里两个不同的事实组成 2 轮对话。"""
+    window = _chunk_of(messages)
+    clauses = [c.strip() + "。" for c in window.split("。") if c.strip()]
+    first = next(c for c in clauses if c.startswith("第0条"))
+    second = next(c for c in clauses if c.startswith("第1条"))
+    return {"turns": [
+        {"question": "缓考申请要提前交给谁？", "ground_truth": first},
+        {"question": "那逾期还能办吗？", "ground_truth": second},
+    ]}
+
+
+async def test_generate_multi_mode_lands_a_multi_turn_case(
+        scratch_set, fake_corpus, monkeypatch):
+    prompts: list[str] = []
+
+    async def fake(messages, **kwargs):
+        prompts.append(messages[0]["content"])
+        return _multi_payload(messages)
+
+    monkeypatch.setattr(llm, "complete_json", fake)
+    stats = await generate.generate_cases(
+        scratch_set, fake_corpus, 1, mode="multi", turns=2, window=2,
+        instruction="只出条件/时限类题")
+
+    assert stats["created"] == 1, stats
+    assert stats["cases"][0]["turn_count"] == 2
+    assert "只出条件/时限类题" in prompts[0]
+    async with db.tx() as conn:
+        row = dict(await conn.fetchrow(
+            "SELECT * FROM eval_cases WHERE set_id=$1", scratch_set))
+    assert row["case_type"] == "multi_turn"
+    assert row["ground_truth"] is None
+    assert row["question"] == "缓考申请要提前交给谁？"
+    assert len(row["turns"]) == 2
+    assert row["expected_doc_ids"] == [fake_corpus]
+    assert row["expected_route"] == "knowledge" and row["should_clarify"] == 0
+    assert row["note"] == "生成要求：只出条件/时限类题"
+    assert row["source_snippet"] and row["source_chunk_id"] == "chunk-0"
+    # 每轮答案的每个实质分句都能在 source_snippet 里逐字找到
+    for turn in row["turns"]:
+        for clause in generate.split_clauses(turn["ground_truth"]):
+            if generate._substantive(clause):
+                assert generate.squeeze(clause) in generate.squeeze(
+                    row["source_snippet"])
+
+
+async def test_generate_multi_mode_rejects_pronoun_first_turn(
+        scratch_set, fake_corpus, monkeypatch):
+    def payload(messages):
+        window = _chunk_of(messages)
+        clause = next(c.strip() + "。" for c in window.split("。")
+                      if c.strip()).removeprefix("第0条 ")
+        return {"turns": [
+            {"question": "这个怎么申请？", "ground_truth": clause},
+            {"question": "那逾期呢？", "ground_truth": clause},
+        ]}
+    monkeypatch.setattr(llm, "complete_json", _llm_returning(payload))
+    stats = await generate.generate_cases(
+        scratch_set, fake_corpus, 1, mode="multi", turns=2, window=2)
+    assert stats["created"] == 0
+    assert stats["failed"] == 1
+
+
 async def test_generated_cases_are_all_in_eval_and_visible_in_the_list(scratch_set,
                                                                       fake_corpus,
                                                                       monkeypatch):

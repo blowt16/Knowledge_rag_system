@@ -41,6 +41,7 @@ import {
   evalCaseSource,
   exportEvalSet,
   generateEvalCases,
+  getEvalCase,
   listEvalCases,
   listEvalSets,
   patchEvalCase,
@@ -214,9 +215,20 @@ export default function EvalSetsPage() {
                 <TableBody className="[&_td]:align-top">
                   {cases.map(c => (
                     <TableRow key={c.id}>
-                      <TableCell className="max-w-md whitespace-normal! pl-3">{c.question}</TableCell>
+                      <TableCell className="max-w-md whitespace-normal! pl-3">
+                        {c.question}
+                        {(c.turn_count ?? 0) >= 2 && (
+                          <span className="ml-2 rounded bg-blue-100 px-1.5 py-0.5 text-xs
+                                           text-blue-800 dark:bg-blue-900/40
+                                           dark:text-blue-300">
+                            多轮 {c.turn_count} 轮
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell className="max-w-xs whitespace-normal! text-muted-foreground">
-                        {c.ground_truth || '—'}
+                        {(c.turn_count ?? 0) >= 2
+                          ? `逐轮答案（${c.turn_count} 轮）`
+                          : (c.ground_truth || '—')}
                       </TableCell>
                       <TableCell>{SOURCE_LABEL[c.source] ?? c.source}</TableCell>
                       <TableCell>
@@ -412,6 +424,11 @@ function NewSetDialog({ open, onClose, onDone }: {
 // 弹窗二：评测用例（手工录入与编辑共用）
 // ============================================================
 
+interface TurnDraft {
+  question: string
+  ground_truth: string
+}
+
 function CaseDialog({ state, setId, onClose, onDone }: {
   state: { mode: 'create' | 'edit'; item?: EvalCaseItem }
   setId: string
@@ -419,46 +436,154 @@ function CaseDialog({ state, setId, onClose, onDone }: {
   onDone: (msg: string) => void
 }) {
   const editing = state.mode === 'edit'
+  const [caseType, setCaseType] = useState<'factual' | 'multi_turn'>(
+    (state.item?.turn_count ?? 0) >= 2 ? 'multi_turn' : 'factual')
   const [question, setQuestion] = useState(state.item?.question ?? '')
   const [groundTruth, setGroundTruth] = useState(state.item?.ground_truth ?? '')
+  const [turns, setTurns] = useState<TurnDraft[]>([])
   const [inEval, setInEval] = useState(state.item?.in_eval ?? true)
   const [note, setNote] = useState(state.item?.note ?? '')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  // 列表不返回整段 turns，编辑多轮题时按 id 拉详情
+  useEffect(() => {
+    if (!editing || !state.item) return
+    setLoading(true)
+    getEvalCase(state.item.id)
+      .then((d) => {
+        setCaseType(d.case_type === 'multi_turn' ? 'multi_turn' : 'factual')
+        if (d.turns?.length) {
+          setTurns(d.turns.map((t) => ({
+            question: t.question,
+            ground_truth: t.ground_truth ?? '',
+          })))
+        }
+      })
+      .catch((e: Error) => setErr(e.message))
+      .finally(() => setLoading(false))
+  }, [editing, state.item])
+
+  const switchType = (next: 'factual' | 'multi_turn') => {
+    if (next === caseType) return
+    if (next === 'multi_turn') {
+      const first = { question, ground_truth: groundTruth }
+      setTurns((prev) => (prev.length >= 2
+        ? prev
+        : [first, { question: '', ground_truth: '' }]))
+    } else if (turns[0]) {
+      setQuestion(turns[0].question)
+      setGroundTruth(turns[0].ground_truth)
+    }
+    setCaseType(next)
+  }
 
   const submit = async () => {
-    if (!question.trim()) { setErr('问题不能为空'); return }
     setBusy(true); setErr('')
     try {
-      const body = {
-        question: question.trim(),
-        ground_truth: groundTruth || null,
-        in_eval: inEval,
-        note: note || null,
+      if (caseType === 'multi_turn') {
+        if (turns.length < 2) throw new Error('多轮用例至少需要 2 轮')
+        if (turns.some((t) => !t.question.trim())) throw new Error('每一轮都要填问题')
+        const body = {
+          in_eval: inEval,
+          note: note || null,
+          turns: turns.map((t) => ({
+            question: t.question.trim(),
+            ground_truth: t.ground_truth || null,
+          })),
+        }
+        if (editing && state.item) await patchEvalCase(state.item.id, body)
+        else await createEvalCase(setId, { ...body, case_type: 'multi_turn' })
+      } else {
+        if (!question.trim()) throw new Error('问题不能为空')
+        const body = {
+          question: question.trim(),
+          ground_truth: groundTruth || null,
+          in_eval: inEval,
+          note: note || null,
+        }
+        if (editing && state.item) await patchEvalCase(state.item.id, body)
+        else await createEvalCase(setId, { ...body, case_type: 'factual' })
       }
-      if (editing && state.item) await patchEvalCase(state.item.id, body)
-      else await createEvalCase(setId, body)
       onDone(editing ? '已保存' : '已录入一条用例')
     } catch (e) { setErr((e as Error).message) } finally { setBusy(false) }
   }
 
   return (
     <Dialog open onOpenChange={v => { if (!v) onClose() }}>
-      <DialogContent className="sm:max-w-2xl">
-        {/* 弹窗里**没有「题目类型」**（参考图就没有）—— `case_type` 由服务端填
-            `'factual'`，它是 NOT NULL 且无默认值，不填服务端当场报错（§5.2） */}
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader><DialogTitle>{editing ? '编辑用例' : '评测用例'}</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <div className="space-y-1">
-            <Label htmlFor="case-q">问题</Label>
-            <Textarea id="case-q" rows={2} value={question}
-                      onChange={e => setQuestion(e.target.value)} />
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">类型</span>
+            {editing ? (
+              <span className="rounded bg-muted px-2 py-1 text-xs">
+                {caseType === 'multi_turn' ? '多轮用例（不可修改）' : '单轮用例'}
+              </span>
+            ) : (
+              <>
+                <Button size="sm" variant={caseType === 'factual' ? 'default' : 'outline'}
+                        onClick={() => switchType('factual')}>单轮</Button>
+                <Button size="sm" variant={caseType === 'multi_turn' ? 'default' : 'outline'}
+                        onClick={() => switchType('multi_turn')}>多轮</Button>
+              </>
+            )}
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="case-a">标准答案</Label>
-            <Textarea id="case-a" rows={3} value={groundTruth}
-                      onChange={e => setGroundTruth(e.target.value)} />
-          </div>
+
+          {caseType === 'multi_turn' ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label>轮次（至少 2 轮）</Label>
+                <Button variant="outline" size="xs"
+                        onClick={() => setTurns((v) => [...v, {
+                          question: '', ground_truth: '',
+                        }])}>
+                  增加一轮
+                </Button>
+              </div>
+              {loading && <p className="text-sm text-muted-foreground">加载轮次中…</p>}
+              {turns.map((turn, i) => (
+                <div key={i} className="space-y-1 rounded-md border border-border p-2">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>第 {i + 1} 轮</span>
+                    {turns.length > 2 && (
+                      <button type="button" className="link"
+                              onClick={() => setTurns((v) => v.filter((_, j) => j !== i))}>
+                        删除
+                      </button>
+                    )}
+                  </div>
+                  <Textarea rows={2} placeholder="问题" value={turn.question}
+                            onChange={e => setTurns((v) => v.map((x, j) =>
+                              j === i ? { ...x, question: e.target.value } : x))} />
+                  <Textarea rows={2} placeholder="标准答案（可为空）"
+                            value={turn.ground_truth}
+                            onChange={e => setTurns((v) => v.map((x, j) =>
+                              j === i ? { ...x, ground_truth: e.target.value } : x))} />
+                  {!turn.ground_truth.trim() && (
+                    <p className="text-xs text-amber-600">
+                      第 {i + 1} 轮没有标准答案，该轮上下文指标不会计入
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <Label htmlFor="case-q">问题</Label>
+                <Textarea id="case-q" rows={2} value={question}
+                          onChange={e => setQuestion(e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="case-a">标准答案</Label>
+                <Textarea id="case-a" rows={3} value={groundTruth}
+                          onChange={e => setGroundTruth(e.target.value)} />
+              </div>
+            </>
+          )}
+
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={inEval}
                    onChange={e => setInEval(e.target.checked)} />
@@ -472,7 +597,9 @@ function CaseDialog({ state, setId, onClose, onDone }: {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>取消</Button>
-          <Button disabled={busy} onClick={submit}>{busy ? '保存中…' : '保存'}</Button>
+          <Button disabled={busy || loading} onClick={submit}>
+            {busy ? '保存中…' : '保存'}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -512,6 +639,10 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
   const [docs, setDocs] = useState<DocumentItem[]>([])
   const [docId, setDocId] = useState('')
   const [count, setCount] = useState(5)
+  const [mode, setMode] = useState<'single' | 'multi'>('single')
+  const [instruction, setInstruction] = useState('')
+  const [turns, setTurns] = useState(3)
+  const [windowSize, setWindowSize] = useState(3)
   const [err, setErr] = useState('')
   const [phase, setPhase] = useState<GenPhase>({ step: 'config' })
   const [elapsed, setElapsed] = useState(0)
@@ -541,7 +672,11 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
     // 配置弹窗立刻关掉、换成进度弹窗
     setPhase({ step: 'running', requested, startedAt: Date.now() })
     try {
-      const result = await generateEvalCases(setId, { document_id: docId, count: requested })
+      const result = await generateEvalCases(setId, {
+        document_id: docId, count: requested, mode,
+        instruction: instruction.trim() || null,
+        ...(mode === 'multi' ? { turns, window: windowSize } : {}),
+      })
       setPhase({ step: 'result', result, error: '' })
     } catch (e) {
       setPhase({ step: 'result', result: null, error: (e as Error).message })
@@ -561,8 +696,9 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
           <DialogHeader><DialogTitle>从文档自动生成用例</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              生成到「{setName}」。模型照着文档片段出题，<b>标准答案必须是原文逐字子串</b>、
-              问句不带代词 —— 过不了校验的那条就不生成。
+              生成到「{setName}」。模型照着文档片段出题，
+              <b>标准答案的每个实质分句都必须是原文</b>、问句不带代词 ——
+              过不了校验的那条就不生成。
             </p>
             <div className="space-y-1">
               <Label htmlFor="gen-doc">文档</Label>
@@ -573,11 +709,49 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
                 {docs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
               </select>
             </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">模式</span>
+              <Button size="sm" variant={mode === 'single' ? 'default' : 'outline'}
+                      onClick={() => setMode('single')}>单轮</Button>
+              <Button size="sm" variant={mode === 'multi' ? 'default' : 'outline'}
+                      onClick={() => setMode('multi')}>多轮</Button>
+            </div>
             <div className="space-y-1">
               <Label htmlFor="gen-count">生成条数（最多 {MAX_GENERATE}）</Label>
               <Input id="gen-count" type="number" min={1} max={MAX_GENERATE} value={count}
                      onChange={e => setCount(Number(e.target.value))} />
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="gen-instruction">生成提示词（可选）</Label>
+              <Textarea id="gen-instruction" rows={3} maxLength={500}
+                        value={instruction}
+                        placeholder={mode === 'single'
+                          ? '只出条件/时限类事实题，问法贴近学生口语'
+                          : '围绕转专业的申请条件与材料，生成连续追问'}
+                        onChange={e => setInstruction(e.target.value)} />
+              <p className="text-xs text-muted-foreground">
+                {instruction.length}/500 · 只影响选题与问法，不会放宽逐句原文校验
+              </p>
+            </div>
+            {mode === 'multi' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label htmlFor="gen-turns">每例轮数（2~4）</Label>
+                  <Input id="gen-turns" type="number" min={2} max={4} value={turns}
+                         onChange={e => setTurns(Number(e.target.value))} />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="gen-window">窗口大小（2~3 个 chunk）</Label>
+                  <Input id="gen-window" type="number" min={2} max={3} value={windowSize}
+                         onChange={e => setWindowSize(Number(e.target.value))} />
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {mode === 'multi'
+                ? '多轮生成按相邻 chunk 窗口出题，耗时更长；标准答案严格取自窗口原文。'
+                : '单轮生成的标准答案同样要求逐句原文，最多 3 个分句。'}
+            </p>
             {err && <p className="text-sm text-destructive">{err}</p>}
           </div>
           <DialogFooter>
@@ -597,11 +771,11 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
           <DialogHeader><DialogTitle>正在生成</DialogTitle></DialogHeader>
           <div className="space-y-3">
             <p className="text-sm">
-              正在为「{setName}」生成 {phase.requested} 条用例…
+              正在为「{setName}」生成 {phase.requested} 条{mode === 'multi' ? '多轮' : ''}用例…
             </p>
             <p className="text-2xl font-semibold tabular-nums">已用 {elapsed} 秒</p>
             <p className="text-xs text-muted-foreground">
-              要逐条问模型并校验，5 条约 20~30 秒，最多等 2 分钟。
+              要逐条问模型并校验，单轮最多等 2 分钟，多轮最多 3 分钟。
               <b>这一步不能取消</b> —— 请求发出后题就已经在生成了，
               中途关掉页面它们照样会入库。
             </p>
@@ -620,7 +794,9 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
   const notes: string[] = []
   if (r) {
     if (r.failed > 0) {
-      notes.push(`${r.failed} 条没通过校验（标准答案不是原文逐字子串，或问句里带了代词）`)
+      notes.push(mode === 'multi'
+        ? `${r.failed} 条没通过校验（轮数 2~4、首轮无代词、每轮答案逐句原文、答案不重复）`
+        : `${r.failed} 条没通过校验（标准答案不是逐句原文，或问句里带了代词）`)
     }
     if (r.timeout) notes.push('等超时了，已先生成的都留着；剩下的可以再点一次「开始生成」')
     if (r.reason && r.created === 0) notes.push(r.reason)
@@ -644,10 +820,21 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
             <div className="max-h-72 space-y-3 overflow-y-auto rounded-md border border-border p-3">
               {r.cases.map((c, i) => (
                 <div key={c.id} className="text-sm">
-                  <p className="font-medium">{i + 1}. {c.question}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    标准答案：{c.ground_truth || '—'}
+                  <p className="font-medium">
+                    {i + 1}. {c.question}
+                    {(c.turn_count ?? 1) > 1 && (
+                      <span className="ml-2 rounded bg-blue-100 px-1.5 py-0.5 text-xs
+                                       text-blue-800 dark:bg-blue-900/40
+                                       dark:text-blue-300">
+                        多轮 {c.turn_count} 轮
+                      </span>
+                    )}
                   </p>
+                  {(c.turn_count ?? 1) <= 1 && (
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      标准答案：{c.ground_truth || '—'}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -686,7 +873,11 @@ function SourceDialog({ payload, onClose }: {
 }) {
   if (!payload) return null
   const snippet = payload.source_snippet ?? ''
-  const [start, end] = payload.highlight ?? [-1, -1]
+  const turns = payload.turns ?? []
+  const turnHighlights = payload.turn_highlights ?? []
+  // 多轮题没有用例级标准答案；用第一轮高亮定位片段
+  const primary = payload.highlight ?? turnHighlights[0] ?? null
+  const [start, end] = primary ?? [-1, -1]
   // 「第 X 段」不存库，按片段内段落序号现算（片段内第几段）
   const para = start >= 0 ? snippet.slice(0, start).split(/\n\s*\n/).length : null
 
@@ -700,10 +891,40 @@ function SourceDialog({ payload, onClose }: {
             <p className="font-semibold">问题</p>
             <p className="mt-1">{payload.question}</p>
           </div>
-          <div>
-            <p className="font-semibold">标准答案</p>
-            <p className="mt-1">{payload.ground_truth || '—'}</p>
-          </div>
+          {turns.length > 0 ? (
+            <div>
+              <p className="font-semibold">逐轮答案（{turns.length} 轮）</p>
+              <div className="mt-1 space-y-2">
+                {turns.map((t, i) => {
+                  const span = turnHighlights[i]
+                  return (
+                    <div key={i} className="rounded-md border border-border p-2">
+                      <p className="font-medium">第 {i + 1} 轮：{t.question}</p>
+                      <p className="mt-1 text-muted-foreground">
+                        {t.ground_truth || '—'}
+                      </p>
+                      {span ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          原文高亮：<mark className="bg-yellow-200 dark:bg-yellow-900">
+                            {snippet.slice(span[0], span[1])}
+                          </mark>
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-xs text-amber-700 dark:text-amber-500">
+                          这一轮的答案在来源片段里对不上
+                        </p>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <p className="font-semibold">标准答案</p>
+              <p className="mt-1">{payload.ground_truth || '—'}</p>
+            </div>
+          )}
           <div>
             <p className="font-semibold">来源片段原文</p>
             <p className="mt-1 text-xs text-muted-foreground">

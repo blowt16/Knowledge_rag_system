@@ -387,11 +387,18 @@ async def _run_eval(run_id: str) -> dict:
                                   dialogue_mode=dialogue_mode) as case_stage:
                 try:
                     if dialogue_mode == "multi":
+                        # 本用例的样本先放局部列表：中途某轮抛异常时整条用例
+                        # 不进 results，样本也不能留下 —— 否则 sample_map 会指向
+                        # 一个没有 metrics 的失败结果，RAGAS 回填时 KeyError。
+                        local_samples: list[dict] = []
+                        local_map: list[tuple[int, int]] = []
                         result = await _run_multi_case(
                             case, run_id=run_id, role=role,
                             include_restricted=include_restricted, config=config,
-                            samples=ragas_samples, sample_map=sample_map,
+                            samples=local_samples, sample_map=local_map,
                             result_index=len(results))
+                        ragas_samples.extend(local_samples)
+                        sample_map.extend(local_map)
                     else:
                         result = await _run_single_case(
                             case, run_id=run_id, role=role,

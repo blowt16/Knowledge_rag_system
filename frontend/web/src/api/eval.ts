@@ -20,6 +20,7 @@ export type EvalReport = S['EvalReport']
 export type EvalReportCase = S['EvalReportCase']
 export type EvalSetItem = S['EvalSetItem']
 export type EvalCaseItem = S['EvalCaseItem']
+export type EvalCaseDetail = S['EvalCaseDetail']
 export type EvalCasePage = S['EvalCasePage']
 export type EvalCaseSource = S['EvalCaseSource']
 export type EvalGenerateResponse = S['EvalGenerateResponse']
@@ -100,16 +101,39 @@ export const listEvalCases = (
   return request<EvalCasePage>(`/admin/eval/sets/${setId}/cases?${qs}`)
 }
 
+export interface EvalTurnInput {
+  question: string
+  ground_truth?: string | null
+  expected_route?: 'chat' | 'clarify' | 'knowledge' | null
+  should_clarify?: 0 | 1 | null
+  expected_document?: string | null
+  resolved_must_contain_any?: string[] | null
+  note?: string | null
+}
+
 export const createEvalCase = (
   setId: string,
-  body: { question: string; ground_truth?: string | null; in_eval?: boolean; note?: string | null },
+  body: {
+    question?: string
+    ground_truth?: string | null
+    in_eval?: boolean
+    note?: string | null
+    case_type?: 'factual' | 'multi_turn'
+    turns?: EvalTurnInput[] | null
+  },
 ) => request<EvalCaseItem>(`/admin/eval/sets/${setId}/cases`, {
   method: 'POST', body: JSON.stringify(body),
 })
 
 export const patchEvalCase = (
   caseId: string,
-  body: { question?: string; ground_truth?: string | null; in_eval?: boolean; note?: string | null },
+  body: {
+    question?: string
+    ground_truth?: string | null
+    in_eval?: boolean
+    note?: string | null
+    turns?: EvalTurnInput[] | null
+  },
 ) => request<EvalCaseItem>(`/admin/eval/cases/${caseId}`, {
   method: 'PATCH', body: JSON.stringify(body),
 })
@@ -117,14 +141,25 @@ export const patchEvalCase = (
 export const deleteEvalCase = (caseId: string) =>
   request<void>(`/admin/eval/cases/${caseId}`, { method: 'DELETE' })
 
+/** 编辑弹窗用：列表不返回整段 turns，详情返回。 */
+export const getEvalCase = (caseId: string) =>
+  request<EvalCaseDetail>(`/admin/eval/cases/${caseId}`)
+
 /** 「核对标准答案」弹窗的数据（含标准答案在原文里的高亮区间）。 */
 export const evalCaseSource = (caseId: string) =>
   request<EvalCaseSource>(`/admin/eval/cases/${caseId}/source`)
 
-/** 从文档自动生成用例（§8）。**同步等待**，最多 120 秒。 */
+/** 从文档自动生成用例（§8）。**同步等待**，最多 180 秒（多轮）。 */
 export const generateEvalCases = (
   setId: string,
-  body: { document_id: string; count: number },
+  body: {
+    document_id: string
+    count: number
+    mode?: 'single' | 'multi'
+    turns?: number
+    window?: number
+    instruction?: string | null
+  },
 ) => request<EvalGenerateResponse>(`/admin/eval/sets/${setId}/generate`, {
   method: 'POST', body: JSON.stringify(body),
 })
