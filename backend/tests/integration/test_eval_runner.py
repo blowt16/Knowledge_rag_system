@@ -74,16 +74,17 @@ def _graph_returning(monkeypatch, finals: dict[str, dict]):
 async def _make_run(**cols) -> str:
     run_id = uuid.uuid4().hex
     fields = {"id": run_id, "name": "t", "config": "{}", "role": "student",
-              "include_restricted": 0, "status": "pending"}
+              "include_restricted": 0, "status": "pending",
+              "dialogue_mode": "single"}
     fields.update(cols)
     async with db.tx() as conn:
         await conn.execute(
             """INSERT INTO eval_runs (id, name, config, role, include_restricted, status,
-                                      set_id, set_name)
-               VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8)""",
+                                      set_id, set_name, dialogue_mode)
+               VALUES ($1,$2,$3::jsonb,$4,$5,$6,$7,$8,$9)""",
             fields["id"], fields["name"], json.dumps(fields["config"]),
             fields["role"], fields["include_restricted"], fields["status"],
-            fields.get("set_id"), fields.get("set_name"))
+            fields.get("set_id"), fields.get("set_name"), fields["dialogue_mode"])
     return run_id
 
 
@@ -113,6 +114,16 @@ async def _add_case(conn, set_id, question, *, in_eval=True, expected=None,
            VALUES ($1,$2,$3,'标准答案','factual',$4,'manual',$5,$6)""",
         case_id, set_id, question, suite, in_eval,
         expected)          # 原值 —— 连接上已注册 jsonb 编解码器，别再 dumps
+    return case_id
+
+
+async def _add_turn_case(conn, set_id, *, turns, question=None):
+    case_id = uuid.uuid4().hex
+    await conn.execute(
+        """INSERT INTO eval_cases (id, set_id, question, ground_truth, case_type, suite,
+                                   source, in_eval, turns)
+           VALUES ($1,$2,$3,NULL,'multi_turn','full','manual',TRUE,$4)""",
+        case_id, set_id, question or turns[0]["question"], turns)
     return case_id
 
 
@@ -475,6 +486,185 @@ async def test_refused_cases_are_not_sent_to_ragas(scratch_set, monkeypatch,
         # 拒答在自己的口径里照旧：2 道 knowledge 题里拒了 1 道
         assert metrics["refused_count"] == 1
         assert metrics["refusal_rate"] == 0.5
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+# ============================================================
+# 单轮 / 多轮执行（§6.3）
+# ============================================================
+
+async def test_single_mode_multi_turn_case_uses_first_turn(scratch_set, monkeypatch):
+    turns = [
+        {"question": "转专业需要什么条件？", "ground_truth": "第一轮答案",
+         "expected_document": "转专业办法"},
+        {"question": "那需要什么材料？", "ground_truth": "第二轮答案"},
+    ]
+    async with db.tx() as conn:
+        await _add_turn_case(conn, scratch_set, turns=turns)
+    seen: list[str] = []
+
+    async def fake(state):
+        seen.append(state["query"])
+        chunk = Chunk(chunk_id="c1", text="片段", document_id="d1",
+                      document_name="转专业办法")
+        return {"reranked": [chunk], "evidence": [], "answer": "答",
+                "refused": False, "route": "knowledge", "decision": "ANSWERED",
+                "verify_report": {"total_claims": 1, "cited_claims": 1}}
+
+    monkeypatch.setattr(runner, "_drive_to_end", fake)
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集",
+                             dialogue_mode="single")
+    try:
+        await runner.run_eval(run_id)
+        assert seen == ["转专业需要什么条件？"]
+        row = (await _results(run_id))[0]
+        assert row["question"] == "转专业需要什么条件？"
+        assert row["ground_truth"] == "第一轮答案"
+        assert row["metrics"]["rank"] == 1
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_multi_mode_replays_turns_with_history_and_clarify_counts(
+        scratch_set, monkeypatch):
+    turns = [
+        {"question": "转专业需要什么条件？", "ground_truth": "条件A",
+         "expected_route": "knowledge", "should_clarify": 0},
+        {"question": "那需要什么材料？", "ground_truth": "材料B",
+         "expected_route": "knowledge", "should_clarify": 0,
+         "resolved_must_contain_any": ["材料"]},
+        {"question": "多久？", "ground_truth": "时限C",
+         "expected_route": "clarify", "should_clarify": 1},
+    ]
+    async with db.tx() as conn:
+        await _add_turn_case(conn, scratch_set, turns=turns)
+    seen: list[dict] = []
+
+    async def fake(state):
+        seen.append({
+            "query": state["query"],
+            "history": list(state.get("history") or []),
+            "last_route": state.get("last_route") or "",
+            "clarify_chain": state.get("clarify_chain") or 0,
+            "clarify_total": state.get("clarify_total") or 0,
+        })
+        route = "clarify" if state["query"] == "多久？" else "knowledge"
+        answer = "澄清问题" if route == "clarify" else f"答：{state['query']}"
+        return {"reranked": [], "evidence": [], "answer": answer,
+                "refused": False, "route": route, "decision": "ANSWERED",
+                "resolved_query": state["query"], "verify_report": {}}
+
+    monkeypatch.setattr(runner, "_drive_to_end", fake)
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集",
+                             dialogue_mode="multi")
+    try:
+        await runner.run_eval(run_id)
+        assert [s["query"] for s in seen] == [t["question"] for t in turns]
+        assert seen[1]["history"][0].role == "user"
+        assert seen[1]["history"][1].role == "assistant"
+        assert seen[1]["last_route"] == "knowledge"
+        assert seen[2]["last_route"] == "knowledge"
+        assert seen[2]["clarify_chain"] == 0
+        row = (await _results(run_id))[0]
+        assert len(row["metrics"]["turns"]) == 3
+        assert row["metrics"]["turns"][2]["route"] == "clarify"
+        assert row["metrics"]["turns"][2]["clarify_ok"] is True
+        assert row["metrics"]["turns_expected"] == 3
+        assert row["metrics"]["turns_completed"] == 3
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_multi_mode_ragas_sample_map_fills_each_turn(
+        scratch_set, monkeypatch):
+    turns = [
+        {"question": "第一问", "ground_truth": "答案一"},
+        {"question": "第二问", "ground_truth": "答案二"},
+    ]
+    async with db.tx() as conn:
+        await _add_turn_case(conn, scratch_set, turns=turns)
+    async def fake(state):
+        return {"reranked": [], "evidence": [Chunk(chunk_id="c1", text="片段")],
+                "answer": f"答{state['query']}", "refused": False,
+                "route": "knowledge", "decision": "ANSWERED",
+                "resolved_query": state["query"], "verify_report": {}}
+    monkeypatch.setattr(runner, "_drive_to_end", fake)
+
+    calls: dict[str, list] = {}
+
+    async def score(batch, *a, **kw):
+        calls["batch"] = batch
+        rows = [{"faithfulness": 0.1, "answer_relevancy": 0.2,
+                 "context_precision": None, "context_recall": None},
+                {"faithfulness": 0.3, "answer_relevancy": 0.4,
+                 "context_precision": None, "context_recall": None}]
+        return {"available": True, "ok": True, "rows": rows, "means": {},
+                "errors": [], "ms": 0}
+
+    monkeypatch.setattr(runner.ragas_service, "score_samples", score)
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集",
+                             dialogue_mode="multi")
+    try:
+        await runner.run_eval(run_id)
+        row = (await _results(run_id))[0]
+        t1, t2 = row["metrics"]["turns"]
+        assert t1["ragas_faithfulness"] == 0.1
+        assert t2["ragas_faithfulness"] == 0.3
+        assert [s["user_input"] for s in calls["batch"]] == ["第一问", "第二问"]
+        assert calls["batch"][1]["reference"] == "答案二"
+        summary = (await _run_row(run_id))["metrics"]
+        summary = json.loads(summary) if isinstance(summary, str) else summary
+        assert summary["ragas_scored_turns"] == 2
+        assert summary["multi_turn"]["turns_total"] == 2
+        assert summary["multi_turn"]["turns_with_reference"] == 2
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
+
+
+async def test_multi_mode_skips_chat_and_refused_turns_in_ragas(
+        scratch_set, monkeypatch):
+    turns = [
+        {"question": "闲聊", "ground_truth": "答"},
+        {"question": "拒答", "ground_truth": "答"},
+        {"question": "作答", "ground_truth": "答"},
+    ]
+    async with db.tx() as conn:
+        await _add_turn_case(conn, scratch_set, turns=turns)
+    async def fake(state):
+        q = state["query"]
+        if q == "闲聊":
+            return {"reranked": [], "evidence": [], "answer": "你好",
+                    "refused": False, "route": "chat", "decision": "ANSWERED",
+                    "resolved_query": q, "verify_report": {}}
+        if q == "拒答":
+            return {"reranked": [], "evidence": [Chunk(chunk_id="c1", text="片段")],
+                    "answer": "没找到", "refused": True, "route": "knowledge",
+                    "decision": "REFUSED_NO_EVIDENCE", "resolved_query": q,
+                    "verify_report": {}}
+        return {"reranked": [], "evidence": [Chunk(chunk_id="c1", text="片段")],
+                "answer": "答", "refused": False, "route": "knowledge",
+                "decision": "ANSWERED", "resolved_query": q, "verify_report": {}}
+    monkeypatch.setattr(runner, "_drive_to_end", fake)
+    samples: list[dict] = []
+
+    async def score(batch, *a, **kw):
+        samples.extend(batch)
+        return {"available": True, "ok": True,
+                "rows": [{"faithfulness": 1.0, "answer_relevancy": 1.0,
+                          "context_precision": None, "context_recall": None}],
+                "means": {}, "errors": [], "ms": 0}
+
+    monkeypatch.setattr(runner.ragas_service, "score_samples", score)
+    run_id = await _make_run(set_id=scratch_set, set_name="跑测集",
+                             dialogue_mode="multi")
+    try:
+        await runner.run_eval(run_id)
+        assert [s["user_input"] for s in samples] == ["作答"]
     finally:
         async with db.tx() as conn:
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)

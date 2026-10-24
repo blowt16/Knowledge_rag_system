@@ -129,6 +129,7 @@ export default function EvalRunsPage() {
   const [sets, setSets] = useState<EvalSetItem[]>([])
   const [setId, setSetId] = useState('')
   const [role, setRole] = useState<'student' | 'staff' | 'admin'>('student')
+  const [dialogueMode, setDialogueMode] = useState<'single' | 'multi'>('single')
   const [runs, setRuns] = useState<EvalRunSummary[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -198,7 +199,9 @@ export default function EvalRunsPage() {
     if (!setId) { setMsg('先选一个评测集'); return }
     setBusy(true); setMsg('')
     try {
-      const r = await startEvalRun({ set_id: setId, role })
+      const r = await startEvalRun({
+        set_id: setId, role, dialogue_mode: dialogueMode,
+      })
       setMsg(`已起：${r.config_label}（${r.run_id.slice(0, 8)}）`)
       setPage(1)
       await refresh()
@@ -241,10 +244,23 @@ export default function EvalRunsPage() {
                 <option value="admin">管理员</option>
               </select>
             </label>
+            <label className="flex items-center gap-1">
+              对话模式
+              <select className="rounded border border-border bg-background px-2 py-1"
+                      value={dialogueMode}
+                      onChange={e => setDialogueMode(e.target.value as 'single' | 'multi')}>
+                <option value="single">单轮</option>
+                <option value="multi">多轮</option>
+              </select>
+            </label>
             <Button disabled={busy || !setId} onClick={start}>开始评测</Button>
           </div>
           {/* ⚠️ 提示文案**不编数字** —— 参考图里的「六次模型」「几十万 token」
               本仓库没有依据（§6.3） */}
+          <p className="text-xs text-muted-foreground">
+            单轮：每道题只跑第一问。多轮：带 <code>turns</code> 的多轮题逐轮回放；
+            普通单轮题不受影响。
+          </p>
           <p className="text-xs text-muted-foreground">
             评测会逐条调用模型和重排，一轮下来是分钟级。建议先用 5~10 条验证方向。
           </p>
@@ -274,6 +290,7 @@ export default function EvalRunsPage() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="pl-3">任务ID</TableHead>
                     <TableHead>评测集</TableHead>
+                    <TableHead>模式</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>进度</TableHead>
                     <TableHead>失败原因</TableHead>
@@ -291,6 +308,14 @@ export default function EvalRunsPage() {
                         {/* 老 `suite` 路径的 run 没有评测集，退回配置标签 */}
                         <TableCell className="max-w-xs whitespace-normal!">
                           {r.set_name ?? r.config_label}
+                        </TableCell>
+                        <TableCell>
+                          <span className={`rounded px-1.5 py-0.5 text-xs ${
+                            r.dialogue_mode === 'multi'
+                              ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300'
+                              : 'bg-muted text-muted-foreground'}`}>
+                            {r.dialogue_mode === 'multi' ? '多轮' : '单轮'}
+                          </span>
                         </TableCell>
                         <TableCell>
                           <span className={`rounded px-1.5 py-0.5 text-xs ${

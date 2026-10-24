@@ -110,3 +110,28 @@ async def test_diagnostics_are_exposed_on_rows(client, admin, run_factory):
     row = body["runs"][0]
     assert row["ragas_available"] is False
     assert row["ragas_errors"] == ["ragas 计算超时"]
+
+
+async def test_compare_rows_carry_dialogue_mode(client, admin, run_factory):
+    rid = await run_factory({**_metrics(), "multi_turn": {"turns_total": 3},
+                             "citation_support_rate": 0.9})
+    body = await _compare(client, admin, [rid])
+    assert body["runs"][0]["dialogue_mode"] == "single"
+
+
+async def test_compare_includes_new_metric_keys(client, admin, run_factory):
+    rid = await run_factory({**_metrics(), "citation_support_rate": 0.9,
+                             "unsupported_markers": 2, "unsupported_citations": 1,
+                             "ragas_scored_turns": 4, "turns_total": 6})
+    body = await _compare(client, admin, [rid])
+    for key in ("citation_support_rate", "unsupported_markers",
+                "unsupported_citations", "ragas_scored_turns", "turns_total"):
+        assert key in body["metrics"], key
+
+
+async def test_compare_old_run_defaults_to_single(client, admin, run_factory):
+    rid = await run_factory(_metrics())
+    async with db.tx() as conn:
+        await conn.execute("UPDATE eval_runs SET dialogue_mode='single' WHERE id=$1", rid)
+    body = await _compare(client, admin, [rid])
+    assert body["runs"][0]["dialogue_mode"] == "single"

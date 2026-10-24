@@ -7,17 +7,28 @@
 
 ⚠️ **评测不写 `qa_logs`**：结果只落 `eval_case_results`。这样
    `stats/overview.qa_count` 天然不含评测轮次，不需要额外过滤。
-   哪天要让评测也写日志，**必须同时给 qa_count 加过滤**（M5 开工口径第 2 条）。
 
 ⚠️ **与线上问答共用同一个 GPU 信号量**（§10.2 M5-2）：评测走的是
    `reranker.rerank()`，它内部用 `reranker._get_semaphore()` —— 与线上同一把锁，
    **不做优先级抢占**（评测是后台任务，慢一点没关系，抢显存会连线上一起搞崩）。
+
+## 单轮 / 多轮（§6.3）
+
+- `dialogue_mode="single"`：普通题跑 `question`；多轮题只跑 `turns[0]`，
+  这样同一套题可以公平对比单轮/多轮。
+- `dialogue_mode="multi"`：带 `turns` 的用例逐轮回放，累加 history / last_route，
+  并用已回放轮次现算 `clarify_chain` / `clarify_total`（评测器没有 DB 历史）。
+  **评测不跑滚动压缩** —— 2~4 轮历史可控，这是与线上的已知差异。
+
+逐轮结果写进 `metrics["turns"]`；RAGAS 用 `sample_map` 把每条样本回填到
+`(case, turn)`，不能像单轮那样只按用例下标回填（一条多轮用例有多条样本）。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -27,7 +38,7 @@ from app.core import trace
 from app.graph.builder import get_graph
 # ★ 与模型看到的上下文**同一份渲染实现** —— 评测器绝不另抄一份
 from app.graph.nodes.build_context import render_chunk_block
-from app.graph.state import UserContextLite, new_state
+from app.graph.state import Message, UserContextLite, new_state
 from app.eval import ragas as ragas_service
 
 logger = logging.getLogger(__name__)
@@ -35,13 +46,13 @@ logger = logging.getLogger(__name__)
 #: 检索指标看前几名
 TOP_K = 5
 
+RAGAS_KEYS = ("context_recall", "context_precision", "faithfulness", "answer_relevancy")
+
 
 async def _drive_to_end(state: dict) -> dict:
     """把图跑到 END，返回最终状态。
 
-    ⚠️ 与 M2 的 `_drive_to_retrieve` 不同 —— 那个**特意停在 generate 之前**
-       （M2 只考查询理解，跑到底会把 M3 生成侧的缺陷混进指标）。M5 要算
-       ragas 的忠实度与答案相关性，**必须有答案**，所以这次要跑到底。
+    ⚠️ M5 要算 ragas 的忠实度与答案相关性，**必须有答案**，所以这次要跑到底。
     """
     final: dict = {}
     async for mode, payload in get_graph().astream(state, stream_mode=["values"]):
@@ -72,25 +83,52 @@ def _rank_chunks(final: dict) -> list:
     return final.get("reranked") or final.get("candidates") or []
 
 
+def _first_turn(case: dict) -> dict | None:
+    turns = case.get("turns")
+    return turns[0] if isinstance(turns, list) and turns else None
+
+
+def _case_expected_ids(case: dict) -> set[str]:
+    raw = case.get("expected_doc_ids")
+    if isinstance(raw, str):
+        raw = json.loads(raw or "[]")
+    return set(raw or [])
+
+
+def _retrieval_rank(chunks: list, expected_ids: set[str],
+                    expected_title: str | None) -> int | None:
+    """返回第几名命中（1 起）→ 0 表示有目标但没命中 → None 表示没有目标。
+
+    ⚠️ 「有期望但没召回」必须记 0，不能记 None：0 是真的失败，
+       None 是「这题没有期望文档」。两者混在一起会让召回率虚高。
+    """
+    if expected_title:
+        return next((i for i, c in enumerate(chunks, start=1)
+                     if (c.document_name or "") == expected_title), 0)
+    if expected_ids:
+        return next((i for i, c in enumerate(chunks, start=1)
+                     if c.document_id in expected_ids), 0)
+    return None
+
+
+def _expected_target(case: dict, turn: dict | None) -> tuple[set[str], str | None]:
+    title = (turn or {}).get("expected_document") or None
+    ids = _case_expected_ids(case)
+    # 多轮题 case 级 expected_doc_ids 通常是空；单轮模式用 turns[0].expected_document。
+    # 标题存在时优先按标题比较（文档 id 可能会变）。
+    return (set() if title else ids), title
+
+
 def _case_metrics(final: dict, case: dict, visibility: dict[str, set[str]],
-                  role: str) -> dict:
+                  role: str, *, expected_ids: set[str] | None = None,
+                  expected_title: str | None = None) -> dict:
     """单题的**自定义**指标（ragas 四项另外算）。"""
     chunks = _rank_chunks(final)[:TOP_K]
     doc_ids = [c.document_id for c in chunks]
 
-    expected = case.get("expected_doc_ids")
-    expected_ids = set(expected or []) if not isinstance(expected, str) else set(
-        json.loads(expected) or [])
-
-    # ⚠️ **没有 `expected_doc_ids` 的题，排名类指标一律记 `None`，不是 0**（§7.6）。
-    #    界面上手工录入的用例都没有期望文档（弹窗里没这一项）。记 0 的话，
-    #    `_avg()` 照样把它算进均值 → **整轮的 Recall@5 / MRR 被这批题凭空拉低**，
-    #    而且逐题单看都"正常"，查不出原因。
-    #    `_avg()` 现有的 `isinstance(v, (int, float))` 过滤会自动跳过 `None`，
-    #    聚合逻辑一行都不用改。
-    #    ⚠️ 别和「有期望但没召回」混为一谈 —— 那种**就是 0 分**（下面 else 支）。
-    first_hit = (next((i for i, d in enumerate(doc_ids, start=1) if d in expected_ids), 0)
-                 if expected_ids else None)
+    if expected_ids is None:
+        expected_ids = _case_expected_ids(case)
+    first_hit = _retrieval_rank(chunks, expected_ids, expected_title)
 
     # 越权：返回的 chunk 里属于「该角色看不见的文档」的条数（§5.3 读它）
     unauthorized = sum(
@@ -121,6 +159,132 @@ def _case_metrics(final: dict, case: dict, visibility: dict[str, set[str]],
     }
 
 
+def _turn_row(final: dict, turn: dict, *, index: int,
+              expected_ids: set[str], expected_title: str | None) -> dict:
+    """一轮的结构指标 + 引用指标。RAGAS 分数稍后回填。"""
+    chunks = _rank_chunks(final)[:TOP_K]
+    report = final.get("verify_report") or {}
+    if hasattr(report, "model_dump"):
+        report = report.model_dump()
+
+    route = final.get("route") or ""
+    expected_route = turn.get("expected_route")
+    if expected_route is None and turn.get("should_clarify") is not None:
+        expected_route = "clarify" if int(turn["should_clarify"]) else "knowledge"
+    should = turn.get("should_clarify")
+    anchors = turn.get("resolved_must_contain_any") or []
+    resolved = final.get("resolved_query") or ""
+    rank = _retrieval_rank(chunks, expected_ids, expected_title)
+
+    return {
+        "turn": index,
+        "question": turn.get("question") or "",
+        "resolved_query": resolved,
+        "route": route,
+        "route_ok": (route == expected_route) if expected_route else None,
+        "clarify_ok": ((route == "clarify") == bool(int(should)))
+                      if should is not None else None,
+        "resolved_anchor_hit": (any(a in resolved for a in anchors)
+                                if anchors else None),
+        "retrieval_hit": (bool(rank) if rank is not None else None),
+        "top1_doc": ((chunks[0].document_name or chunks[0].document_id)
+                     if chunks else "(空)"),
+        "evidence_ids": ([c.chunk_id for c in (final.get("evidence") or [])]
+                         if (expected_title or expected_ids) else None),
+        "citation_support_rate": report.get("citation_support_rate"),
+        "unsupported_citations": len(report.get("unsupported_citations") or []),
+        "unsupported_markers": len(report.get("unsupported_markers") or []),
+        "refused": bool(final.get("refused")),
+        "answer": (final.get("answer") or "")[:2000],
+    }
+
+
+async def _run_multi_case(case: dict, *, run_id: str, role: str,
+                          include_restricted: bool, config: dict,
+                          samples: list[dict], sample_map: list[tuple[int, int]],
+                          result_index: int) -> dict:
+    """逐轮回放一条用例；带 turns 的按 turns，不带的按单轮跑 1 轮。"""
+    turns = case.get("turns") or [{
+        "question": case["question"],
+        "ground_truth": case.get("ground_truth"),
+    }]
+    session_id = f"eval-{run_id[:8]}-{case['id']}"
+    history: list[Message] = []
+    last_route = ""
+    routes: list[str] = []
+    turn_rows: list[dict] = []
+    first_answer = ""
+    t0 = time.perf_counter()
+
+    for i, turn in enumerate(turns, start=1):
+        # 生产环境从 messages.route 数；评测器没有 DB 历史，必须从已回放轮次现算。
+        clarify_chain = 0
+        for r in reversed(routes):
+            if r != "clarify":
+                break
+            clarify_chain += 1
+        clarify_total = sum(1 for r in routes if r == "clarify")
+
+        state = new_state(
+            query=turn.get("question") or "",
+            session_id=session_id,
+            user=UserContextLite(id="eval", role=role),
+            history=list(history),
+            last_route=last_route,
+            clarify_chain=clarify_chain,
+            clarify_total=clarify_total,
+            include_restricted=include_restricted,
+            eval_config=config if isinstance(config, dict) else {},
+        )
+        final = await _drive_to_end(state)
+
+        expected_ids, expected_title = _expected_target(case, turn)
+        row = _turn_row(final, turn, index=i, expected_ids=expected_ids,
+                        expected_title=expected_title)
+        turn_rows.append(row)
+
+        route = row["route"]
+        answer = final.get("answer") or ""
+        if not first_answer:
+            first_answer = answer
+
+        contexts = [render_chunk_block(c, idx)
+                    for idx, c in enumerate(final.get("evidence") or [], start=1)]
+        if (route == "knowledge" and not bool(final.get("refused"))
+                and answer and contexts):
+            samples.append({
+                "user_input": row["resolved_query"] or turn.get("question") or "",
+                "response": answer,
+                "retrieved_contexts": contexts,
+                "reference": turn.get("ground_truth") or None,
+            })
+            sample_map.append((result_index, i - 1))
+
+        # 与线上一致：进 history 的助手回答剥掉 [n]（生成节点也会再剥一次）
+        history.append(Message(role="user", content=turn.get("question") or ""))
+        history.append(Message(role="assistant",
+                               content=re.sub(r"\[\d+\]", "", answer)))
+        routes.append(route)
+        last_route = route
+
+    return {
+        "case_id": case["id"],
+        "metrics": {
+            "turns": turn_rows,
+            "turns_expected": len(turns),
+            "turns_completed": len(turn_rows),
+            "turns_with_reference": sum(
+                1 for t in turns if str(t.get("ground_truth") or "").strip()),
+            "ms": int((time.perf_counter() - t0) * 1000),
+        },
+        "answer": first_answer,
+        "question": case["question"],
+        "ground_truth": case.get("ground_truth"),
+        "retrieved_ids": [],
+        "unauthorized_hits": 0,
+    }
+
+
 async def _select_cases(conn, *, set_id: str | None, config: dict) -> list:
     """选题优先级（§5.5）。**分支顺序有意义，别调换。**
 
@@ -128,22 +292,9 @@ async def _select_cases(conn, *, set_id: str | None, config: dict) -> list:
         case_ids 给了      → WHERE id = ANY($1)                       ← 调试用
         case_type 给了     → WHERE case_type = $1                     ← ACL 对照实验用
         suite 给了         → 保持原 SQL，**不碰集合**                 ← 决策 22
-              'full'          → SELECT * FROM eval_cases               （全部 90 条）
-              'refusal_calib' → WHERE suite='refusal_calib'            （15 条）
-        都不给             → 全部                                     ← 兜底
 
-    ⚠️ **`suite` 路径一行 SQL 都不动**（决策 22）。现在 `suite='full'` 实际跑的是
-       **全部 90 条**（含那 15 条校准题）。按 `suite` 分组迁进两个集会让它变成 75 条，
-       而差的那 15 条多是**该拒答**的，混进来会拉低召回率 —— 一旦题量变了，
-       消融 8 行表的**历史行与新行题集不同**，表里的差值就不再只反映配置差异。
-
-    ⚠️ **`in_eval` 只对 `set_id` 路径生效。** `suite` 路径（CI 的 `eval-calibration`、
-       `run_ablation.py`）**不过滤** `in_eval`：那些入口的题集必须稳定 ——
-       有人在界面上随手关掉一条校准题，就把 CI 门禁的分母改了，
-       甚至可能直接空集导致 CI 变红。这种事不该由一次误点触发。
-
-       **代价如实写明**：同一道题，在批量评测页关掉后不再参与，但在消融/CI 里照样跑。
-       所以界面上那个开关的含义更接近「参与批量评测」。
+    ⚠️ `suite` 路径一行 SQL 都不动：`suite='full'` 跑的是全部题（含校准题），
+       一旦题量变了，消融表的历史行与新行题集就不同了。
     """
     if set_id:
         return list(await conn.fetch(
@@ -165,12 +316,7 @@ async def _select_cases(conn, *, set_id: str | None, config: dict) -> list:
 
 
 async def _record_progress(run_id: str, done: int, total: int | None = None) -> None:
-    """推进度（§3.4）。
-
-    `done_cases` / `total_cases` 只有一个消费方，但那一个是**必须**的：
-    「看报告」按钮在 `pending`/`running` 时置灰，悬停提示要写「评测还在跑（3/5）」。
-    没有这两个数，那个提示就只能写「完成后才能看」，用户完全不知道要等多久（§6.3）。
-    """
+    """推进度（§3.4）。"""
     async with db.tx() as conn:
         if total is None:
             await conn.execute("UPDATE eval_runs SET done_cases = $2 WHERE id = $1",
@@ -195,15 +341,16 @@ async def _run_eval(run_id: str) -> dict:
         async with db.tx() as conn:
             run = await conn.fetchrow("SELECT * FROM eval_runs WHERE id = $1", run_id)
             if run is None:
-                logger.error("评测 run 不存在", extra={"event": "eval.missing_run", "run_id": run_id})
+                logger.error("评测 run 不存在",
+                             extra={"event": "eval.missing_run", "run_id": run_id})
                 return {"status": "missing"}
             await conn.execute(
-                "UPDATE eval_runs SET status='running', started_at=now() WHERE id=$1", run_id)
+                "UPDATE eval_runs SET status='running', started_at=now() WHERE id=$1",
+                run_id)
 
         role = run["role"] or "student"
         include_restricted = bool(run["include_restricted"])
-        # ⚠️ 集合归属只在**列**上，`config` 里绝不带 `set_id`（§3.4）：
-        #    进了 config 字典就非空 → `switches()` 返回非 None → 又跑成纯向量基线。
+        dialogue_mode = run["dialogue_mode"] or "single"
         set_id = run["set_id"]
         config = run["config"] or {}
         if isinstance(config, str):
@@ -214,7 +361,6 @@ async def _run_eval(run_id: str) -> dict:
             visibility = await _load_visibility(conn)
 
         if not rows:
-            # 选到空集 → 直接标 failed，**不跑出一个空报告**（§5.5）
             error = ("这个评测集没有参与评测的用例"
                      if set_id else "no_cases")
             async with db.tx() as conn:
@@ -231,28 +377,32 @@ async def _run_eval(run_id: str) -> dict:
         results: list[dict] = []
         ragas_samples: list[dict] = []
         ragas_index: list[int] = []
+        sample_map: list[tuple[int, int]] = []
 
         for case in rows:
             case = dict(case)
-            state = new_state(
-                query=case["question"],
-                session_id=f"eval-{run_id[:8]}",
-                user=UserContextLite(id="eval", role=role),
-                history=[],
-                include_restricted=include_restricted,
-                eval_config=config if isinstance(config, dict) else {},
-            )
             t0 = time.perf_counter()
             with trace.trace_span("eval.case", layer="eval", level=logging.DEBUG,
-                                  case_id=case["id"]) as case_stage:
+                                  case_id=case["id"],
+                                  dialogue_mode=dialogue_mode) as case_stage:
                 try:
-                    final = await _drive_to_end(state)
+                    if dialogue_mode == "multi":
+                        result = await _run_multi_case(
+                            case, run_id=run_id, role=role,
+                            include_restricted=include_restricted, config=config,
+                            samples=ragas_samples, sample_map=sample_map,
+                            result_index=len(results))
+                    else:
+                        result = await _run_single_case(
+                            case, run_id=run_id, role=role,
+                            include_restricted=include_restricted, config=config,
+                            visibility=visibility, samples=ragas_samples,
+                            sample_index=len(results))
                 except Exception as e:  # noqa: BLE001 —— 单题失败不该拖垮整轮
                     logger.warning("评测用例执行失败：%s", e,
                                    extra={"event": "eval.case_failed",
-                                          "case_id": case["id"]})
-                    # ⚠️ 这里**必须带上 question / ground_truth 快照**：失败的那行不会有
-                    #    `metrics`，历史报告里的「问题」列就只能靠快照列填（§3.5）。
+                                          "case_id": case["id"],
+                                          "dialogue_mode": dialogue_mode})
                     results.append({"case_id": case["id"],
                                     "error": f"{type(e).__name__}: {e}",
                                     "question": case["question"],
@@ -260,56 +410,28 @@ async def _run_eval(run_id: str) -> dict:
                     case_stage.set(error=type(e).__name__)
                     await _record_progress(run_id, len(results))
                     continue
-                case_stage.set(route=final.get("route", ""))
+                case_stage.set(route=(result.get("metrics", {}).get("route")
+                                      or (result.get("metrics", {}).get("turns") or [{}])[0].get("route", "")))
             elapsed = int((time.perf_counter() - t0) * 1000)
-
-            metrics = _case_metrics(final, case, visibility, role)
-            metrics["ms"] = elapsed
-
-            answer = final.get("answer") or ""
-            # ★ 送 ragas 的上下文 = **模型看到的那份**：取 state 里的 `evidence`
-            #   （已裁剪、已重排、已编号），用 build_context 的同一个函数逐块渲染。
-            #   ⚠️ 原来是 `_rank_chunks()[:TOP_K]` 的裸 `c.text` —— 既不是编号顺序，
-            #   又丢了 `[n] 《文档名》 · 第 x 页` 头行。文档名（`documents.title`，
-            #   入库时默认取上传文件名的 stem）**正文里一个字都没有**：模型照头行
-            #   写的「根据《…》」在判官眼里成了无出处的话，忠实度被凭空扣掉
-            #   （实测那轮 4 条答案各少一个可验证说法）。
-            evidence = final.get("evidence") or []
-            contexts = [render_chunk_block(c, i)
-                        for i, c in enumerate(evidence, start=1)]
-            results.append({
-                "case_id": case["id"], "metrics": metrics, "answer": answer,
-                "retrieved_ids": [c.chunk_id for c in _rank_chunks(final)[:TOP_K]],
-                "unauthorized_hits": metrics["unauthorized_hits"],
-                # 快照（§3.5）：跑的时候把该题的问题与标准答案抄一份进来，
-                # 历史报告从此**自给自足**，不再需要 join `eval_cases`
-                "question": case["question"],
-                "ground_truth": case.get("ground_truth"),
-            })
+            result["metrics"]["ms"] = elapsed
+            if dialogue_mode == "single":
+                # 单轮 RAGAS 样本下标记的是 result 的下标
+                ragas_index.append(len(results))
+            results.append(result)
             await _record_progress(run_id, len(results))
 
-            # 有答案、有标准答案、**没拒答**才送 ragas。
-            # ⚠️ 拒答必须挡在这里：它在 faithfulness / answer_relevancy 上按构造
-            #    就是 0（回答里没有一个字来自上下文，也不是在回答这个问题），
-            #    送进去等于把「拒答率」混进「答案质量」的均值 —— 实测同一轮
-            #    answer_relevancy 10 题 0.5494、只看 6 道作答题 0.9157，
-            #    差的全是 4 道拒答题。拒答率由 `refused_count` / `refusal_rate` 单独报。
-            if (answer and case.get("ground_truth") and contexts
-                    and not metrics.get("refused")):
-                ragas_samples.append({
-                    "user_input": case["question"], "response": answer,
-                    "retrieved_contexts": contexts,
-                    "reference": case["ground_truth"],
-                })
-                ragas_index.append(len(results) - 1)
-
-        # ---- ragas 四项（隔离环境子进程，一次整批）----------------------
         ragas = await ragas_service.score_samples(ragas_samples) if ragas_samples else {
             "available": True, "ok": True, "rows": [], "means": {}, "errors": []}
-        for pos, row in zip(ragas_index, ragas.get("rows") or []):
-            results[pos]["metrics"].update({f"ragas_{k}": v for k, v in row.items()})
+        scored_rows = ragas.get("rows") or []
+        if dialogue_mode == "multi":
+            for (pos, turn_idx), row in zip(sample_map, scored_rows):
+                results[pos]["metrics"]["turns"][turn_idx].update(
+                    {f"ragas_{k}": v for k, v in row.items()})
+        else:
+            for pos, row in zip(ragas_index, scored_rows):
+                results[pos]["metrics"].update(
+                    {f"ragas_{k}": v for k, v in row.items()})
 
-        # ---- 落库 ------------------------------------------------------
         async with db.tx() as conn:
             for r in results:
                 await conn.execute(
@@ -322,13 +444,10 @@ async def _run_eval(run_id: str) -> dict:
                     r.get("answer") or "",
                     int(r.get("unauthorized_hits") or 0),
                     r.get("metrics") or {},
-                    # ⚠️ 这三列以前**被丢掉了**：原来只取 `r.get("metrics")`，
-                    #    而失败的那条记录根本没有 `metrics` 键 —— 于是库里所有失败题
-                    #    的「失败原因」都是空的，界面那一列永远是空白（§1.1③）。
                     r.get("question"), r.get("ground_truth"), r.get("error"),
                 )
 
-            summary = _aggregate(results, ragas)
+            summary = _aggregate(results, ragas, dialogue_mode)
             await conn.execute(
                 "UPDATE eval_runs SET status='done', finished_at=now(), metrics=$2, "
                 "done_cases=$3 WHERE id=$1",
@@ -343,9 +462,6 @@ async def _run_eval(run_id: str) -> dict:
         try:
             async with db.tx() as conn:
                 why = f"{type(e).__name__}: {e}"
-                # ⚠️ `error` **列**才是界面上「失败原因」列读的东西（§3.4）。
-                #    只塞 `metrics.error` 的话，界面显示「失败」但原因那格是空的 ——
-                #    实测库里 4 个 failed 轮次全是这样。两处都写。
                 await conn.execute(
                     "UPDATE eval_runs SET status='failed', finished_at=now(), metrics=$2, "
                     "error=$3 WHERE id=$1", run_id, {"error": why}, why)
@@ -354,15 +470,62 @@ async def _run_eval(run_id: str) -> dict:
         return {"status": "failed", "error": type(e).__name__}
 
 
-def _aggregate(results: list[dict], ragas: dict) -> dict:
+async def _run_single_case(case: dict, *, run_id: str, role: str,
+                           include_restricted: bool, config: dict,
+                           visibility: dict[str, set[str]], samples: list[dict],
+                           sample_index: int) -> dict:
+    """单轮模式：普通题跑 question；多轮题只跑 turns[0]。"""
+    turn = _first_turn(case)
+    question = turn.get("question") if turn else case["question"]
+    ground_truth = ((turn.get("ground_truth") if turn else None)
+                    or case.get("ground_truth"))
+    expected_ids, expected_title = _expected_target(case, turn)
+
+    state = new_state(
+        query=question,
+        session_id=f"eval-{run_id[:8]}",
+        user=UserContextLite(id="eval", role=role),
+        history=[],
+        include_restricted=include_restricted,
+        eval_config=config if isinstance(config, dict) else {},
+    )
+    final = await _drive_to_end(state)
+    metrics = _case_metrics(final, case, visibility, role,
+                            expected_ids=expected_ids,
+                            expected_title=expected_title)
+    metrics["dialogue_mode"] = "single"
+
+    answer = final.get("answer") or ""
+    contexts = [render_chunk_block(c, i)
+                for i, c in enumerate(final.get("evidence") or [], start=1)]
+    if (metrics.get("route") == "knowledge" and answer and contexts
+            and not metrics.get("refused")):
+        samples.append({
+            "user_input": final.get("resolved_query") or question,
+            "response": answer,
+            "retrieved_contexts": contexts,
+            "reference": ground_truth or None,
+        })
+    return {
+        "case_id": case["id"], "metrics": metrics, "answer": answer,
+        "retrieved_ids": [c.chunk_id for c in _rank_chunks(final)[:TOP_K]],
+        "unauthorized_hits": metrics["unauthorized_hits"],
+        "question": question,
+        "ground_truth": ground_truth,
+    }
+
+
+def _avg(ok: list[dict], key: str):
+    vals = [r["metrics"][key] for r in ok
+            if isinstance(r["metrics"].get(key), (int, float))
+            and not isinstance(r["metrics"].get(key), bool)]
+    return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def _aggregate(results: list[dict], ragas: dict,
+               dialogue_mode: str = "single") -> dict:
     """整轮汇总：自定义指标求均值 + ragas 四指标取均值。"""
     ok = [r for r in results if "metrics" in r]
-    n = len(ok) or 1
-
-    def _avg(key: str):
-        vals = [r["metrics"][key] for r in ok
-                if isinstance(r["metrics"].get(key), (int, float))]
-        return round(sum(vals) / len(vals), 4) if vals else None
 
     answered = [r for r in ok if not r["metrics"].get("refused")]
     with_gt = [r for r in ok if r["metrics"].get("rank") is not None
@@ -371,30 +534,22 @@ def _aggregate(results: list[dict], ragas: dict) -> dict:
     summary: dict[str, Any] = {
         "cases": len(results),
         "failed": len(results) - len(ok),
-        "recall_at_k": _avg("recall_at_k"),
-        "mrr": _avg("mrr"),
-        "avg_ms": _avg("ms"),
+        "recall_at_k": _avg(ok, "recall_at_k"),
+        "mrr": _avg(ok, "mrr"),
+        "avg_ms": _avg(ok, "ms"),
         "refused_count": sum(1 for r in ok if r["metrics"].get("refused")),
-        "unauthorized_hits": sum(int(r["metrics"].get("unauthorized_hits") or 0) for r in ok),
-        "uncited_ratio": _avg("uncited_ratio"),
-        "citation_invalid": sum(int(r["metrics"].get("citation_invalid") or 0) for r in ok),
-        # ragas 四指标（跑不起来时为 None，不假装有数）
+        "unauthorized_hits": sum(int(r["metrics"].get("unauthorized_hits") or 0)
+                                 for r in ok),
+        "uncited_ratio": _avg(ok, "uncited_ratio"),
+        "citation_invalid": sum(int(r["metrics"].get("citation_invalid") or 0)
+                                for r in ok),
         "ragas": ragas.get("means") or {},
         "ragas_available": bool(ragas.get("available")),
         "ragas_errors": ragas.get("errors") or [],
-        # ★ 上面四项均值**只算在作答（未拒答）的题上** —— 把真实分母记下来，
-        #   否则 6 题算出来的均值会被当成 10 题的读（报告页的结论句要念它）。
-        #   ⚠️ 数的是**真的算出了分的行**（至少一项非 None），不是返回的行数：
-        #   `tools/ragas_runner.py` 的单题失败**不删行**（NaN→None、保留该行，
-        #   只在该项**整列**都没算出来时才进 errors）—— 拿 `len(rows)` 当分母会
-        #   把全 None 行算成「有分」（评审实测 506f109f：63 行里 19 行全 None，
-        #   均值其实只算在 42–43 行上）。ragas 整批挂掉时 rows 是空的，
-        #   这里的 0 与「一个均值都没算出来」一致。
         "ragas_scored_cases": sum(
             1 for r in (ragas.get("rows") or [])
             if any(v is not None for v in r.values())),
     }
-    # 拒答率的分母按 §9.0 的 M4-D2 口径：**只数 route='knowledge' 的轮次**
     knowledge = [r for r in ok if r["metrics"].get("route") == "knowledge"]
     summary["knowledge_count"] = len(knowledge)
     summary["refusal_rate"] = (
@@ -402,4 +557,64 @@ def _aggregate(results: list[dict], ragas: dict) -> dict:
         if knowledge else None)
     summary["answered_count"] = len(answered)
     summary["scored_with_ground_truth"] = len(with_gt)
+
+    if dialogue_mode != "multi":
+        return summary
+
+    turns = [t for r in ok for t in (r["metrics"].get("turns") or [])]
+
+    def _mean(vals):
+        vals = [v for v in vals
+                if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    def _rate(key: str):
+        vals = [t[key] for t in turns if isinstance(t.get(key), bool)]
+        return _mean([1.0 if v else 0.0 for v in vals])
+
+    def _scored(turn: dict) -> bool:
+        return any(turn.get(f"ragas_{k}") is not None for k in RAGAS_KEYS)
+
+    scored_cases = sum(
+        1 for r in ok
+        if any(_scored(t) for t in (r["metrics"].get("turns") or [])))
+    scored_turns = sum(1 for t in turns if _scored(t))
+
+    summary.update({
+        "turns_total": sum(int(r["metrics"].get("turns_expected") or 0) for r in ok),
+        "turns_completed": sum(int(r["metrics"].get("turns_completed") or 0)
+                               for r in ok),
+        "turns_with_reference": sum(
+            int(r["metrics"].get("turns_with_reference") or 0) for r in ok),
+        "route_accuracy": _rate("route_ok"),
+        "clarify_accuracy": _rate("clarify_ok"),
+        "retrieval_hit_rate": _rate("retrieval_hit"),
+        "resolve_anchor_hit_rate": _rate("resolved_anchor_hit"),
+        "citation_support_rate": _mean(
+            [t.get("citation_support_rate") for t in turns]),
+        "unsupported_citations": sum(int(t.get("unsupported_citations") or 0)
+                                     for t in turns),
+        "unsupported_markers": sum(int(t.get("unsupported_markers") or 0)
+                                   for t in turns),
+        "ragas_scored_turns": scored_turns,
+        "ragas_scored_cases": scored_cases,
+        "ragas": {k: _mean([t.get(f"ragas_{k}") for t in turns])
+                  for k in RAGAS_KEYS},
+        "knowledge_count": sum(1 for t in turns if t.get("route") == "knowledge"),
+        "refused_count": sum(1 for t in turns if t.get("refused")),
+        "answered_count": sum(
+            1 for t in turns
+            if t.get("route") == "knowledge" and not t.get("refused")),
+    })
+    summary["refusal_rate"] = (
+        round(summary["refused_count"] / summary["knowledge_count"], 4)
+        if summary["knowledge_count"] else None)
+    summary["multi_turn"] = {
+        k: summary[k] for k in (
+            "turns_total", "turns_completed", "turns_with_reference",
+            "route_accuracy", "clarify_accuracy", "retrieval_hit_rate",
+            "resolve_anchor_hit_rate", "citation_support_rate",
+            "unsupported_citations", "unsupported_markers",
+        )
+    }
     return summary

@@ -339,6 +339,58 @@ async def test_config_label_matches_between_create_and_list(client, admin):
             await conn.execute("DELETE FROM eval_runs WHERE id=$1", run_id)
 
 
+async def test_dialogue_mode_defaults_to_single(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        await client.post(f"/api/admin/eval/sets/{s['id']}/cases",
+                          json={"question": "q", "ground_truth": "a"},
+                          headers=admin["headers"])
+        r = await client.post("/api/admin/eval/run",
+                              json={"set_id": s["id"], "role": "student"},
+                              headers=admin["headers"])
+        assert r.status_code == 202, r.text
+        row = await _run_row(r.json()["run_id"])
+        assert row["dialogue_mode"] == "single"
+        detail = await client.get(f"/api/admin/eval/runs/{r.json()['run_id']}",
+                                  headers=admin["headers"])
+        assert detail.json()["dialogue_mode"] == "single"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE set_id=$1", s["id"])
+        await _cleanup_set(s["id"])
+
+
+async def test_dialogue_mode_multi_is_stored_and_returned(client, admin):
+    s = await _new_set(client, admin)
+    try:
+        await client.post(f"/api/admin/eval/sets/{s['id']}/cases",
+                          json={"question": "q", "ground_truth": "a"},
+                          headers=admin["headers"])
+        r = await client.post("/api/admin/eval/run",
+                              json={"set_id": s["id"], "role": "student",
+                                    "dialogue_mode": "multi"},
+                              headers=admin["headers"])
+        assert r.status_code == 202, r.text
+        row = await _run_row(r.json()["run_id"])
+        assert row["dialogue_mode"] == "multi"
+        listed = await client.get("/api/admin/eval/runs", headers=admin["headers"])
+        item = next(x for x in listed.json()["items"]
+                    if x["run_id"] == r.json()["run_id"])
+        assert item["dialogue_mode"] == "multi"
+    finally:
+        async with db.tx() as conn:
+            await conn.execute("DELETE FROM eval_runs WHERE set_id=$1", s["id"])
+        await _cleanup_set(s["id"])
+
+
+async def test_dialogue_mode_rejects_unknown_value(client, admin):
+    r = await client.post("/api/admin/eval/run",
+                          json={"suite": "full", "role": "student",
+                                "dialogue_mode": "triple"},
+                          headers=admin["headers"])
+    assert r.status_code == 422
+
+
 async def test_run_on_missing_set_is_404(client, admin):
     r = await client.post("/api/admin/eval/run",
                           json={"set_id": "nope", "role": "student"},

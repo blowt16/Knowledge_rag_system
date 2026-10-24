@@ -31,6 +31,8 @@ export interface StartRunBody {
   suite?: 'full' | 'refusal_calib'
   role: 'student' | 'staff' | 'admin'
   include_restricted?: boolean
+  /** 执行模式：单轮只跑第一问；多轮对带 turns 的用例逐轮回放。 */
+  dialogue_mode?: 'single' | 'multi'
   /** 消融开关。**留空 = 线上完整链路**；带上任意键（含 `suite`）= 消融运行。 */
   config?: Record<string, boolean> | null
 }

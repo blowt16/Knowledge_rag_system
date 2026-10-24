@@ -34,8 +34,16 @@ function whyMissing(report: EvalReport | undefined): string {
     return errs ? `ragas 没跑起来（${errs}）` : 'ragas 没跑起来'
   }
   if (errs) return `部分指标没算出来：${errs}`
+  if (report?.dialogue_mode === 'multi') {
+    const ref = report.multi_turn?.turns_with_reference
+    if (typeof ref === 'number') {
+      return `这两项需要有逐轮标准答案；当前评测集只有 ${ref} 轮有答案`
+    }
+  }
   return '没有可评分的样本'
 }
+
+const fmtRate = (v: unknown) => (typeof v === 'number' ? v.toFixed(3) : '—')
 
 /** 卡片的中文名与**逐字**照抄参考图的提示语（§6.6 的表）。 */
 const CARD: Record<string, { label: string; en: string; badge: string; hint: string }> = {
@@ -80,6 +88,10 @@ export function ReportDialog({ detail, onClose }: {
   const cards = report?.metrics ?? []
   const composite = report?.composite_score ?? null
   const missingWhy = whyMissing(report)
+  const mode = detail.dialogue_mode ?? report?.dialogue_mode ?? 'single'
+  const multi = (mode === 'multi'
+    ? report?.multi_turn
+    : null) as Record<string, unknown> | null | undefined
 
   // 确保每次打开都从报告顶部开始：滚到顶 + 把焦点放到标题上。
   useEffect(() => {
@@ -110,6 +122,9 @@ export function ReportDialog({ detail, onClose }: {
         {/* 头一行：评测集 / 策略 / 用例数 / 综合得分（§6.6） */}
         <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
           <span>评测集：{detail.set_name ?? '—'}</span>
+          <span className="text-muted-foreground">
+            对话模式：{mode === 'multi' ? '多轮' : '单轮'}
+          </span>
           <span className="text-muted-foreground">策略：{detail.config_label}</span>
           {/* ⚠️ RAGAS 四项只算在**作答（未拒答）**的题上（拒答不送，见 eval/runner.py），
               所以分母必须和用例数并排摆着 —— 老轮次没有这个字段，就不显示。
@@ -117,8 +132,11 @@ export function ReportDialog({ detail, onClose }: {
               （单题判官失败的行值全 None、不算有分，各指标可以不同）。 */}
           <span className="text-muted-foreground">
             用例 {detail.total_cases ?? 0} 条
-            {typeof report?.ragas_scored_cases === 'number'
-              && `（RAGAS 打分 ${report.ragas_scored_cases} 条）`}
+            {typeof report?.ragas_scored_turns === 'number'
+              ? `（RAGAS 打分 ${report.ragas_scored_turns} 轮）`
+              : typeof report?.ragas_scored_cases === 'number'
+                ? `（RAGAS 打分 ${report.ragas_scored_cases} 条）`
+                : ''}
           </span>
           {detail.status !== 'done' && (
             <span className="text-amber-700 dark:text-amber-500">
@@ -136,6 +154,21 @@ export function ReportDialog({ detail, onClose }: {
           <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm">
             这一轮失败了：{detail.error}
           </p>
+        )}
+
+        {/* 多轮结构指标（§6.5）：四张卡上方单独一行 */}
+        {multi && (
+          <div className="grid grid-cols-2 gap-2 rounded-md bg-secondary/40 p-3 text-xs sm:grid-cols-3 lg:grid-cols-6">
+            <span>路由准确率 <b>{fmtRate(multi.route_accuracy)}</b></span>
+            <span>澄清准确率 <b>{fmtRate(multi.clarify_accuracy)}</b></span>
+            <span>检索命中率 <b>{fmtRate(multi.retrieval_hit_rate)}</b></span>
+            <span>消解锚点命中率 <b>{fmtRate(multi.resolve_anchor_hit_rate)}</b></span>
+            <span>引用支持率 <b>{fmtRate(multi.citation_support_rate)}</b></span>
+            <span>
+              不支持引用 <b>{Number(multi.unsupported_markers ?? 0)}</b> 处 /{' '}
+              <b>{Number(multi.unsupported_citations ?? 0)}</b> 句
+            </span>
+          </div>
         )}
 
         {/* 四张卡：浅灰底、圆角；中文名粗体 + 英文名灰色小字压在下面 */}
@@ -177,7 +210,10 @@ export function ReportDialog({ detail, onClose }: {
                   {missing
                     ? missingWhy
                     : `${c.passed ? '达标' : '未达标'}（≥ ${c.threshold}`
-                      + (typeof c.scored_cases === 'number' ? `，${c.scored_cases} 题有分` : '')
+                      + (typeof (c.scored_samples ?? c.scored_cases) === 'number'
+                        ? `，${c.scored_samples ?? c.scored_cases} ${
+                          c.sample_unit === 'turn' ? '轮' : '题'}有分`
+                        : '')
                       + '）'}
                 </p>
               </div>
@@ -204,6 +240,7 @@ export function ReportDialog({ detail, onClose }: {
                 <th className="py-2 pr-3">问题</th>
                 <th className="py-2 pr-3">标准答案</th>
                 <th className="py-2 pr-3">生成的答案</th>
+                <th className="whitespace-nowrap py-2 pr-3">轮数</th>
                 {/* ⚠️ 这六列的表头必须 `whitespace-nowrap`：表格是 `w-full`，
                     三个文字列吃掉大部分宽度之后，指标列只剩 40 多像素 ——
                     「忠实度」会被拆成**一列一个字**竖着排。让表头撑开列宽，
@@ -223,6 +260,7 @@ export function ReportDialog({ detail, onClose }: {
                     {row.ground_truth || '—'}
                   </td>
                   <td className="max-w-md py-2 pr-3 whitespace-pre-wrap">{row.answer || '—'}</td>
+                  <td className="py-2 pr-3">{row.turns?.length || '—'}</td>
                   {COLUMNS.map(c => (
                     <td key={String(c.key)} className="py-2 pr-3">{fmt(row[c.key])}</td>
                   ))}

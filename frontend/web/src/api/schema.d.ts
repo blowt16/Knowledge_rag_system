@@ -1107,10 +1107,27 @@ export interface components {
             /** Has More */
             has_more: boolean;
         };
+        /** EvalTurn */
+        EvalTurn: {
+            /** Question */
+            question: string;
+            /** Ground Truth */
+            ground_truth?: string | null;
+            /** Expected Route */
+            expected_route?: "chat" | "clarify" | "knowledge" | null;
+            /** Should Clarify */
+            should_clarify?: (0 | 1) | null;
+            /** Expected Document */
+            expected_document?: string | null;
+            /** Resolved Must Contain Any */
+            resolved_must_contain_any?: string[] | null;
+            /** Note */
+            note?: string | null;
+        };
         /** EvalCaseCreate */
         EvalCaseCreate: {
             /** Question */
-            question: string;
+            question?: string | null;
             /** Ground Truth */
             ground_truth?: string | null;
             /**
@@ -1120,6 +1137,61 @@ export interface components {
             in_eval: boolean;
             /** Note */
             note?: string | null;
+            /**
+             * Case Type
+             * @default factual
+             */
+            case_type: "factual" | "multi_turn";
+            /** Turns */
+            turns?: components["schemas"]["EvalTurn"][] | null;
+        };
+        /** EvalCaseDetail */
+        EvalCaseDetail: {
+            /** Id */
+            id: string;
+            /** Question */
+            question: string;
+            /** Ground Truth */
+            ground_truth?: string | null;
+            /** Case Type */
+            case_type: string;
+            /**
+             * Suite
+             * @default full
+             */
+            suite: string;
+            /**
+             * Source
+             * @default manual
+             */
+            source: string;
+            /**
+             * In Eval
+             * @default true
+             */
+            in_eval: boolean;
+            /** Note */
+            note?: string | null;
+            /** Expected Doc Ids */
+            expected_doc_ids?: string[] | null;
+            /** Source Document Id */
+            source_document_id?: string | null;
+            /** Source Chunk Id */
+            source_chunk_id?: string | null;
+            /** Source Page */
+            source_page?: number | null;
+            /**
+             * Turn Count
+             * @default 0
+             */
+            turn_count: number;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Turns
+             * @default []
+             */
+            turns: components["schemas"]["EvalTurn"][];
         };
         /** EvalCaseItem */
         EvalCaseItem: {
@@ -1156,6 +1228,11 @@ export interface components {
             source_chunk_id?: string | null;
             /** Source Page */
             source_page?: number | null;
+            /**
+             * Turn Count
+             * @default 0
+             */
+            turn_count: number;
             /** Created At */
             created_at?: string | null;
         };
@@ -1216,6 +1293,16 @@ export interface components {
             source_snippet?: string | null;
             /** Highlight */
             highlight?: number[] | null;
+            /**
+             * Turns
+             * @default []
+             */
+            turns: components["schemas"]["EvalTurn"][];
+            /**
+             * Turn Highlights
+             * @default []
+             */
+            turn_highlights: (number[] | null)[];
         };
         /** EvalCompareResponse */
         EvalCompareResponse: {
@@ -1259,6 +1346,11 @@ export interface components {
              * @default []
              */
             ragas_errors: string[];
+            /**
+             * Dialogue Mode
+             * @default single
+             */
+            dialogue_mode: "single" | "multi";
         };
         /** EvalGenerateCaseOut */
         EvalGenerateCaseOut: {
@@ -1268,6 +1360,11 @@ export interface components {
             question: string;
             /** Ground Truth */
             ground_truth?: string | null;
+            /**
+             * Turn Count
+             * @default 1
+             */
+            turn_count: number;
         };
         /** EvalGenerateRequest */
         EvalGenerateRequest: {
@@ -1278,6 +1375,23 @@ export interface components {
              * @default 5
              */
             count: number;
+            /**
+             * Mode
+             * @default single
+             */
+            mode: "single" | "multi";
+            /**
+             * Turns
+             * @default 3
+             */
+            turns: number;
+            /**
+             * Window
+             * @default 3
+             */
+            window: number;
+            /** Instruction */
+            instruction?: string | null;
         };
         /** EvalGenerateResponse */
         EvalGenerateResponse: {
@@ -1326,6 +1440,17 @@ export interface components {
             ragas_errors: string[];
             /** Ragas Scored Cases */
             ragas_scored_cases?: number | null;
+            /** Ragas Scored Turns */
+            ragas_scored_turns?: number | null;
+            /**
+             * Dialogue Mode
+             * @default single
+             */
+            dialogue_mode: "single" | "multi";
+            /** Multi Turn */
+            multi_turn?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** EvalReportCase */
         EvalReportCase: {
@@ -1352,6 +1477,13 @@ export interface components {
             score?: number | null;
             /** Error */
             error?: string | null;
+            /**
+             * Turns
+             * @default []
+             */
+            turns: {
+                [key: string]: unknown;
+            }[];
         };
         /** EvalReportMetric */
         EvalReportMetric: {
@@ -1368,6 +1500,13 @@ export interface components {
             passed: boolean;
             /** Scored Cases */
             scored_cases?: number | null;
+            /** Scored Samples */
+            scored_samples?: number | null;
+            /**
+             * Sample Unit
+             * @default case
+             */
+            sample_unit: "case" | "turn";
         };
         /** EvalRunCreated */
         EvalRunCreated: {
@@ -1423,6 +1562,11 @@ export interface components {
             error?: string | null;
             /** Duration Ms */
             duration_ms?: number | null;
+            /**
+             * Dialogue Mode
+             * @default single
+             */
+            dialogue_mode: "single" | "multi";
             report?: components["schemas"]["EvalReport"] | null;
             /**
              * Cases
@@ -1526,6 +1670,11 @@ export interface components {
             error?: string | null;
             /** Duration Ms */
             duration_ms?: number | null;
+            /**
+             * Dialogue Mode
+             * @default single
+             */
+            dialogue_mode: "single" | "multi";
         };
         /** EvalSetCreate */
         EvalSetCreate: {

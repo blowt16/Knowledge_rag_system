@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+DialogueMode = Literal["single", "multi"]
+MetricUnit = Literal["case", "turn"]
 
 
 class EvalRunRequest(BaseModel):
@@ -27,6 +30,9 @@ class EvalRunRequest(BaseModel):
     config: dict[str, Any] | None = None
     #: 只跑指定的用例（调试用）；给了就忽略 suite 的筛选
     case_ids: list[str] | None = None
+    #: **执行模式**：单轮只跑第一问；多轮对带 turns 的用例逐轮回放。
+    #: 不放进 `config` —— 非空 config 会被判成消融运行。
+    dialogue_mode: DialogueMode = "single"
 
 
 class EvalRunCreated(BaseModel):
@@ -65,6 +71,8 @@ class EvalRunSummary(BaseModel):
     error: str | None = None
     #: `finished_at - started_at`，**现算不存列**（少一个要同步的字段）
     duration_ms: int | None = None
+    #: 执行模式；老 run 没有该列时默认 single
+    dialogue_mode: DialogueMode = "single"
 
 
 class EvalRunList(BaseModel):
@@ -87,6 +95,10 @@ class EvalReportMetric(BaseModel):
     #: 会保留、值全是 None（`tools/ragas_runner.py`），各指标的样本数可以不一样
     #: （评审实测 506f109f：召回/精度/忠实度 42、相关性 43）。老轮次没有这个字段。
     scored_cases: int | None = None
+    #: 该卡的均值**实际算在几个样本上**（单轮=题，多轮=轮）
+    scored_samples: int | None = None
+    #: 样本单位；前端据此决定念「题有分」还是「轮有分」
+    sample_unit: MetricUnit = "case"
 
 
 class EvalReportCase(BaseModel):
@@ -102,6 +114,8 @@ class EvalReportCase(BaseModel):
     score: float | None = None
     #: **只有真跑挂了才填**，拒答不算失败（决策 20）
     error: str | None = None
+    #: 多轮下钻：每轮的结构指标与 ragas_*（第一版前端不强制展开）
+    turns: list[dict] = []
 
 
 class EvalReport(BaseModel):
@@ -116,6 +130,11 @@ class EvalReport(BaseModel):
     #: 值全 None 的行也不算）。老轮次没有 → `None`。前端拿它与「用例 N 条」并排
     #: 显示 —— 6 题的均值不能被当成 10 题的读。各卡片各自的计数见 `EvalReportMetric`。
     ragas_scored_cases: int | None = None
+    #: 多轮：有分的轮次数（分母口径见 `sample_unit`）
+    ragas_scored_turns: int | None = None
+    dialogue_mode: DialogueMode = "single"
+    #: 多轮结构指标（turns_total / route_accuracy / ...）；单轮为 None
+    multi_turn: dict | None = None
 
 
 class EvalRunDetail(EvalRunSummary):
@@ -151,6 +170,17 @@ class EvalSetPatch(BaseModel):
     description: str | None = None
 
 
+class EvalTurn(BaseModel):
+    """多轮用例的一轮（spec §7.1）。"""
+    question: str = Field(min_length=1)
+    ground_truth: str | None = None
+    expected_route: Literal["chat", "clarify", "knowledge"] | None = None
+    should_clarify: Literal[0, 1] | None = None
+    expected_document: str | None = None
+    resolved_must_contain_any: list[str] | None = None
+    note: str | None = None
+
+
 class EvalCaseItem(BaseModel):
     id: str
     question: str
@@ -164,9 +194,16 @@ class EvalCaseItem(BaseModel):
     source_document_id: str | None = None
     source_chunk_id: str | None = None
     source_page: int | None = None
+    #: 多轮题轮数；单轮为 0
+    turn_count: int = 0
     #: ⚠️ 列表里**不回** `source_snippet` 正文：一段几百字 × 每页 20 条太占带宽，
     #: 「核对标准答案」弹窗按需走 `GET /cases/{id}/source` 单取。
     created_at: datetime | None = None
+
+
+class EvalCaseDetail(EvalCaseItem):
+    """编辑弹窗用：列表不返回整段 `turns`，详情返回。"""
+    turns: list[EvalTurn] = []
 
 
 class EvalCasePage(BaseModel):
@@ -180,11 +217,13 @@ class EvalCasePatch(BaseModel):
     """可改的列（§5.2）。
 
     ⚠️ **没有** `source` / `set_id` / `source_*` —— 改了就没有「来源」可言了。
+    ⚠️ `case_type` 不允许改；多轮题的 `question` 由 `turns[0]` 同步。
     """
     question: str | None = Field(default=None, min_length=1)
     ground_truth: str | None = None
     in_eval: bool | None = None
     note: str | None = None
+    turns: list[EvalTurn] | None = None
 
 
 class EvalCaseSource(BaseModel):
@@ -198,25 +237,54 @@ class EvalCaseSource(BaseModel):
     #: 标准答案在 `source_snippet` 里的字符区间 `[start, end)`；对不上是 `null`
     #: —— 那往往是**文档更新过了**（§8.3）
     highlight: list[int] | None = None
+    #: 多轮题逐轮答案与各自在窗口文本里的高亮
+    turns: list[EvalTurn] = []
+    turn_highlights: list[list[int] | None] = []
 
 
 class EvalCaseCreate(BaseModel):
-    question: str = Field(min_length=1)
+    #: 多轮题的 `question` 由 `turns[0]` 派生，前端不用填两份
+    question: str | None = None
     ground_truth: str | None = None
     in_eval: bool = True
     note: str | None = None
+    case_type: Literal["factual", "multi_turn"] = "factual"
+    turns: list[EvalTurn] | None = None
+
+    @model_validator(mode="after")
+    def _derive_question(self):
+        if self.case_type == "multi_turn":
+            if not self.turns or len(self.turns) < 2:
+                raise ValueError("多轮用例至少需要 2 轮")
+            self.question = self.turns[0].question.strip()
+            self.ground_truth = None
+        else:
+            if self.turns:
+                raise ValueError("单轮用例不能带 turns")
+            if not (self.question or "").strip():
+                raise ValueError("问题不能为空")
+        return self
 
 
 class EvalGenerateRequest(BaseModel):
     document_id: str
     #: 条数**是目标不是保证**（决策 18）；服务端夹到 1..10
     count: int = 5
+    #: 单轮只出单轮题；多轮按相邻窗口出整段对话
+    mode: Literal["single", "multi"] = "single"
+    #: 目标轮数（不是保证）。模型返回 2~4 轮都接受。
+    turns: int = Field(default=3, ge=2, le=4)
+    #: 窗口 chunk 数
+    window: int = Field(default=3, ge=2, le=3)
+    #: 管理员额外要求：只影响选题与问法，不覆盖硬校验
+    instruction: str | None = Field(default=None, max_length=500)
 
 
 class EvalGenerateCaseOut(BaseModel):
     id: str
     question: str
     ground_truth: str | None = None
+    turn_count: int = 1
 
 
 class EvalGenerateResponse(BaseModel):
@@ -242,6 +310,8 @@ class EvalCompareRow(BaseModel):
     #: 前端据此在表下给提示（§4.3.1.4）
     ragas_available: bool | None = None
     ragas_errors: list[str] = []
+    #: 单轮/多轮混排时提示分母不同
+    dialogue_mode: DialogueMode = "single"
 
 
 class EvalCompareResponse(BaseModel):

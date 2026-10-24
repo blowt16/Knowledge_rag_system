@@ -42,6 +42,11 @@ const METRIC_LABEL: Record<string, string> = {
   refused_count: '拒答题数',
   scored_with_ground_truth: '有参考答案题数',
   ragas_scored_cases: 'RAGAS 打分题数',
+  ragas_scored_turns: 'RAGAS 打分轮数',
+  citation_support_rate: '引用支持率',
+  unsupported_markers: '不支持引用(处)',
+  unsupported_citations: '不支持句数',
+  turns_total: '轮数',
   faithfulness: 'Faithfulness',
   answer_relevancy: 'Answer Relevancy',
   context_precision: 'Context Precision',
@@ -258,6 +263,7 @@ export default function EvalAblationPage() {
                   <tr>
                     <th className="w-8 py-2"></th>
                     <th className="py-2">配置</th>
+                    <th className="py-2">模式</th>
                     <th className="py-2">角色</th>
                     <th className="py-2">状态</th>
                     <th className="py-2">Recall@5</th>
@@ -273,6 +279,7 @@ export default function EvalAblationPage() {
                                onChange={() => toggle(r.run_id)} />
                       </td>
                       <td className="py-2">{r.config_label}</td>
+                      <td className="py-2">{r.dialogue_mode === 'multi' ? '多轮' : '单轮'}</td>
                       <td className="py-2">{r.role}</td>
                       <td className="py-2">
                         <span className={`rounded px-1.5 py-0.5 text-xs ${
@@ -305,6 +312,7 @@ export default function EvalAblationPage() {
               <thead className="text-left text-foreground [&_th]:text-[15px] [&_th]:font-semibold">
                 <tr>
                   <th className="sticky left-0 z-10 bg-card py-2 pr-3 whitespace-nowrap">配置</th>
+                  <th className="py-2 pr-3 whitespace-nowrap">模式</th>
                   {compare.metrics.map(m => (
                     <th key={m} className="py-2 pr-3 whitespace-nowrap">{METRIC_LABEL[m] ?? m}</th>
                   ))}
@@ -315,6 +323,9 @@ export default function EvalAblationPage() {
                   <tr key={row.run_id} className="border-t border-border">
                     <td className="sticky left-0 z-10 bg-card py-2 pr-3 whitespace-nowrap">
                       {row.config_label}
+                    </td>
+                    <td className="py-2 pr-3 whitespace-nowrap">
+                      {row.dialogue_mode === 'multi' ? '多轮' : '单轮'}
                     </td>
                     {compare.metrics.map(m => (
                       <td key={m} className="py-2 pr-3 whitespace-nowrap">
@@ -332,6 +343,11 @@ export default function EvalAblationPage() {
               ⚠️ ragas 有跑间随机性：同一样本两次跑实测能差到 <b>0.18</b>。
               比这还小的差值，不要当成结论。
             </p>
+            {new Set((compare.runs ?? []).map(r => r.dialogue_mode)).size > 1 && (
+              <p className="mt-2 text-xs text-amber-700 dark:text-amber-500">
+                单轮按题、多轮按轮，分母不同，四项分数不要直接横比。
+              </p>
+            )}
             {ragasIssues.length > 0 && (
               <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">
                 <p className="font-medium">这些轮次的 ragas 没算全，四项指标是空的：</p>

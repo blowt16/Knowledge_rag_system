@@ -293,11 +293,11 @@ async def start_run(payload: EvalRunRequest, user=AdminUser) -> EvalRunCreated:
 
         await conn.execute(
             """INSERT INTO eval_runs (id, name, config, role, include_restricted,
-                                      status, set_id, set_name)
-               VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)""",
+                                      status, set_id, set_name, dialogue_mode)
+               VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8)""",
             run_id, payload.name, cfg,
             payload.role, 1 if payload.include_restricted else 0,
-            payload.set_id, set_name)
+            payload.set_id, set_name, payload.dialogue_mode)
 
     task = asyncio.create_task(runner.run_eval(run_id))
     _TASKS.add(task)
@@ -321,7 +321,8 @@ async def list_runs(page: int = Query(1, ge=1),
         total = await conn.fetchval("SELECT count(*) FROM eval_runs")
         rows = await conn.fetch(
             """SELECT id, name, config, role, include_restricted, status, metrics,
-                      started_at, finished_at, set_name, total_cases, done_cases, error
+                      started_at, finished_at, set_name, total_cases, done_cases, error,
+                      dialogue_mode
                  FROM eval_runs
                 ORDER BY COALESCE(started_at, now()) DESC, id
                 LIMIT $1 OFFSET $2""", page_size, offset)
@@ -339,6 +340,7 @@ async def list_runs(page: int = Query(1, ge=1),
             "set_name": r["set_name"], "total_cases": r["total_cases"],
             "done_cases": r["done_cases"] or 0, "error": r["error"],
             "duration_ms": report.duration_ms(dict(r)),
+            "dialogue_mode": r["dialogue_mode"] or "single",
         })
     return EvalRunList(items=items, total=total, page=page, page_size=page_size)
 
@@ -370,6 +372,7 @@ async def get_run(run_id: str, user=AdminUser) -> EvalRunDetail:
         set_name=run["set_name"], total_cases=run["total_cases"],
         done_cases=run["done_cases"] or 0, error=run["error"],
         duration_ms=report.duration_ms(dict(run)),
+        dialogue_mode=run["dialogue_mode"] or "single",
         report=built["report"], cases=built["cases"],
     )
 
@@ -423,7 +426,8 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
 
     async with db.tx() as conn:
         rows = await conn.fetch(
-            "SELECT id, config, metrics, status FROM eval_runs WHERE id = ANY($1::text[])", ids)
+            """SELECT id, config, metrics, status, dialogue_mode
+                 FROM eval_runs WHERE id = ANY($1::text[])""", ids)
 
     by_id = {r["id"]: r for r in rows}
     missing = [i for i in ids if i not in by_id]
@@ -436,8 +440,10 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
     #    就是错的 —— 分母得看得见（口径见 eval/report.py）
     preferred = ["recall_at_k", "mrr", "avg_ms", "refusal_rate",
                  "unauthorized_hits", "uncited_ratio", "citation_invalid",
-                 "cases", "failed", "answered_count", "knowledge_count",
-                 "ragas_scored_cases"]
+                 "citation_support_rate", "unsupported_markers",
+                 "unsupported_citations", "cases", "failed", "answered_count",
+                 "knowledge_count", "ragas_scored_cases", "ragas_scored_turns",
+                 "turns_total"]
     ragas_keys = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     # ⚠️ 这三个不是指标，**不能当矩阵列**：`ragas` 是嵌套子字典（下面拍平进 values），
     #    `ragas_available` 恒为 true、`ragas_errors` 是列表 —— 当列只是噪声。
@@ -461,7 +467,8 @@ async def compare(run_ids: str = Query(..., description="逗号分隔的 run_id"
         runs.append({"run_id": i, "config_label": eval_config.label(cfg),
                      "config": cfg, "status": r["status"], "values": values,
                      "ragas_available": m.get("ragas_available"),
-                     "ragas_errors": m.get("ragas_errors") or []})
+                     "ragas_errors": m.get("ragas_errors") or [],
+                     "dialogue_mode": r["dialogue_mode"] or "single"})
 
     # ragas 四项排最前：指标全集十几个，一屏放不下必定横向滚动，
     # 排末尾等于默认看不见（§4.3.1.4 的消融表就该先看这几列）

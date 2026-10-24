@@ -350,3 +350,81 @@ def test_short_errors_are_still_shown_verbatim():
     """短错误照原样显示 —— 不能一律截断，那样就查不出东西了。"""
     out = report.build(_run(available=False, errors=["ragas 隔离环境不存在"]), [])
     assert "ragas 隔离环境不存在" in out["report"]["verdict"]
+
+
+# ============================================================
+# 多轮：按轮聚合（§6.5）
+# ============================================================
+
+def _turn(idx, **ragas):
+    return {"turn": idx, "question": f"q{idx}",
+            **{f"ragas_{k}": v for k, v in ragas.items()}}
+
+
+def _multi_run(*, scored_turns=None, turns_total=4, turns_with_reference=2):
+    metrics = {"cases": 1, "ragas_available": True, "ragas_errors": [],
+               "multi_turn": {"turns_total": turns_total,
+                              "turns_completed": turns_total,
+                              "turns_with_reference": turns_with_reference},
+               "ragas_scored_turns": scored_turns}
+    return {"metrics": metrics, "dialogue_mode": "multi"}
+
+
+def _multi_case(turns):
+    return {"case_id": "c1", "question": "q", "ground_truth": None, "answer": "a",
+            "error": None, "metrics": {"turns": turns}}
+
+
+def test_multi_mode_cards_average_per_turn():
+    case = _multi_case([
+        _turn(1, faithfulness=1.0, answer_relevancy=0.8,
+              context_precision=None, context_recall=None),
+        _turn(2, faithfulness=0.5, answer_relevancy=0.6,
+              context_precision=None, context_recall=None),
+    ])
+    out = report.build(_multi_run(scored_turns=2), [case])
+    cards = {c["key"]: c for c in out["report"]["metrics"]}
+    assert cards["faithfulness"]["score"] == 0.75
+    assert cards["faithfulness"]["scored_samples"] == 2
+    assert cards["faithfulness"]["sample_unit"] == "turn"
+    assert cards["context_recall"]["score"] is None
+    assert out["report"]["dialogue_mode"] == "multi"
+    assert out["report"]["multi_turn"]["turns_total"] == 4
+    assert out["report"]["ragas_scored_turns"] == 2
+
+
+def test_multi_mode_per_case_row_uses_non_null_turn_mean():
+    case = _multi_case([
+        _turn(1, faithfulness=1.0, answer_relevancy=0.8,
+              context_precision=None, context_recall=None),
+        _turn(2, faithfulness=0.5, answer_relevancy=0.6,
+              context_precision=None, context_recall=None),
+    ])
+    out = report.build(_multi_run(), [case])
+    row = out["cases"][0]
+    assert row["faithfulness"] == 0.75
+    assert row["answer_relevancy"] == 0.7
+    assert row["context_precision"] is None
+    assert row["score"] is None
+    assert len(row["turns"]) == 2
+
+
+def test_multi_verdict_counts_turns():
+    case = _multi_case([
+        _turn(1, faithfulness=0.9, answer_relevancy=0.9,
+              context_precision=0.9, context_recall=0.9),
+    ])
+    out = report.build(
+        _multi_run(scored_turns=1, turns_total=3, turns_with_reference=1), [case])
+    assert "轮有分" in out["report"]["verdict"]
+    assert "题有分" not in out["report"]["verdict"]
+
+
+def test_multi_verdict_explains_missing_context_metrics():
+    case = _multi_case([
+        _turn(1, faithfulness=0.9, answer_relevancy=0.9),
+    ])
+    verdict = report.build(
+        _multi_run(scored_turns=1, turns_total=3, turns_with_reference=0),
+        [case])["report"]["verdict"]
+    assert "逐轮标准答案" in verdict

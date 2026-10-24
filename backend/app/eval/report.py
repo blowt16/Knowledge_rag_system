@@ -105,25 +105,47 @@ def _mean(values: list[float]) -> float | None:
 
 
 def build(run_row: dict, case_rows: list[dict]) -> dict:
-    """组装 `GET /runs/{id}` 的 `report` 块与逐题明细。"""
+    """组装 `GET /runs/{id}` 的 `report` 块与逐题明细。
+
+    单轮：按题聚合（与改造前一致）。
+    多轮：四张卡按**轮**摊平求平均；逐题行先按用例把各轮 `ragas_*` 求非空均值，
+    否则逐题表只有空值。
+    """
     metrics = _loads(run_row.get("metrics")) if run_row.get("metrics") else {}
+    mode = run_row.get("dialogue_mode") or "single"
+    multi = metrics.get("multi_turn") if mode == "multi" else None
     available = metrics.get("ragas_available")
     errors = list(metrics.get("ragas_errors") or [])
-    # ★ RAGAS 四张卡的**分母**：均值只算在作答（未拒答）的题上，拒答不送 ragas。
-    #   老轮次没有这个键 → `None`，结论句就不念分母（历史数据照旧口径）。
-    scored = _count(metrics.get("ragas_scored_cases"))
-    cases = _count(metrics.get("cases"))
 
-    rows = [{"case_id": c.get("case_id"),
-             "question": c.get("question"),
-             "ground_truth": c.get("ground_truth"),
-             "answer": c.get("answer") or "",
-             # ⚠️ **只有真跑挂了才填**（决策 20）。拒答不算失败 ——
-             #    「系统正确地说了不知道」是个正常结果，而且「生成的答案」那列
-             #    已经把原因写着了。所以这一列大多数时候是空的，这是对的。
-             "error": c.get("error"),
-             **_case_values(c)}
-            for c in case_rows]
+    # ★ RAGAS 四张卡的**分母**：均值只算在作答（未拒答）的样本上。
+    #   单轮单位是题；多轮单位是轮。老轮次没有这些键 → `None`，结论句不念分母。
+    scored_cases = _count(metrics.get("ragas_scored_cases"))
+    scored_turns = _count(metrics.get("ragas_scored_turns"))
+    total_cases = _count(metrics.get("cases"))
+    total_turns = _count((multi or {}).get("turns_total"))
+
+    rows = []
+    for c in case_rows:
+        c_metrics = _loads(c.get("metrics"))
+        turns = c_metrics.get("turns") or []
+        if mode == "multi":
+            values: dict[str, float | None] = {}
+            for key in METRIC_KEYS:
+                nums = [_number(t.get(f"ragas_{key}")) for t in turns]
+                values[key] = _mean([v for v in nums if v is not None])
+        else:
+            values = _case_values(c)
+        rows.append({
+            "case_id": c.get("case_id"),
+            "question": c.get("question"),
+            "ground_truth": c.get("ground_truth"),
+            "answer": c.get("answer") or "",
+            # ⚠️ **只有真跑挂了才填**（决策 20）。拒答不算失败 ——
+            #    「系统正确地说了不知道」是个正常结果。
+            "error": c.get("error"),
+            "turns": turns,
+            **values,
+        })
 
     for row in rows:
         four = [row[key] for key in METRIC_KEYS]
@@ -133,8 +155,22 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
 
     cards = []
     for key in METRIC_KEYS:
-        scores = [r[key] for r in rows if r[key] is not None]
-        score = _mean(scores)
+        if mode == "multi":
+            samples = [
+                _number(t.get(f"ragas_{key}"))
+                for r in rows for t in r["turns"]
+            ]
+            samples = [v for v in samples if v is not None]
+            scored_cases_for_key = sum(
+                1 for r in rows
+                if any(_number(t.get(f"ragas_{key}")) is not None
+                       for t in r["turns"]))
+            unit = "turn"
+        else:
+            samples = [r[key] for r in rows if r[key] is not None]
+            scored_cases_for_key = len(samples)
+            unit = "case"
+        score = _mean(samples)
         cards.append({
             "key": key,
             "score": score,
@@ -142,30 +178,36 @@ def build(run_row: dict, case_rows: list[dict]) -> dict:
             # 缺项时 `passed` 只能是 False —— 但它没有「没达标」的意思，
             # 前端在 `score is None` 时显示「—」而不是红色的「未达标」。
             "passed": score is not None and score >= THRESHOLDS[key],
-            # ★ 这张卡的均值**实际算在几道题上**。与整轮的 `ragas_scored_cases`
-            #   （本轮有几道题拿到了分）不是一回事：单题判官失败时那一行保留、
-            #   值全 None（`tools/ragas_runner.py` 的 NaN→None），各指标可以不同
-            #   （评审实测 506f109f：召回/精度/忠实度 42、相关性 43，整轮计数 44）。
-            #   卡片上写着、结论句念范围 —— 均值旁边必须是它自己的分母。
-            "scored_cases": len(scores),
+            # ★ 这张卡的均值**实际算在几个样本上**（单轮=题，多轮=轮）。
+            #   与整轮 `ragas_scored_cases` 不是一回事：单题判官失败时那一行保留、
+            #   值全 None（`tools/ragas_runner.py` 的 NaN→None），各指标可以不同。
+            "scored_cases": scored_cases_for_key,
+            "scored_samples": len(samples),
+            "sample_unit": unit,
         })
 
     # **四项齐全才出综合得分**；缺任何一项显示「—」并说明缺哪项
     composite = _mean([c["score"] for c in cards]) \
         if all(c["score"] is not None for c in cards) else None
 
+    scored_for_verdict = scored_turns if mode == "multi" else scored_cases
+    total_for_verdict = total_turns if mode == "multi" else total_cases
+
     return {
         "report": {
             "composite_score": composite,
             "metrics": cards,
-            "verdict": _verdict(cards, available, errors, scored, cases),
+            "verdict": _verdict(
+                cards, available, errors, scored_for_verdict, total_for_verdict,
+                unit="turn" if mode == "multi" else "case", multi=multi),
             # ⚠️ 这两个**必须在 report 里**，不能只在 metrics 里：报告页四张卡全「—」时
             #    前端得能说清为什么（环境不在 / 有指标没算出来 / 没有可评分样本）。
-            #    没有它们，那就是哑谜。
             "ragas_available": available,
             "ragas_errors": errors,
-            # ★ 均值的分母（老轮次是 `None`）—— 前端拿它与「用例 N 条」并排显示
-            "ragas_scored_cases": scored,
+            "ragas_scored_cases": scored_cases,
+            "ragas_scored_turns": scored_turns,
+            "dialogue_mode": mode,
+            "multi_turn": multi,
         },
         "cases": rows,
     }
@@ -192,19 +234,16 @@ def _reason(errors: list[str]) -> str:
     return f"{first[:_MAX_REASON_CHARS]}…（完整输出见 ragas_errors 字段与后端日志）"
 
 
-def _denominator(scored: int | None, cases: int | None,
-                 counts: list[int] | None = None) -> str:
-    """结论句里的分母尾巴，如 `（6/10 题有分）`。
+def _denominator(scored: int | None, total: int | None,
+                 counts: list[int] | None = None, unit: str = "case") -> str:
+    """结论句里的分母尾巴，如 `（6/10 题有分）` / `（6/42 轮有分）`。
 
-    ⚠️ RAGAS 四项**只算在作答（未拒答）的题上**（拒答不送，见 `eval/runner.py`）。
-       不把分母念出来，6 题算出来的均值就会被当成 10 题的读 ——
-       实测那一轮 answer_relevancy 10 题 0.5494、6 道作答题 0.9157。
+    ⚠️ RAGAS 四项**只算在作答（未拒答）的样本上**（拒答不送，见 `eval/runner.py`）。
+       不把分母念出来，6 个样本算出来的均值就会被当成 10 个的读。
 
     ⚠️ 念出来的数字不是整轮的 `scored`，而是 **`counts`（四张卡各自的非 None 计数）**：
-       单题判官失败的行会保留、值全 None（`tools/ragas_runner.py` 的 NaN→None），
-       各指标的均值分母可以不同（评审实测 506f109f：42–43，整轮计数却是 44 ——
-       直接念 44 就是拿大样本的数字盖在小样本的均值上）。各指标不一致时报范围。
-       老轮次没有 `scored` 这个键 → 给空串（不硬编一个分母）。
+       单题判官失败的行会保留、值全 None，各指标的均值分母可以不同。
+       各指标不一致时报范围。老轮次没有 `scored` 这个键 → 给空串。
     """
     if scored is None:
         return ""
@@ -213,22 +252,32 @@ def _denominator(scored: int | None, cases: int | None,
         n = str(lo) if lo == hi else f"各指标 {lo}–{hi}"
     else:
         n = str(scored)
-    if cases is None:
-        return f"（{n} 题有分）"
-    return f"（{n}/{cases} 题有分）"
+    suffix = "轮" if unit == "turn" else "题"
+    if total is None:
+        return f"（{n} {suffix}有分）"
+    return f"（{n}/{total} {suffix}有分）"
 
 
 def _verdict(cards: list[dict], available: Any, errors: list[str],
-             scored: int | None = None, cases: int | None = None) -> str:
+             scored: int | None = None, total: int | None = None,
+             unit: str = "case", multi: dict | None = None) -> str:
     """结论句（§7.5）。
 
     大多数时候这一页只有一句话可读，所以它得把「能不能下结论」说清楚，
     而不是含糊地说一句「见上表」。
+
+    多轮下，上下文两项缺失的**正常原因**是「没有逐轮标准答案」——
+    单独写出来，不要和「环境坏了」混成一句。
     """
     missing = [c["key"] for c in cards if c["score"] is None]
     if missing:
         names = "、".join(LABELS[k] for k in missing)
         reason = _reason(errors)
+        if (unit == "turn" and multi is not None
+                and any(k in missing for k in ("context_recall", "context_precision"))):
+            n = int(multi.get("turns_with_reference") or 0)
+            return (f"{names}没算出来：这两项需要有逐轮标准答案；"
+                    f"当前评测集只有 {n} 轮有答案。")
         if available is False:
             why = f"（{reason}）" if reason else ""
             return f"{names}没算出来：ragas 隔离环境不可用{why}，见 docs/评测与ragas.md。"
@@ -239,7 +288,8 @@ def _verdict(cards: list[dict], available: Any, errors: list[str],
         return (f"缺少{names} —— 这几项没有可评分的样本"
                 "（缺标准答案、没有检索上下文，或都拒答了），综合得分先不给。")
 
-    denom = _denominator(scored, cases, [c["scored_cases"] for c in cards])
+    counts = [c.get("scored_samples", c.get("scored_cases")) for c in cards]
+    denom = _denominator(scored, total, counts, unit)  # type: ignore[arg-type]
     failed = [c for c in cards if not c["passed"]]
     if not failed:
         return f"四项指标都在合理区间{denom}。"
