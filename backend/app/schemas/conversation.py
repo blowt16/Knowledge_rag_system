@@ -48,6 +48,9 @@ class MessageItem(BaseModel):
     # ⚠️ 落库的那一列原样返回（含 `[n]` 标记的正文 + 结构化引用）——
     #    刷新后重新渲染角标的**唯一**来源
     citations: list = []
+    #: 落库的校验报告（含 unsupported_citations / unsupported_markers）。
+    #: 老消息没有这一列 → `None`，前端不标注。
+    verify_report: dict | None = None
     created_at: str | None = None
 
 

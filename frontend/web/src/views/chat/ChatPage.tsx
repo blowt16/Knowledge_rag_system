@@ -9,7 +9,7 @@ import {
 } from '../../api/conversations'
 import type { ConversationItem, MessageItem } from '../../api/conversations'
 import { useAuth } from '../../stores/auth'
-import type { AssistantDraft, Citation } from '../../api/types'
+import type { AssistantDraft, Citation, VerifyReport } from '../../api/types'
 import { MarkdownAnswer } from '../../markdown/MarkdownAnswer'
 import { StreamingAnswer } from '../../markdown/StreamingAnswer'
 import { CitationImages, DocumentDrawer } from '../../components/DocumentDrawer'
@@ -312,9 +312,8 @@ export default function ChatPage() {
     })
   }
 
-  /** 打开历史会话。消息里的 `citations` 是刷新后重渲染引用角标的**唯一**来源。
-   *  ⚠️ `verify_report` 只存在 `qa_logs`，所以历史会话里**灰标不再显示** ——
-   *     这是有意为之（§3.7.2），不是缺陷。 */
+  /** 打开历史会话。消息里的 `citations` 是刷新后重渲染引用角标的**唯一**来源；
+   *  `verify_report` 随助手消息落库，刷新后**灰标仍显示**。 */
   async function openConversation(id: string) {
     if (busy) return
     try {
@@ -760,6 +759,8 @@ function toTurns(messages: MessageItem[]): Turn[] {
         // 后端那一列是落库的 Citation 列表（含 [n] 的正文 + 结构化引用）。
         // OpenAPI 里它是裸 list，生成的类型是 unknown[] —— 形状由后端保证，这里收一下。
         citations: (answer?.citations ?? []) as Citation[],
+        // verify_report 随消息落库；老消息没有就是 null，前端不标注。
+        verify: (answer?.verify_report ?? null) as VerifyReport | null,
         // 历史会话一律当作已结束：不会再追加 token
         done: true,
       },

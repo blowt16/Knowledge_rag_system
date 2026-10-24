@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import time
 
+from app.graph.nodes.citation_support import check_citation_support
 from app.graph.nodes.generate import is_conclusion_sentence
 from app.graph.state import Chunk, RAGState
 from app.schemas.chat import (
@@ -135,11 +136,19 @@ def build_verify_report(answer: str, evidence: list[Chunk]) -> VerifyReport:
             char_end=start + len(sentence),
         ))
 
+    unsupported, unsupported_markers, supported = check_citation_support(
+        answer, evidence)
+    denominator = supported + len(unsupported)
     return VerifyReport(
         total_claims=total,
         cited_claims=cited,
+        supported_claims=supported,
+        citation_support_rate=(round(supported / denominator, 4)
+                               if denominator else None),
         invalid_markers=invalid,
         uncited_claims=uncited,
+        unsupported_citations=unsupported,
+        unsupported_markers=unsupported_markers,
     )
 
 

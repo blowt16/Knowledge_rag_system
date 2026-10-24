@@ -57,10 +57,14 @@ async def create_conversation(session_id: str, user_id: str, *, title: str = "")
 
 
 async def append_messages(conn: asyncpg.Connection, session_id: str, question: str,
-                          answer: str, citations: list, route: str) -> None:
+                          answer: str, citations: list, route: str,
+                          verify_report: dict | None = None) -> None:
     """追加本轮问答。**必须在调用方的事务内、且在短锁保护下执行。**
 
     用户消息带 `route` —— 它是 `last_route` 的来源（§3.3.1）。
+
+    `verify_report` 随助手消息落库，刷新历史会话后灰标仍可见。
+    落库失败仍只记日志，不影响回答（保持现有容错）。
 
     ⚠️ **两条消息的时间戳必须错开**（2026-10-05 实测）：`now()` 是**事务开始时刻**，
        同一事务里插入的两行拿到的是**同一个**时间戳 —— 于是
@@ -76,9 +80,10 @@ async def append_messages(conn: asyncpg.Connection, session_id: str, question: s
         uuid.uuid4().hex, session_id, question, route or None,
     )
     await conn.execute(
-        """INSERT INTO messages (id, conversation_id, role, content, citations, created_at)
-           VALUES ($1, $2, 'assistant', $3, $4, now() + interval '1 millisecond')""",
-        uuid.uuid4().hex, session_id, answer, citations or [],
+        """INSERT INTO messages
+             (id, conversation_id, role, content, citations, verify_report, created_at)
+           VALUES ($1, $2, 'assistant', $3, $4, $5, now() + interval '1 millisecond')""",
+        uuid.uuid4().hex, session_id, answer, citations or [], verify_report,
     )
 
 
@@ -181,9 +186,9 @@ async def delete_conversation(session_id: str, user_id: str) -> None:
 async def get_messages(session_id: str, user_id: str) -> list[dict]:
     """按时间**升序**，不分页（单会话消息量有界）。
 
-    `citations` 是**落库的那一列** —— 用于刷新后重新渲染引用。
-    注意 `verify_report` 只存在 `qa_logs`，所以重开历史会话时
-    **无依据句的灰标不再显示**（引用角标仍在）—— 这是有意为之（§3.7.2）。
+    `citations` 与 `verify_report` 都是**落库的那两列** —— 刷新后
+    引用角标与灰标都重新渲染；老消息没有 `verify_report` 时返回 `None`，
+    前端不标注（与改造前一致）。
 
     ⚠️ **不存在 / 不是你的 / 已软删 —— 一律 `NotFound`（404）**（M4-D4）。
        原实现对越权**静默返回 `[]`**，前端分不清「空会话」与「不是你的会话」；
@@ -197,12 +202,13 @@ async def get_messages(session_id: str, user_id: str) -> list[dict]:
         if owner != user_id:
             raise NotFound("会话不存在")
         rows = await conn.fetch(
-            """SELECT id, role, content, citations, created_at FROM messages
-                WHERE conversation_id = $1 ORDER BY created_at ASC""",
+            """SELECT id, role, content, citations, verify_report, created_at
+                 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC""",
             session_id,
         )
     return [{
         "id": r["id"], "role": r["role"], "content": r["content"],
         "citations": r["citations"] or [],
+        "verify_report": r["verify_report"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
     } for r in rows]

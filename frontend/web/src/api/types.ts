@@ -72,11 +72,41 @@ export interface InvalidMarker {
   char_end: number
 }
 
+export type UnsupportedReason = 'no_overlap' | 'number_mismatch' | 'weak_overlap'
+
+export interface UnsupportedMarker {
+  marker: number
+  chunk_id: string
+  reason: UnsupportedReason
+  /** 该编号对应片段的 unit_recall */
+  score: number
+}
+
+export interface UnsupportedClaim {
+  sentence: string
+  char_start: number
+  char_end: number
+  /** 该句引用的全部合法编号 */
+  markers: number[]
+  /** 其中不支持的编号 */
+  unsupported_markers: number[]
+  reason: UnsupportedReason
+  /** 最好的 unit_recall */
+  score: number
+  cited_chunk_ids: string[]
+}
+
 export interface VerifyReport {
   total_claims: number
   cited_claims: number
+  supported_claims: number
+  citation_support_rate: number | null
   invalid_markers: InvalidMarker[]
   uncited_claims: UncitedClaim[]
+  /** 句子级：所有被引片段都不支持 → 整句置灰 */
+  unsupported_citations: UnsupportedClaim[]
+  /** 编号级：部分支持时失败的那个编号 → 角标提示 */
+  unsupported_markers: UnsupportedMarker[]
 }
 
 /** 一条助手消息在流式过程中的累积状态。 */

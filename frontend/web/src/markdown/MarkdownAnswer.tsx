@@ -11,6 +11,11 @@
  *
  * 降级规则（§4.2.1.4）：校验不过 → **退回消息级徽标**，不硬标。
  * 「误标一句的伤害大于漏标一句」。
+ *
+ * 三类标注：
+ *   ① `uncited_claims`：没有引用的结论句 → `.uncited`
+ *   ② `unsupported_citations`：有引用但所有被引片段都不支持 → `.unsupported`
+ *   ③ `unsupported_markers`：部分支持时失败的那个编号 → 角标 `.unsupported`
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
@@ -18,7 +23,15 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Citation, VerifyReport } from '../api/types'
 import { parseCiteHref, remarkCitations } from './citationPlugin'
-import { UNCITED_TITLE, checkClaims, remarkUncited, type AnnotationResult } from './uncitedAnnotation'
+import {
+  UNCITED_TITLE,
+  UNSUPPORTED_TITLE,
+  checkClaims,
+  remarkUncited,
+  remarkUnsupported,
+  unsupportedMarkerSet,
+  type AnnotationResult,
+} from './uncitedAnnotation'
 
 interface Props {
   /** 渲染前的**原始答案文本** —— 偏移的参照系就是它，不能传渲染后的 */
@@ -32,24 +45,43 @@ interface Props {
 /** `remarkPlugins` 的元素类型：插件 + 选项元组。 */
 type RemarkPlugins = NonNullable<Parameters<typeof ReactMarkdown>[0]['remarkPlugins']>
 
+const EMPTY_REPORT = (): AnnotationResult => ({
+  passedA: 0, annotated: 0, issues: [], degraded: false,
+})
+
 export const MarkdownAnswer = memo(function MarkdownAnswer({
   text, citations = [], verify, onCitationClick,
 }: Props) {
-  const claims = verify?.uncited_claims ?? []
+  const uncited = verify?.uncited_claims ?? []
+  const unsupported = verify?.unsupported_citations ?? []
+  const unsupportedMarkers = useMemo(
+    () => unsupportedMarkerSet(verify?.unsupported_markers), [verify])
 
-  // 校验 A（真正的漂移检测）：偏移切不出原句 → 整条消息不标灰
-  const drifted = useMemo(() => checkClaims(text, claims).length > 0, [text, claims])
+  // 校验 A（真正的漂移检测）：偏移切不出原句 → 该类别不标灰
+  const driftedUncited = useMemo(
+    () => checkClaims(text, uncited).length > 0, [text, uncited])
+  const driftedUnsupported = useMemo(
+    () => checkClaims(text, unsupported).length > 0, [text, unsupported])
 
   // 校验 B（标注器自检）在渲染过程中才跑得出来 —— 用 ref 收集，
   // 触发后摘掉插件重渲染一次。它**不该**响；响了说明标注器有 bug，
-  // 那就按「宁可不标」退回消息级徽标（评审指出这里原本没人消费）。
-  const report = useRef<AnnotationResult>({ passedA: 0, annotated: 0, issues: [], degraded: false })
-  const [selfCheckFailed, setSelfCheckFailed] = useState(false)
+  // 那就按「宁可不标」退回消息级徽标。
+  const reportUncited = useRef<AnnotationResult>(EMPTY_REPORT())
+  const reportUnsupported = useRef<AnnotationResult>(EMPTY_REPORT())
+  const [selfCheckUncited, setSelfCheckUncited] = useState(false)
+  const [selfCheckUnsupported, setSelfCheckUnsupported] = useState(false)
+
   useEffect(() => {
-    // 渲染时插件已把报告写进 ref，这里读得到
-    if (report.current.degraded && !selfCheckFailed) setSelfCheckFailed(true)
-  }, [text, claims, selfCheckFailed])
-  const degraded = drifted || selfCheckFailed
+    if (reportUncited.current.degraded && !selfCheckUncited) setSelfCheckUncited(true)
+  }, [text, uncited, selfCheckUncited])
+  useEffect(() => {
+    if (reportUnsupported.current.degraded && !selfCheckUnsupported) {
+      setSelfCheckUnsupported(true)
+    }
+  }, [text, unsupported, selfCheckUnsupported])
+
+  const uncitedDegraded = driftedUncited || selfCheckUncited
+  const unsupportedDegraded = driftedUnsupported || selfCheckUnsupported
 
   const byMarker = useMemo(() => {
     const map = new Map<number, Citation>()
@@ -64,32 +96,43 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
 
   // ⚠️ **顺序不能反**：置灰标注依赖每个叶子自带的 mdast position，
   //    而角标插件会把含 `[n]` 的文本节点拆成新节点（新节点没有 position）。
-  //    先角标后置灰 → 被拆过的那一段永远标不上（实测踩过：
-  //    摘要显示「含 1 处未证实内容」，正文里一个灰标都没有）。
+  //    先角标后置灰 → 被拆过的那一段永远标不上。
   const plugins = useMemo<RemarkPlugins>(() => {
     const list: unknown[] = [remarkGfm]
-    if (claims.length > 0 && !degraded) {
-      list.push([remarkUncited, { rawText: text, claims, report: report.current }])
+    if (uncited.length > 0 && !uncitedDegraded) {
+      list.push([remarkUncited, {
+        rawText: text, claims: uncited, report: reportUncited.current,
+      }])
+    }
+    if (unsupported.length > 0 && !unsupportedDegraded) {
+      list.push([remarkUnsupported, {
+        rawText: text, claims: unsupported, report: reportUnsupported.current,
+      }])
     }
     list.push(remarkCitations)
     return list as RemarkPlugins
-  }, [claims, degraded, text])
+  }, [uncited, uncitedDegraded, unsupported, unsupportedDegraded, text])
 
   const components = useMemo(() => ({
     a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
       const marker = parseCiteHref(href)
       if (marker === null) return <a href={href}>{children}</a>
       const citation = byMarker.get(marker)
+      const isInvalid = invalid.has(marker)
+      const isUnsupported = unsupportedMarkers.has(marker)
       return (
         <button
           type="button"
-          className={`cite-badge${invalid.has(marker) ? ' invalid' : ''}`}
+          className={`cite-badge${isInvalid ? ' invalid' : ''}${
+            isUnsupported ? ' unsupported' : ''}`}
           title={
-            invalid.has(marker)
+            isInvalid
               ? `引用了不存在的证据 [${marker}]`
-              : citation
-                ? `${citation.document_name}${citation.chapter ? ` · ${citation.chapter}` : ''} · 第 ${citation.page} 页\n${citation.snippet}`
-                : `引用 [${marker}]`
+              : isUnsupported
+                ? `编号 [${marker}] 引用的资料未包含该句的关键内容`
+                : citation
+                  ? `${citation.document_name}${citation.chapter ? ` · ${citation.chapter}` : ''} · 第 ${citation.page} 页\n${citation.snippet}`
+                  : `引用 [${marker}]`
           }
           onClick={() => citation && onCitationClick?.(citation)}
         >
@@ -97,7 +140,7 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
         </button>
       )
     },
-  }), [byMarker, invalid, onCitationClick])
+  }), [byMarker, invalid, unsupportedMarkers, onCitationClick])
 
   return (
     <div className="answer">
@@ -105,19 +148,41 @@ export const MarkdownAnswer = memo(function MarkdownAnswer({
         {text}
       </ReactMarkdown>
 
-      {claims.length > 0 && (
+      {uncited.length > 0 && (
         <div className="uncited-summary" title={UNCITED_TITLE}>
-          {degraded ? (
+          {uncitedDegraded ? (
             // 校验没过：偏移已经不可信（A 漂移 / B 自检）——
             // 只报数量与原文，**不指位置**（标歪比不标更糟）
             <>
-              本回答含 {claims.length} 处未证实内容（定位校验未通过，未标注位置）
+              本回答含 {uncited.length} 处未证实内容（定位校验未通过，未标注位置）
               <ul className="uncited-list">
-                {claims.map((claim) => <li key={claim.char_start}>{claim.sentence}</li>)}
+                {uncited.map((claim) => <li key={claim.char_start}>{claim.sentence}</li>)}
               </ul>
             </>
           ) : (
-            <>本回答含 {claims.length} 处未证实内容</>
+            <>本回答含 {uncited.length} 处未证实内容</>
+          )}
+        </div>
+      )}
+
+      {unsupportedMarkers.size > 0 && (
+        <div className="unsupported-summary" title={UNSUPPORTED_TITLE}>
+          本回答含 {unsupportedMarkers.size} 处引用与原文不符
+        </div>
+      )}
+      {unsupported.length > 0 && (
+        <div className="unsupported-summary" title={UNSUPPORTED_TITLE}>
+          {unsupportedDegraded ? (
+            <>
+              其中 {unsupported.length} 句的所有引用均不支持（定位校验未通过，未标注位置）
+              <ul className="uncited-list">
+                {unsupported.map((claim) => (
+                  <li key={claim.char_start}>{claim.sentence}</li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <>其中 {unsupported.length} 句的所有引用均不支持</>
           )}
         </div>
       )}

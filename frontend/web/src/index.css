@@ -375,6 +375,19 @@ input, textarea { font: inherit; }
 }
 .uncited-list { margin: 6px 0 0; padding-left: 1.2em; }
 
+/* 引用支持度失败（§4.5）—— 与「未证实」分开，琥珀色提示 */
+.unsupported { text-decoration: underline wavy #b45309; }
+.cite-badge.unsupported { box-shadow: 0 0 0 1px #b45309; }
+.unsupported-summary {
+  margin-top: 8px; font-size: 13px; color: #92400e;
+  background: #fffbeb; padding: 7px 11px; border-radius: 6px;
+}
+.dark .unsupported-summary {
+  color: #fcd34d; background: rgb(120 53 15 / 0.25);
+}
+.dark .unsupported { text-decoration-color: #fbbf24; }
+.dark .cite-badge.unsupported { box-shadow: 0 0 0 1px #fbbf24; }
+
 /* 检索中：三点跳动，比一行静态文字更像「在做事」 */
 .thinking { display: inline-flex; align-items: center; gap: 7px; color: var(--app-muted); font-size: 14px; }
 .thinking .dot {

@@ -408,12 +408,16 @@ async def _persist(session_id: str, query: str, final: dict, latency_ms: int,
     answer = final.get("answer") or ""
     citations = [c.model_dump() if hasattr(c, "model_dump") else c
                  for c in (final.get("citations") or [])]
+    verify_report = final.get("verify_report")
+    verify_payload = (verify_report.model_dump()
+                      if hasattr(verify_report, "model_dump") else verify_report)
 
     try:
         async with db.tx() as conn:
             # 短锁必须与写操作在同一事务 —— 否则锁在写之前就释放了
             await db.short_lock(conn, session_id)
-            await append_messages(conn, session_id, query, answer, citations, route)
+            await append_messages(conn, session_id, query, answer, citations, route,
+                                  verify_payload)
             await touch_conversation(conn, session_id)
     except Exception:  # noqa: BLE001 —— 落库失败不该让用户看不到回答
         logger.exception("落库失败", extra={"event": "chat.persist_failed",

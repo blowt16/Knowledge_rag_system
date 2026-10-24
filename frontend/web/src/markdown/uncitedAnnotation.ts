@@ -34,6 +34,20 @@
 /** 悬浮提示文案（§4.2.1.6）—— 是**提示**不是断言：「此结论未在资料中找到依据」这种写法被明确禁用。 */
 export const UNCITED_TITLE = '未在资料中找到对应依据，建议核对'
 
+/** 引用支持度失败的句子/角标提示（§4.5）。 */
+export const UNSUPPORTED_TITLE = '所引资料未包含该结论的关键内容，建议核对'
+
+/** 只声明用得到的字段，避免为一个插件引整套类型。 */
+export interface UnsupportedMarker {
+  marker: number
+}
+
+export function unsupportedMarkerSet(
+  markers: UnsupportedMarker[] | undefined,
+): Set<number> {
+  return new Set((markers ?? []).map((m) => m.marker))
+}
+
 export interface UncitedClaim {
   sentence: string
   /** 相对**渲染前原始答案**的偏移，单位 Unicode 码点 */
@@ -138,20 +152,30 @@ interface Range {
   claim: number
 }
 
-/** 给叶子包一层 `<span class="uncited">`（text 叶子）或加 class（code 叶子）。 */
-function markNode(node: MdastNode, asElement: boolean) {
+export interface MarkOptions {
+  /** 默认 `uncited`（无依据句）；支持度失败用 `unsupported` */
+  className?: string
+  /** 默认 `UNCITED_TITLE`；支持度失败用 `UNSUPPORTED_TITLE` */
+  title?: string
+}
+
+/** 给叶子包一层 `<span class="...">`（text 叶子）或加 class（code 叶子）。 */
+function markNode(node: MdastNode, asElement: boolean, opts: MarkOptions) {
+  const className = opts.className ?? 'uncited'
+  const title = opts.title ?? UNCITED_TITLE
   if (asElement) {
-    node.data = { ...node.data, hName: 'span', hProperties: { className: 'uncited', title: UNCITED_TITLE } }
+    node.data = { ...node.data, hName: 'span', hProperties: { className, title } }
   } else {
     // inlineCode / code：换成 span 会丢掉等宽样式 —— 只加 class，保留原元素
     node.data = {
       ...node.data,
-      hProperties: { ...(node.data?.hProperties ?? {}), className: 'uncited', title: UNCITED_TITLE },
+      hProperties: { ...(node.data?.hProperties ?? {}), className, title },
     }
   }
 }
 
-function annotateNode(parent: MdastNode, rawText: string, ranges: Range[], result: AnnotationResult) {
+function annotateNode(parent: MdastNode, rawText: string, ranges: Range[],
+                      opts: MarkOptions, result: AnnotationResult) {
   const children = parent.children
   if (!children) return
   const next: MdastNode[] = []
@@ -159,7 +183,7 @@ function annotateNode(parent: MdastNode, rawText: string, ranges: Range[], resul
   for (const child of children) {
     if (child.value === undefined) {
       // 容器节点：**不用它的 position**（坑③），只递归
-      annotateNode(child, rawText, ranges, result)
+      annotateNode(child, rawText, ranges, opts, result)
       next.push(child)
       continue
     }
@@ -208,7 +232,7 @@ function annotateNode(parent: MdastNode, rawText: string, ranges: Range[], resul
           next.push({ ...child, value: rawText.slice(cursor, from), data: undefined })
         }
         const marked: MdastNode = { ...child, value: rawText.slice(from, to) }
-        markNode(marked, true)
+        markNode(marked, true, opts)
         next.push(marked)
         result.annotated += 1
         cursor = to
@@ -220,7 +244,7 @@ function annotateNode(parent: MdastNode, rawText: string, ranges: Range[], resul
       // 非 text 叶子（inlineCode / code）：整段被覆盖才标；部分覆盖上报、不硬标
       const fully = hits.some((r) => r.start <= start && r.end >= end)
       if (fully) {
-        markNode(child, false)
+        markNode(child, false, opts)
         result.annotated += 1
         next.push(child)
       } else {
@@ -246,7 +270,8 @@ function annotateNode(parent: MdastNode, rawText: string, ranges: Range[], resul
  * 两道校验都跑：**A 是漂移检测**（能抓住 ±1 / ±2 的偏移错位），
  * **B 只是标注器自检**（拿同一个错误偏移算两边，抓不到漂移）。
  */
-export function annotateTree(tree: MdastNode, rawText: string, claims: UncitedClaim[]): AnnotationResult {
+export function annotateTree(tree: MdastNode, rawText: string, claims: UncitedClaim[],
+                             opts: MarkOptions = {}): AnnotationResult {
   const result: AnnotationResult = { passedA: 0, annotated: 0, issues: [], degraded: false }
 
   // ① 前置校验 A
@@ -267,7 +292,7 @@ export function annotateTree(tree: MdastNode, rawText: string, claims: UncitedCl
     .sort((a, b) => a.start - b.start)
 
   const before = visibleText(tree)
-  annotateNode(tree, rawText, ranges, result)
+  annotateNode(tree, rawText, ranges, opts, result)
 
   // ④ 后置校验 B：标注后文本必须与标注前逐字相同（标注不能吃掉字符）
   if (visibleText(tree) !== before) {
@@ -293,6 +318,17 @@ export interface UncitedPluginOptions {
 export function remarkUncited(options: UncitedPluginOptions) {
   return (tree: MdastNode) => {
     const result = annotateTree(tree, options.rawText, options.claims ?? [])
+    if (options.report) Object.assign(options.report, result)
+  }
+}
+
+/** 引用支持度失败的整句标注：同一套偏移映射，只换 class 与文案。 */
+export function remarkUnsupported(options: UncitedPluginOptions & MarkOptions) {
+  return (tree: MdastNode) => {
+    const result = annotateTree(tree, options.rawText, options.claims ?? [], {
+      className: options.className ?? 'unsupported',
+      title: options.title ?? UNSUPPORTED_TITLE,
+    })
     if (options.report) Object.assign(options.report, result)
   }
 }

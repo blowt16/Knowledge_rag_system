@@ -21,9 +21,12 @@ import { remarkCitations } from '../../src/markdown/citationPlugin'
 import { unified } from 'unified'
 import {
   UNCITED_TITLE,
+  UNSUPPORTED_TITLE,
   annotateTree,
   checkClaims,
   remarkUncited,
+  remarkUnsupported,
+  unsupportedMarkerSet,
   visibleText,
   type MdastNode,
   type UncitedClaim,
@@ -230,6 +233,45 @@ probe('单独一行的角标', '段落里只有一个 [1] 时也要换成角标'
     const html = String(processor.stringify(processor.runSync(processor.parse(md) as never)))
     assert.ok(html.includes('href="#cite-1"'), `没变成角标：${JSON.stringify(md)}`)
   }
+})
+
+// ⑬ 引用支持度：整句置灰（琥珀色下划线），与 uncited 分开
+probe('unsupported 句子置灰', '支持度失败的整句用 unsupported class', () => {
+  const md = '专科起点本科的毕（结）业证书中注明“专科起点本科学习”[1][2]。'
+  const processor = unified().use(remarkParse)
+    .use(remarkUnsupported, {
+      rawText: md,
+      claims: [{ sentence: md, char_start: 0, char_end: [...md].length }],
+    })
+    .use(remarkRehype).use(rehypeStringify)
+  const html = String(processor.stringify(processor.runSync(processor.parse(md) as never)))
+  assert.ok(html.includes('class="unsupported"'), '整句没有被标成 unsupported')
+  assert.ok(html.includes(`title="${UNSUPPORTED_TITLE}"`), '提示文案不对')
+})
+
+// ⑭ 部分支持：只有错编号角标提示，整句不置灰
+probe('部分支持只影响角标', 'unsupported_markers 不含 [1]，整句不进入 unsupported', () => {
+  const markers = unsupportedMarkerSet([{ marker: 2 }])
+  assert.equal(markers.has(2), true)
+  assert.equal(markers.has(1), false)
+  // 句子级列表为空 → 不会调用 remarkUnsupported，正文里没有 unsupported span
+  const md = '转专业需要提交申请表[1][2]。'
+  const outcome = render(md, [])
+  assert.ok(!outcome.html.includes('class="unsupported"'))
+})
+
+// ⑮ 两个插件顺序：unsupported 与角标共用管道时仍能标注
+probe('unsupported + 角标共用管道', '先标句子、最后拆角标', () => {
+  const md = '专科起点本科的毕（结）业证书中注明“专科起点本科学习”[1][2]。'
+  const claims = [{ sentence: md, char_start: 0, char_end: [...md].length }]
+  const processor = unified().use(remarkParse)
+    .use(remarkUnsupported, { rawText: md, claims })
+    .use(remarkCitations)
+    .use(remarkRehype).use(rehypeStringify)
+  const tree = processor.parse(md) as unknown as MdastNode
+  const html = String(processor.stringify(processor.runSync(tree as never)))
+  assert.ok(html.includes('class="unsupported"'))
+  assert.ok(html.includes('#cite-1') && html.includes('#cite-2'))
 })
 
 // ---- 跑 -------------------------------------------------------------------

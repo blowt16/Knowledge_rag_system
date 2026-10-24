@@ -270,20 +270,44 @@ async def test_delete_other_user_is_404(client, users):
 # 消息
 # ============================================================
 
+ACCIDENT = "专科起点本科的毕（结）业证书中注明“专科起点本科学习”[1][2]。"
+VERIFY = {
+    "total_claims": 1,
+    "cited_claims": 1,
+    "supported_claims": 0,
+    "citation_support_rate": 0.0,
+    "invalid_markers": [],
+    "uncited_claims": [],
+    "unsupported_citations": [{
+        "sentence": ACCIDENT, "char_start": 0, "char_end": len(ACCIDENT),
+        "markers": [1, 2], "unsupported_markers": [1, 2],
+        "reason": "no_overlap", "score": 0.0,
+        "cited_chunk_ids": ["02:1", "02:2"],
+    }],
+    "unsupported_markers": [
+        {"marker": 1, "chunk_id": "02:1", "reason": "no_overlap", "score": 0.0},
+        {"marker": 2, "chunk_id": "02:2", "reason": "no_overlap", "score": 0.0},
+    ],
+}
+
+
 async def _mk_messages(sid: str) -> None:
     async with db.tx() as conn:
         await conn.execute(
             """INSERT INTO messages (id, conversation_id, role, content, route, created_at)
                VALUES ($1, $2, 'user', '问', 'knowledge', now())""",
             uuid.uuid4().hex, sid)
-        # ⚠️ 传 **list**，不是 JSON 字符串：连接池给 jsonb 注册了编解码器
+        # ⚠️ 传 **list/dict**，不是 JSON 字符串：连接池给 jsonb 注册了编解码器
         #    （db.py 的 set_type_codec），再传字符串会被 json.dumps **二次编码**
         #    成一个 JSON 字符串标量 —— 读回来就是 str，不是 list。
         await conn.execute(
-            """INSERT INTO messages (id, conversation_id, role, content, citations, created_at)
-               VALUES ($1, $2, 'assistant', '答[1]', $3::jsonb, now() + interval '1 millisecond')""",
+            """INSERT INTO messages
+                 (id, conversation_id, role, content, citations, verify_report, created_at)
+               VALUES ($1, $2, 'assistant', '答[1]', $3::jsonb, $4::jsonb,
+                       now() + interval '1 millisecond')""",
             uuid.uuid4().hex, sid,
-            [{"marker": 1, "document_name": "文档", "chunk_id": "c1"}])
+            [{"marker": 1, "document_name": "文档", "chunk_id": "c1"}],
+            VERIFY)
 
 
 async def test_messages_ascending_with_citations(client, users):
@@ -300,6 +324,41 @@ async def test_messages_ascending_with_citations(client, users):
     assert [m["role"] for m in msgs] == ["user", "assistant"], "必须按时间升序"
     assert msgs[1]["citations"][0]["marker"] == 1
     assert "created_at" in msgs[0] and "id" in msgs[0]
+
+
+async def test_messages_return_stored_verify_report(client, users):
+    """刷新历史会话后灰标仍在 —— `verify_report` 随助手消息落库。"""
+    a, _ = users
+    sid = uuid.uuid4().hex
+    await _mk_conv(sid, a["id"], title="有校验")
+    await _mk_messages(sid)
+
+    r = await client.get(f"/api/conversations/{sid}/messages", headers=_h(a))
+
+    assert r.status_code == 200, r.text
+    report = r.json()["messages"][1]["verify_report"]
+    assert report["unsupported_citations"][0]["sentence"] == ACCIDENT
+    assert report["unsupported_markers"][0]["marker"] == 1
+
+
+async def test_old_message_without_verify_report_returns_none(client, users):
+    """老消息没有该列 → `None`，前端不标注，也不 500。"""
+    a, _ = users
+    sid = uuid.uuid4().hex
+    await _mk_conv(sid, a["id"], title="旧消息")
+    async with db.tx() as conn:
+        await conn.execute(
+            """INSERT INTO messages (id, conversation_id, role, content, created_at)
+               VALUES ($1,$2,'user','问',now())""", uuid.uuid4().hex, sid)
+        await conn.execute(
+            """INSERT INTO messages (id, conversation_id, role, content, created_at)
+               VALUES ($1,$2,'assistant','答',now() + interval '1 millisecond')""",
+            uuid.uuid4().hex, sid)
+
+    r = await client.get(f"/api/conversations/{sid}/messages", headers=_h(a))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["messages"][1]["verify_report"] is None
 
 
 async def test_messages_of_other_user_is_404(client, users):

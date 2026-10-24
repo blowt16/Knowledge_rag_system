@@ -85,6 +85,29 @@ class UncitedClaim(BaseModel):
     char_end: int
 
 
+UnsupportedReason = Literal["no_overlap", "number_mismatch", "weak_overlap"]
+
+
+class UnsupportedMarker(BaseModel):
+    """编号级：该 `[n]` 指向的片段不支撑所在句子。"""
+    marker: int
+    chunk_id: str
+    reason: UnsupportedReason
+    score: float        # 该编号对应片段的 unit_recall
+
+
+class UnsupportedClaim(BaseModel):
+    """句子级：**所有**被引片段都不支撑该句 → 前端整句置灰。"""
+    sentence: str
+    char_start: int
+    char_end: int
+    markers: list[int]                  # 该句引用的全部合法编号
+    unsupported_markers: list[int]      # 其中不支持的编号
+    reason: UnsupportedReason
+    score: float                        # 最好的 unit_recall，便于调阈值
+    cited_chunk_ids: list[str]
+
+
 class VerifyReport(BaseModel):
     """声明级校验报告（§3.5.3 节点 10）。
 
@@ -95,8 +118,16 @@ class VerifyReport(BaseModel):
     """
     total_claims: int = 0
     cited_claims: int = 0
+    #: 有合法 [n] 且至少一条被引片段支撑的结论句数
+    supported_claims: int = 0
+    #: 句子级支持率；分母 = supported_claims + len(unsupported_citations)
+    citation_support_rate: float | None = None
     invalid_markers: list[InvalidMarker] = Field(default_factory=list)
     uncited_claims: list[UncitedClaim] = Field(default_factory=list)
+    #: 句子级：只有所有被引片段都不支持时才进来 → 前端置灰
+    unsupported_citations: list[UnsupportedClaim] = Field(default_factory=list)
+    #: 编号级：部分支持时，失败的那个编号也在这里 → 前端角标提示
+    unsupported_markers: list[UnsupportedMarker] = Field(default_factory=list)
 
 
 # ---- 请求 --------------------------------------------------------------

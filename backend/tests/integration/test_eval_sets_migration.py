@@ -55,6 +55,29 @@ def test_migration_file_exists():
     assert MIGRATION.exists(), f"缺迁移文件：{MIGRATION}"
 
 
+async def test_005_is_idempotent_and_creates_the_check():
+    """引用报告列 + 对话模式列，连续跑两次不报错、约束在。"""
+    sql = (MIGRATIONS / "005_citation_and_dialogue_mode.sql").read_text(encoding="utf-8")
+    async with db.tx() as conn:
+        await conn.execute(sql)
+        await conn.execute(sql)
+        has_column = await conn.fetchval(
+            """SELECT count(*) FROM information_schema.columns
+                WHERE table_name='messages' AND column_name='verify_report'""")
+        has_mode = await conn.fetchval(
+            """SELECT count(*) FROM information_schema.columns
+                WHERE table_name='eval_runs' AND column_name='dialogue_mode'""")
+        has_check = await conn.fetchval(
+            """SELECT count(*) FROM pg_constraint
+                WHERE conname='eval_runs_dialogue_mode_check'
+                  AND conrelid='eval_runs'::regclass""")
+        default_mode = await conn.fetchval(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name='eval_runs' AND column_name='dialogue_mode'")
+    assert has_column == 1 and has_mode == 1 and has_check == 1
+    assert "single" in default_mode
+
+
 async def test_running_twice_changes_nothing():
     """连续跑两次，三张表的内容**逐行**不变（§9 的幂等要求）。"""
     async with db.tx() as conn:

@@ -1605,6 +1605,10 @@ export interface components {
              * @default []
              */
             citations: unknown[];
+            /** Verify Report */
+            verify_report?: {
+                [key: string]: unknown;
+            } | null;
             /** Created At */
             created_at?: string | null;
         };

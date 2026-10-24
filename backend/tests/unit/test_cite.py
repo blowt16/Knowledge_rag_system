@@ -212,3 +212,39 @@ async def test_cite_node_produces_both_outputs_in_one_pass():
 
     assert [c.marker for c in out["citations"]] == [1]
     assert [c.sentence for c in out["verify_report"].uncited_claims] == ["申请材料需要提前提交。"]
+
+
+# ============================================================
+# 支持度（§4.2）
+# ============================================================
+
+def test_support_fields_are_produced_for_a_supported_sentence():
+    evidence = [
+        _chunk("c1", doc="d1", name="文档一", text="转专业需要提交申请表。"),
+        _chunk("c2", doc="d2", name="文档二", text="学位授予条件。"),
+    ]
+    report = build_verify_report("转专业需要提交申请表[1]。", evidence)
+    assert report.supported_claims == 1
+    assert report.unsupported_citations == []
+    assert report.unsupported_markers == []
+    assert report.citation_support_rate == 1.0
+
+
+def test_partial_support_flags_bad_marker_without_greying_sentence():
+    evidence = [
+        _chunk("c1", doc="d1", name="文档一", text="转专业需要提交申请表。"),
+        _chunk("c2", doc="d2", name="文档二", text="学位授予条件。"),
+    ]
+    report = build_verify_report("转专业需要提交申请表[1][2]。", evidence)
+    assert [m.marker for m in report.unsupported_markers] == [2]
+    assert report.unsupported_citations == []
+    assert report.supported_claims == 1
+
+
+async def test_cite_node_refusal_keeps_support_empty():
+    state = new_state(decision="REFUSED_NO_EVIDENCE", answer="依据不足。",
+                      evidence=_evidence(2))
+    out = await cite_node(state)
+    assert out["verify_report"].unsupported_citations == []
+    assert out["verify_report"].unsupported_markers == []
+    assert out["verify_report"].citation_support_rate is None
