@@ -224,7 +224,12 @@ async def list_sets(conn) -> list[dict]:
         """SELECT s.id, s.name, s.description, s.created_at, s.updated_at,
                   (SELECT count(*) FROM eval_cases c WHERE c.set_id = s.id) AS case_count,
                   (SELECT count(*) FROM eval_cases c
-                    WHERE c.set_id = s.id AND c.in_eval) AS in_eval_count
+                    WHERE c.set_id = s.id AND c.in_eval) AS in_eval_count,
+                  (SELECT COALESCE(SUM(
+                              CASE WHEN jsonb_typeof(c.turns) = 'array'
+                                   THEN jsonb_array_length(c.turns) ELSE 1 END), 0)
+                     FROM eval_cases c
+                    WHERE c.set_id = s.id AND c.in_eval) AS total_turns
              FROM eval_sets s ORDER BY s.created_at, s.name""")
     return [dict(r) for r in rows]
 

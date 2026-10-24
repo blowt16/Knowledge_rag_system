@@ -90,8 +90,9 @@ async def create_set(payload: EvalSetCreate, user=AdminUser) -> EvalSetItem:
                                         created_by=user.id)
         except sets.SetNameTaken:
             raise Conflict("已有同名评测集") from None
-    # 新建的集一条用例都没有，这两个计数列直接补 0
-    return EvalSetItem(**{**row, "case_count": 0, "in_eval_count": 0})
+    # 新建的集一条用例都没有，这几个计数列直接补 0
+    return EvalSetItem(**{**row, "case_count": 0, "in_eval_count": 0,
+                          "total_turns": 0})
 
 
 @router.patch("/sets/{set_id}", response_model=EvalSetItem)

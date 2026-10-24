@@ -267,6 +267,14 @@ export default function EvalRunsPage() {
           <p className="text-xs text-muted-foreground">
             跑的是<b>线上完整链路</b>；要跑提权对照或开消融开关，去「消融对比」页。
           </p>
+          {selected && selected.in_eval_count > 0 && (
+            <p className="text-xs text-muted-foreground">
+              预计 RAGAS 样本 ≤ {dialogueMode === 'multi'
+                ? `${selected.total_turns} 轮`
+                : `${selected.in_eval_count} 题`}
+              （只送 knowledge 且未拒答的轮次/题，跑完以报告分母为准）
+            </p>
+          )}
           {selected && selected.in_eval_count === 0 && (
             <p className="text-sm text-amber-700 dark:text-amber-500">
               「{selected.name}」里没有勾选「参与评测」的用例，直接跑会失败。

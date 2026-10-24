@@ -1707,6 +1707,11 @@ export interface components {
              * @default 0
              */
             in_eval_count: number;
+            /**
+             * Total Turns
+             * @default 0
+             */
+            total_turns: number;
             /** Created At */
             created_at?: string | null;
             /** Updated At */

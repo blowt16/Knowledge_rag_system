@@ -14,7 +14,7 @@
 它们需要冻结标注集、人工复核、独立判官模型和改造前基线，不是自动化测试能替代的。
 因此本报告**不宣称**功能已满足发布准入门槛，只证明功能行为符合设计稿。
 
-后端全量测试：**919 passed**（`uv run pytest backend/tests -q`）。
+后端全量测试：**920 passed**（`uv run pytest backend/tests -q`）。
 前端构建：**通过**（`npm run build`）。
 前端标注回归：**15/15 通过**（`npx tsx scripts/annotation_probe/run.ts`）。
 
@@ -102,6 +102,9 @@ HTTP 验收中构造多轮 run 后：
   指标全集含 `citation_support_rate`、`unsupported_markers`、
   `unsupported_citations`、`ragas_scored_turns`、`turns_total`。
 - 前端报告弹窗与对比页已按这些字段实现，构建通过。
+- 批量评测页在选好评测集后显示预计 RAGAS 样本上限
+  （单轮按题、多轮按「多轮题 turns 长度 + 普通题 1 轮」），
+  并注明只送 knowledge 且未拒答的轮次/题。
 
 ### 3.7 多轮录入
 

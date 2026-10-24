@@ -4732,6 +4732,11 @@
             "title": "In Eval Count",
             "default": 0
           },
+          "total_turns": {
+            "type": "integer",
+            "title": "Total Turns",
+            "default": 0
+          },
           "created_at": {
             "anyOf": [
               {

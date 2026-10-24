@@ -152,6 +152,9 @@ class EvalSetItem(BaseModel):
     #: 用户才不会以为丢了数据（§11.3-4）
     case_count: int = 0
     in_eval_count: int = 0
+    #: 多轮模式预计 RAGAS 样本上限：多轮题按 turns 长度计，普通题各算 1 轮。
+    #: 只用于界面提示成本；最终分母仍以报告里的 `ragas_scored_turns` 为准。
+    total_turns: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

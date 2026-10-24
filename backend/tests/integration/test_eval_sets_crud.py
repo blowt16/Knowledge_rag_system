@@ -74,6 +74,22 @@ async def test_set_list_carries_the_case_count(scratch_set):
     assert row["case_count"] == 2
 
 
+async def test_set_list_counts_total_turns_for_the_sample_estimate(scratch_set):
+    """多轮样本预估：多轮题按 turns 长度，普通题各算 1 轮。"""
+    async with db.tx() as conn:
+        await sets.create_case(conn, scratch_set["id"], question="q1", ground_truth="a1")
+        await sets.create_case(
+            conn, scratch_set["id"], case_type="multi_turn",
+            turns=[{"question": "第一问"}, {"question": "第二问"}])
+        await sets.create_case(
+            conn, scratch_set["id"], case_type="multi_turn",
+            turns=[{"question": "第三问"}, {"question": "第四问"},
+                   {"question": "第五问"}], in_eval=False)
+        row = next(s for s in await sets.list_sets(conn)
+                   if s["id"] == scratch_set["id"])
+    assert row["total_turns"] == 3, row
+
+
 async def test_deleting_a_set_takes_its_cases_but_not_the_history(scratch_set):
     """决策 14：删集**连带删它的用例**；历史 run 不受影响（`set_name` 是快照）。"""
     run_id = uuid.uuid4().hex
