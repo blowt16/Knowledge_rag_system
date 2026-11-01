@@ -58,6 +58,31 @@ def test_short_sentence_is_not_judged():
     assert claims == [] and markers == [] and supported == 0
 
 
+def test_number_from_another_clause_does_not_flag_earlier_marker():
+    """分号隔开的多分句：数字属于后一分句的引用，不应把前一分句的引用判成数字不符。
+
+    真实形状：一句里 `[1]` 引用条件原文、`[2]` 引用“（学分绩）达到70”，
+    70 只在片段 2 里。整句判定会把 [1] 判成 number_mismatch → 角标误标。
+    """
+    answer = "条件：遵纪守法，品行端正[1]；课程学习水平与综合评价指标（学分绩）达到70[2]。"
+    got, markers, supported = check_citation_support(answer, [
+        _chunk("c1", "条件：遵纪守法，品行端正。"),
+        _chunk("c2", "课程学习水平与综合评价指标（学分绩）达到70。"),
+    ])
+    assert got == []
+    assert markers == []
+    assert supported == 2
+
+
+def test_number_in_same_clause_still_flagged():
+    """同一分句内的数字对不上，仍要判 number_mismatch。"""
+    answer = "课程学习水平与综合评价指标（学分绩）达到70[1]。"
+    got, markers, _ = check_citation_support(
+        answer, [_chunk("c1", "课程学习水平与综合评价指标（学分绩）达到75。")])
+    assert got[0].reason == "number_mismatch"
+    assert markers[0].reason == "number_mismatch"
+
+
 def test_partial_support_flags_only_the_bad_marker():
     answer = "转专业需要提交申请表[1][2]。"
     got, markers, supported = check_citation_support(answer, [

@@ -23,7 +23,10 @@ SUPPORT_MIN_UNITS = 3
 SUPPORT_LONG_UNIT = 4
 
 _MARKER_RE = re.compile(r"\[(\d+)\]")
-_SENTENCE_RE = re.compile(r"[^。！？\n]*[。！？\n]?")
+# ⚠️ **分号也算分句符**：法条式的长句常用「；」并列多个条件，各条件分别引用
+#    不同片段。按整句取数字时，后一句引用的「70」会把前一句的 [1] 判成
+#    number_mismatch，角标误标。分号处切开后，数字校验只覆盖该引用所在的分句。
+_SENTENCE_RE = re.compile(r"[^。！？\n；;]*[。！？\n；;]?")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _ALPHA_RE = re.compile(r"[A-Za-z]+")
 _CJK_RUN_RE = re.compile(r"[一-鿿]+")
