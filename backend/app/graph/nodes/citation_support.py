@@ -22,7 +22,10 @@ SUPPORT_UNIT_RECALL = 0.4
 SUPPORT_MIN_UNITS = 3
 SUPPORT_LONG_UNIT = 4
 
-_MARKER_RE = re.compile(r"\[(\d+)\]")
+# ⚠️ 只认 1~3 位编号：证据数远小于 1000，而公文编号里的年份是 4 位
+#    （「桂电教[2019]36号」）。若把 [2019] 当角标剥掉，句子只剩 `36`，
+#    片段原文归一化后却是 `201936` —— 数字校验必然误报。
+_MARKER_RE = re.compile(r"\[(\d{1,3})\]")
 # ⚠️ **分号也算分句符**：法条式的长句常用「；」并列多个条件，各条件分别引用
 #    不同片段。按整句取数字时，后一句引用的「70」会把前一句的 [1] 判成
 #    number_mismatch，角标误标。分号处切开后，数字校验只覆盖该引用所在的分句。
@@ -30,6 +33,9 @@ _SENTENCE_RE = re.compile(r"[^。！？\n；;]*[。！？\n；;]?")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _ALPHA_RE = re.compile(r"[A-Za-z]+")
 _CJK_RUN_RE = re.compile(r"[一-鿿]+")
+# 版本年号（「2025 年修订」）是文档元数据，不是事实数字 —— 后面的页码片段
+# 不会重复标题，拿它跟单个片段比对必然误报。
+_VERSION_YEAR_RE = re.compile(r"((?:19|20)\d{2})年(?:修订|版)")
 
 Reason = Literal["no_overlap", "number_mismatch", "weak_overlap"]
 
@@ -65,7 +71,15 @@ def _has_long_common(sentence: str, chunk: str) -> bool:
     return bool(_cjk_ngrams(sentence) & _cjk_ngrams(chunk))
 
 
-def _supports(sentence: str, chunk_text: str) -> tuple[bool, float, Reason]:
+def _gate_numbers(text: str) -> list[str]:
+    """参与数字校验的数字；版本年号不算。"""
+    normalized = normalize(_MARKER_RE.sub("", text))
+    metadata = set(_VERSION_YEAR_RE.findall(normalized))
+    return [n for n in _NUMBER_RE.findall(normalized) if n not in metadata]
+
+
+def _supports(sentence: str, chunk_text: str,
+              cited_numbers: set[str]) -> tuple[bool, float, Reason]:
     # ⚠️ 必须剥掉 [n] 再取数字/单元：归一化会去掉方括号，让 [1][2] 粘成数字 “12”，
     #    于是每一句带两个引用的结论都会被判成「数字不在原文」。
     plain = _MARKER_RE.sub("", sentence)
@@ -75,9 +89,11 @@ def _supports(sentence: str, chunk_text: str) -> tuple[bool, float, Reason]:
 
     chunk_units = content_units(chunk_text)
     recall = len(sentence_units & chunk_units) / len(sentence_units)
-    numbers = _NUMBER_RE.findall(normalize(plain))
-    chunk_numbers = set(_NUMBER_RE.findall(normalize(chunk_text)))
-    number_ok = all(n in chunk_numbers for n in numbers)
+    numbers = _gate_numbers(sentence)
+    # ⚠️ 数字按**该分句全部被引片段的并集**校验，不按单个片段：
+    #    一个分句常同时引用跨页的两个片段，数字只出现在其中一段
+    #    （如「本科学位…[1]；学分为70[2]」合并引用），按单段判必然误报。
+    number_ok = all(n in cited_numbers for n in numbers)
     long_common = _has_long_common(plain, chunk_text)
     supported = number_ok and (recall >= SUPPORT_UNIT_RECALL or long_common)
 
@@ -97,6 +113,8 @@ def check_citation_support(
 
     - 每条被引片段**单独判定**；失败的编号即使句子整体 supported 也进
       `unsupported_markers`（前端角标提示）。
+    - 数字按**该分句全部被引片段的并集**校验，单段不必包含全部数字；
+      版本年号（「2025 年修订」）不参与数字比对。
     - 句子级 `unsupported_citations` 只在**所有**被引片段都不支持时生成。
     - 内容单元少于 `SUPPORT_MIN_UNITS` 的句子不判（保守，避免误标）。
     """
@@ -119,13 +137,20 @@ def check_citation_support(
         if len(content_units(_MARKER_RE.sub("", sentence))) < SUPPORT_MIN_UNITS:
             continue
 
+        # 该分句全部被引片段的数字并集 —— 数字只要求出现在其中任一段
+        cited_numbers = {
+            n
+            for marker in legal
+            for n in _NUMBER_RE.findall(normalize(evidence[marker - 1].text or ""))
+        }
+
         failures: list[UnsupportedMarker] = []
         best_score = 0.0
         best_reason: Reason = "no_overlap"
         any_supported = False
         for marker in legal:
             chunk = evidence[marker - 1]
-            ok, score, reason = _supports(sentence, chunk.text or "")
+            ok, score, reason = _supports(sentence, chunk.text or "", cited_numbers)
             if ok:
                 any_supported = True
             else:

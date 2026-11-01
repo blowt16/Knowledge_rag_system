@@ -13,8 +13,10 @@
 import type { MdastNode } from './uncitedAnnotation'
 
 const CITE_PREFIX = '#cite-'
-const MARKER = /\[(\d+)\]/g
-const HAS_MARKER = /\[\d+\]/
+// 与后端一致：只认 1~3 位编号。4 位方括号数字是公文年号
+// （「桂电教[2019]36号」），不是引用角标。
+const MARKER = /\[(\d{1,3})\]/g
+const HAS_MARKER = /\[\d{1,3}\]/
 
 /** 角标 href 的前缀 —— 渲染层据此把普通链接与角标分开。 */
 export function citeHref(marker: number): string {

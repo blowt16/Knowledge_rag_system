@@ -293,7 +293,8 @@ async def _record_degradation(session_id: str, kind: str, detail: str) -> None:
 
 # ---- 工具 --------------------------------------------------------------
 
-_MARKER_RE_SOURCE = r"\[\d+\]"
+# 4 位方括号数字是公文年号（「桂电教[2019]36号」），不是引用编号
+_MARKER_RE_SOURCE = r"\[\d{1,3}\]"
 
 
 def _strip_markers(text: str) -> str:

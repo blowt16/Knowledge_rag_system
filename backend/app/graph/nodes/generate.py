@@ -308,7 +308,8 @@ class StreamJsonParser:
 
 def extract_markers(answer: str, *, evidence_count: int) -> list[int]:
     """从答案正文派生引用编号（**唯一来源**）。"""
-    return [int(m) for m in re.findall(r"\[(\d+)\]", answer or "")]
+    # 4 位方括号数字是公文年号（「桂电教[2019]36号」），不是引用编号
+    return [int(m) for m in re.findall(r"\[(\d{1,3})\]", answer or "")]
 
 
 # 元陈述（§3.5.3 节点 9 的排除项，M3 的 K-1）：断言的不是**文档中的事实**，

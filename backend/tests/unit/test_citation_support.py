@@ -83,6 +83,40 @@ def test_number_in_same_clause_still_flagged():
     assert markers[0].reason == "number_mismatch"
 
 
+def test_document_number_year_is_not_stripped_as_marker():
+    """文档编号「桂电教[2019]36号」里的年份不是角标，剥掉会让数字切分与原文不一致。"""
+    answer = ("免修成绩参照《退役复学学生免修成绩认定办法》"
+              "桂电教[2019]36号执行，免修成绩为85分[1]。")
+    chunk = ("免修成绩参照《退役复学学生免修成绩认定办法》"
+             "桂电教[2019]36 号执行，免修成绩为85 分。")
+    got, markers, supported = check_citation_support(answer, [_chunk("c1", chunk)])
+    assert got == []
+    assert markers == []
+    assert supported == 1
+
+
+def test_number_in_another_cited_chunk_is_not_flagged():
+    """同一分句引用两段、数字各在一段：按被引片段并集校验，不能互判缺失。"""
+    answer = "免修成绩为85分[1]，课程成绩按60分记录[2]。"
+    got, markers, supported = check_citation_support(answer, [
+        _chunk("c1", "免修成绩为85分。"),
+        _chunk("c2", "课程成绩按60分记录。"),
+    ])
+    assert got == []
+    assert markers == []
+    assert supported == 1
+
+
+def test_version_year_is_not_a_number_mismatch():
+    """「（2025 年修订）」是版本元数据，后面的页码不重复标题，不能判数字不符。"""
+    answer = "《某某实施细则（2025 年修订）》规定，学分绩达到70[1]。"
+    chunk = "第四条 课程学习水平与综合评价指标（学分绩）达到70。"
+    got, markers, supported = check_citation_support(answer, [_chunk("c1", chunk)])
+    assert got == []
+    assert markers == []
+    assert supported == 1
+
+
 def test_partial_support_flags_only_the_bad_marker():
     answer = "转专业需要提交申请表[1][2]。"
     got, markers, supported = check_citation_support(answer, [

@@ -34,7 +34,9 @@ from app.schemas.chat import (
     VerifyReport,
 )
 
-_MARKER_RE = re.compile(r"\[(\d+)\]")
+# 与 citation_support 保持一致：只认 1~3 位编号，4 位方括号数字是公文年号
+# （「桂电教[2019]36号」），不是引用。
+_MARKER_RE = re.compile(r"\[(\d{1,3})\]")
 _SENTENCE_RE = re.compile(r"[^。！？\n]*[。！？\n]?")
 
 
