@@ -23,7 +23,7 @@
   - [附录 C｜三天学习路线](#appendix-c)
   - [附录 D｜面试前 10 分钟速记卡](#appendix-d)
 
-> 正文里的内容小标题已统一为三级标题（如「解析链路」「关键设计」「失败补偿」「降级链」「四个关键规格」），在 VS Code / Typora / Obsidian 的大纲面板中可以直接跳转。
+> 正文里的内容小标题已统一为三级标题并带 `x.x.x` 编号（如 `2.4.1 解析链路`、`3.8.3 降级链`），在 VS Code / Typora / Obsidian 的大纲面板中可以直接跳转；附录 C 使用 `C.1`–`C.4` 编号。
 
 <a id="ch1"></a>
 
@@ -153,7 +153,7 @@ flowchart LR
 | 评测 | **自建规则指标 + ragas（隔离虚拟环境）** | ragas 与主环境依赖冲突，装进去会段错误 | “ragas 跑在 `.venv-ragas` 子进程里，主环境一个包都不动。” |
 | OCR | **MinerU（按页限定范围）** | 只把不可信页送出去，成本低 | “整份 PDF 送 OCR 是 50 倍浪费，我们按页重映射。” |
 
-### 选型里最值得讲的三组取舍
+### 1.4.1 选型里最值得讲的三组取舍
 
 1. **Chroma 嵌入式 vs 外部向量库**：换来零运维和简单，代价是强制单进程，不能横向扩展。
 2. **交叉编码器 vs 只用向量相似度**：换来排序质量，代价是 GPU 显存和冷启动；所以有预热、信号量、降级。
@@ -165,66 +165,66 @@ flowchart LR
 
 > 这一节的题是“整项目视角”，后面每个节点还有更细的追问。
 
-### Q1. 请用一分钟介绍一下这个项目
+### 1.5.1 Q1. 请用一分钟介绍一下这个项目
 
 **答题骨架**：做什么 → 关键技术 → 亮点 → 结果。
 
 > **口播**：
 > “这是一个面向校园规章制度的 RAG 问答系统。学生用口语提问，系统从 PDF、Word、PPT 等公文里检索依据，流式生成带引用的答案。后端是 FastAPI 加 LangGraph，检索是向量加 BM25 双路召回、RRF 融合、交叉编码器精排，生成用 DeepSeek。答案里的每个结论句都要挂引用标记，前端可以一键跳回原文。项目还做了权限隔离、版本治理、降级和评测。”
 
-### Q2. 为什么用 RAG，不直接微调，或者把全文塞给大模型？
+### 1.5.2 Q2. 为什么用 RAG，不直接微调，或者把全文塞给大模型？
 
 **答题骨架**：知识更新 → 可追溯 → 成本与注意力。
 
 > **口播**：
 > “校园制度会更新，微调把知识写进参数里，改一条政策就要重训，而且没法给出处。RAG 把知识和模型分开：文档更新只重建索引，答案还能追溯到具体文件和页码。长上下文也不能替代检索，因为制度文档多、窗口再大也有成本，而且把所有文档塞进去会稀释注意力。这个场景答案必须可追溯，所以 RAG 更合适。”
 
-### Q3. 一次提问从输入到答案，完整链路是什么？
+### 1.5.3 Q3. 一次提问从输入到答案，完整链路是什么？
 
 > **口播**：
 > “线上从提问开始，先做指代消解，把‘那这个呢’补全成自包含问题；再路由成闲聊、澄清或知识库问答；知识库这条会生成原句、关键词、假设答案三类查询，分别打向量和 BM25 两路召回；然后按版本和权限过滤，用 RRF 融合，交叉编码器精排到 Top-5；组装上下文时编号，模型输出 decision 和 answer；最后解析正文里的引用标记，产出引用和校验报告，流式返回并落库。”
 
-### Q4. 为什么要做混合检索？只用向量检索不行吗？
+### 1.5.4 Q4. 为什么要做混合检索？只用向量检索不行吗？
 
 > **口播**：
 > “向量检索擅长语义相近，但对‘桂电教〔2025〕28号’这种精确串不敏感，文号里的数字和符号在嵌入空间几乎没有区分度；BM25 正好相反，对专有名词和文号很准，但不懂同义改写。所以两路都跑，用 RRF 按排名融合，而不是分数相加，因为两种分数量纲不同。融合后再用交叉编码器精排，保证最终排序质量。”
 
-### Q5. 你怎么保证模型不瞎编？
+### 1.5.5 Q5. 你怎么保证模型不瞎编？
 
 > **口播**：
 > “四层：第一，提示词硬约束只依据证据回答，证据不足必须拒答；第二，答案必须带句级引用标记，没标记的结论句会被校验出来；第三，引用编号由服务端从正文派生，不让模型单独输出，越界用证据条数做上界；第四，流式已经发出去的内容撤不回，所以定位是标注而不是拦截，前端把未证实的句子置灰，指标进仪表盘。规则校验只做字面和数字比对，不做语义蕴含，这是明确的边界。”
 
-### Q6. 多轮对话里的“那这个呢”怎么处理？
+### 1.5.6 Q6. 多轮对话里的“那这个呢”怎么处理？
 
 > **口播**：
 > “每轮从 messages 表重新加载历史，图是无状态的，不用 LangGraph 的 checkpointer。历史先过一个低成本闸门：没有历史、没有代词、也没有省略特征就跳过消解；有‘它’‘那个’‘那 2025 级的呢’这种才调模型补全。路由上只有上一轮是 knowledge 才允许粘住，chat 和 clarify 不粘，避免答非所问和反复反问。历史超预算会做滚动压缩，摘要和未压缩消息一起算 token；压缩失败就退回未压缩历史，不让用户看到 500。”
 
-### Q7. 文档更新、旧版本怎么处理？
+### 1.5.7 Q7. 文档更新、旧版本怎么处理？
 
 > **口播**：
 > “版本按标题分组，版本号在事务内分配，取组内所有行的最大 version 加一，失败行也占号。检索期做版本折叠：回查 PostgreSQL 取 active 且已生效的最大版本，只返回这一版，所以停用新版时上一版会自动恢复。文档改了权限或生效日期，必须重写 Chroma 的 metadata，因为过滤读的是向量库那份；写入顺序按收紧或放宽方向决定，保证失败时停在更保守的一侧。”
 
-### Q8. 权限怎么隔离？管理员提权怎么防止成为后门？
+### 1.5.8 Q8. 权限怎么隔离？管理员提权怎么防止成为后门？
 
 > **口播**：
 > “权限只有一个判定源 `filters.py`，向量检索、BM25 的文档过滤、原文下载三处共用。公式是状态 active、已生效、并且公开或当前角色可见。不可见一律返回 404 不是 403，让‘不可见’和‘不存在’不可区分，防止探测文档是否存在。管理员提权只对 admin 生效，拿到的 chunk 会标 escalated，评测里能直接统计越权引用。”
 
-### Q9. 检索、精排、生成某一环挂了怎么办？
+### 1.5.9 Q9. 检索、精排、生成某一环挂了怎么办？
 
 > **口播**：
 > “外部依赖很多，所以每个环节都有明确降级：单路检索失败用另一路继续，记降级事件；精排失败跳过精排、按 RRF 顺序返回，置信度置空；查询改写失败退化成原句；消解超时透传原问题；生成上游格式错误只发 error，不伪装成拒答；压缩失败退回未压缩历史。降级不是只打日志，统一词表落库，指标里能统计降级率。原则是宁可降级，不让请求 500。”
 
-### Q10. 你怎么证明你的优化有效？
+### 1.5.10 Q10. 你怎么证明你的优化有效？
 
 > **口播**：
 > “检索用确定性指标 Recall@5 和 MRR，还有分路对照，避免‘两路看着都在跑、实际只有一路有效’。多轮用真实图跑题库，看路由准确率、澄清误报、消解锚点命中；消解还要做对照，只差消解一个变量。生成用 ragas 四项，装在隔离环境，避免和主环境依赖冲突。消融是累积开关，最后一行重复上一行配置测噪声底。指标都带语料规模，小语料会饱和，不能外推。”
 
-### Q11. 这个项目最难的地方是什么？
+### 1.5.11 Q11. 这个项目最难的地方是什么？
 
 > **口播**：
 > “最难的是那些‘不报错但静默变差’的问题。比如 Chroma 的日期比较只认数字，传字符串会让向量路全部降级，混合检索等于从来没生效过，表面看只是召回少一点；还有 BM25 的 collection.get 不保证按传入 id 顺序返回，排序被整条丢掉，表现为 BM25 好像没起作用。我们的应对是把降级留痕、做单路对照和消融，让这类问题能被指标发现。”
 
-### Q12. 如果让你重做，你会改什么？
+### 1.5.12 Q12. 如果让你重做，你会改什么？
 
 > **口播**：
 > “如果重做，我会更早把评测和可观测搭起来，而不是先堆功能；还会把向量库和 BM25 换成可共享的外部服务，解除单进程限制，才能横向扩展。另外限流、上传体积上限、语义蕴含校验这些目前是明确的待办，不是已经做完的。”
@@ -233,11 +233,11 @@ flowchart LR
 
 ## 1.6 开场自我介绍模板
 
-### 30 秒版
+### 1.6.1 30 秒版
 
 > “我做过一个校园规章制度 RAG 问答系统。它的核心不是把文档丢给大模型，而是把检索、引用、权限和评测做成一条可上线的链路：双路召回加精排保证召回质量，句级引用和服务端校验控制幻觉，版本折叠和 ACL 保证答案现行且不越权。整个后端是 FastAPI + LangGraph，前端 React 流式渲染，评测用自建指标加 ragas。”
 
-### 2 分钟版
+### 1.6.2 2 分钟版
 
 > 在 30 秒版基础上，再补三段：
 > 1. **构建侧**：PDF 文字层质检、扫描页按页 OCR、表格原子切分、三存储顺序写入和失败补偿；
@@ -275,7 +275,7 @@ flowchart TD
 **这条板块的主线只有一句话：**
 **先把“文档行”建出来，再把内容变成 chunk，最后把状态翻成 active。** 中间任何一步失败，都走补偿删除，但 PostgreSQL 的行永远保留。
 
-### 三个贯穿全板块的设计原则
+### 2.0.1 三个贯穿全板块的设计原则
 
 | 原则 | 具体做法 | 为什么 |
 |---|---|---|
@@ -403,7 +403,7 @@ return row["doc_group_id"], int(row["max_version"]) + 1
 
 **一句话**：把文件变成“按页的文本 + 图片 + bbox + 章节标记”；PDF 只把**文字层不可信**的页送 OCR。
 
-### 解析链路
+### 2.4.1 解析链路
 
 ```mermaid
 flowchart TD
@@ -423,7 +423,7 @@ flowchart TD
   TB --> M
 ```
 
-### 关键设计 1：判据是“文字可不可信”，不是“有没有图”
+### 2.4.2 关键设计 1：判据是“文字可不可信”，不是“有没有图”
 
 `backend/app/ingestion/loaders/pdf.py:290-326` 的页级判据只有两条：
 
@@ -434,7 +434,7 @@ flowchart TD
 
 > 这是项目里一个很典型的坑：把**整份级**的“平均每页有效字符 < 50”错当成**页级**阈值，结果 5 份公文各多送了一页给 MinerU，内容没错、成本白花，而且很难发现。
 
-### 关键设计 2：一次遍历同时做三件事
+### 2.4.3 关键设计 2：一次遍历同时做三件事
 
 `load_pdf` 只 `fitz.open` 一次，同时完成：
 
@@ -444,7 +444,7 @@ flowchart TD
 
 旧链路同一个 PDF 被打开 3–4 次，每次重建 xref 和页树。
 
-### 关键设计 3：竖排检测必须在清洗之前
+### 2.4.4 关键设计 3：竖排检测必须在清洗之前
 
 `pdf.py:105-106`：
 
@@ -455,7 +455,7 @@ return "".join(ln for ln in reversed(lines) if ln)
 
 **动作是“反转行序并合并”，不是“反转全部字符”，也不是丢弃。** 清洗会先删掉“成文日期”这种单字符行；如果先清洗再反转，日期就永远救不回来了。
 
-### 关键设计 4：表格按原子区间处理，不做跨页合并
+### 2.4.5 关键设计 4：表格按原子区间处理，不做跨页合并
 
 - PDF 表格先被 `find_tables()` 抽出来，再序列化成**自然句**，例如：
   `课程内容是无偿献血，参考学分是2分/次。`
@@ -480,7 +480,7 @@ else:
     needs_ocr.append(page_no)
 ```
 
-### 其他格式的解析方式
+### 2.4.6 其他格式的解析方式
 
 | 格式 | 解析方式 | `page` 语义 |
 |---|---|---|
@@ -507,7 +507,7 @@ else:
 
 **输入 → 输出**：`[(页码, 页文本)]` → `normalized_text + page_slices`。
 
-### 清洗规则（`backend/app/ingestion/clean.py`）
+### 2.5.1 清洗规则（`backend/app/ingestion/clean.py`）
 
 | 规则 | 例子 | 注意 |
 |---|---|---|
@@ -533,7 +533,7 @@ for page_no, raw in page_texts:
     slices.append(PageSlice(page=page_no, char_start=start, char_end=cursor))
 ```
 
-### 为什么规范化文本重要
+### 2.5.2 为什么规范化文本重要
 
 - chunk 的 `char_start / char_end` 相对它，不是原始 PDF 的字节偏移；
 - 引用回跳、bbox 归属、`page` 反查都以它为参照系；
@@ -574,17 +574,17 @@ if next_pos <= pos:
 pos = next_pos
 ```
 
-### 三个关键点
+### 2.6.1 三个关键点
 
 1. **优先在中文句末标点断**（`。！？；\n`），找不到再退到次级标点（`，、：`），都不行才硬切。
 2. **50 字重叠**：避免一个结论正好被切在边界上，两边都缺半句。
 3. **表格是原子区间**：`chunk_text(atomic=...)` 命中区间就整段吐出，不切、不重叠；正文也不会吃进表格。
 
-### 为什么表格必须原子
+### 2.6.2 为什么表格必须原子
 
 实测《第二课堂成绩单制度实施办法》的评分表：表头只在 chunk 12，数据行散布在 chunk 13–24，**79 条有效数据行里 28 条（35%）的“行标签”和“学分值”被切到不同 chunk**。如果切表，检索只命中一半，答案就会缺条件。
 
-### `chunk_id` 的生成规则（`chunker.py:35-37`）
+### 2.6.3 `chunk_id` 的生成规则（`chunker.py:35-37`）
 
 ```python
 def make_chunk_id(document_id: str, chunk_index: int) -> str:
@@ -611,7 +611,7 @@ def make_chunk_id(document_id: str, chunk_index: int) -> str:
 
 **输入 → 输出**：`DocumentMeta + ChunkSpan + 页切片 + 章节标记` → Chroma metadata。
 
-### 字段与消费者（每个都不是“先存着”）
+### 2.7.1 字段与消费者（每个都不是“先存着”）
 
 | 字段 | 谁在用 |
 |---|---|
@@ -623,12 +623,12 @@ def make_chunk_id(document_id: str, chunk_index: int) -> str:
 | `current_chapter / chapter_level` | 引用溯源到章节 |
 | `image_paths` | 引用面板缩略图 |
 
-### 两个容易讲错的细节
+### 2.7.2 两个容易讲错的细节
 
 - **日期存整数 `YYYYMMDD`**：Chroma 的 `$lte / $gte` 只接受 int / float，传 ISO 字符串会直接抛错，而且只在运行时暴露（`filters.py:65-81`）。
 - **角色权限展开成三个布尔字段**：Chroma 的 `where` 只能在标量上做 `$eq`，对 JSON 字符串做不了成员判断；所以 `visible_roles` 进 Chroma 时展开成 `vis_admin / vis_staff / vis_student`。
 
-### 章节归属（`backend/app/ingestion/enrich.py:53-71`）
+### 2.7.3 章节归属（`backend/app/ingestion/enrich.py:53-71`）
 
 旧实现把“全文档第一个标题”复制到每个 chunk，一份制度的所有片段都显示成“第一章”；PDF 更彻底，加载器从不写这个字段，实测 1244/1244 全为空。现在用 `chapter_at(marks, offset)` 取该偏移之前最近的章节标记。
 
@@ -663,14 +663,14 @@ vector.upsert(
 bm25.add([(e.chunk_id, e.text) for e in entries])
 ```
 
-### 向量化（`backend/app/retrieval/embedding.py`）
+### 2.8.1 向量化（`backend/app/retrieval/embedding.py`）
 
 - 每批 **20 个 chunk / 18000 字**；
 - 失败指数退避重试 3 次；
 - 按服务端返回的 `index` 排序，避免乱序；
 - 换任何嵌入模型都必须**全量重建索引**：维度一致 ≠ 可以混用，新旧向量不在同一个语义坐标系。
 
-### BM25S（`backend/app/retrieval/bm25.py`）
+### 2.8.2 BM25S（`backend/app/retrieval/bm25.py`）
 
 - 用 `jieba.lcut` 分词，旧项目的 `str.split()` 对中文完全失效；
 - BM25S 没有 metadata，所以旁边持久化一份 **“下标 → chunk_id”映射表**，并且分词结果必须和映射表**同文件落盘**；
@@ -702,7 +702,7 @@ async with db.tx() as conn:
     )
 ```
 
-### 失败补偿（`pipeline.py:301-322`）
+### 2.9.1 失败补偿（`pipeline.py:301-322`）
 
 ```python
 try:
@@ -713,13 +713,13 @@ except Exception:
 UPDATE documents SET status = 'failed' WHERE id = $1
 ```
 
-### 删除顺序（`index_service.py:60-84`）
+### 2.9.2 删除顺序（`index_service.py:60-84`）
 
 - 先删 Chroma，再删 BM25；
 - BM25 的 chunk_id **向 BM25 索引自己查**，不能从 Chroma 反推——Chroma 已空时会推出空列表，留下“还搜得到”的孤儿；
 - PostgreSQL 的行只置 `failed`，**永远不删**。
 
-### 为什么“最后翻 active”能解决半成品问题
+### 2.9.3 为什么“最后翻 active”能解决半成品问题
 
 检索过滤公式第一项就是 `status = active`。所以：
 
@@ -745,7 +745,7 @@ UPDATE documents SET status = 'failed' WHERE id = $1
 
 **一句话**：版本折叠在**检索期**做，不在入库时给旧版打“已废止”标；改权限/生效日期/状态要重写 Chroma metadata。
 
-### 版本折叠
+### 2.10.1 版本折叠
 
 **检索期**回查 PostgreSQL（`backend/app/retrieval/search.py:112-122`）：
 
@@ -762,7 +762,7 @@ SELECT doc_group_id, MAX(version) AS latest
 
 **停用新版会怎样**：上一版自动“复活”，因为折叠基准是数据库里 active 且已生效的最大版本，不需要手工 enable。
 
-### 改字段的重写顺序
+### 2.10.2 改字段的重写顺序
 
 `document_service.py:456-475` 区分“收紧”和“放宽”：
 
@@ -771,7 +771,7 @@ SELECT doc_group_id, MAX(version) AS latest
 | 收紧（公开→受限、启用→停用、角色变少、生效日推后） | 先 Chroma，后 PG | 最坏停在“检索已经变严、PG 还没更新” |
 | 放宽（受限→公开、停用→启用、角色变多、生效日提前） | 先 PG，后 Chroma | 最坏停在“PG 已放宽、检索还严”，不会泄露 |
 
-### 删除顺序（`document_service.py:520-557`）
+### 2.10.3 删除顺序（`document_service.py:520-557`）
 
 先把行落到 `disabled` 中间态 → 删索引（Chroma → BM25）→ 删 PG 行。源文件和规范化文本保留，因为删了既不能回滚，也再拿不到原文。
 
@@ -820,13 +820,13 @@ flowchart TD
   CT --> E
 ```
 
-### 三个必须先记住的全局设定
+### 3.0.1 三个必须先记住的全局设定
 
 1. **图是无状态的**：每轮 `new_state()` 新建，跨轮只保留 `session_id`、从 `messages` 加载的 `history`、`last_route`。**不用 LangGraph 的 checkpointer**——`messages` 表是历史的唯一权威。
 2. **两条拒答路径**：候选为空 → `refuse` 节点（零成本、不调模型）；模型判定证据不足 → `generate` 返回 `REFUSED_NO_EVIDENCE` 直接到 END。
 3. **只有 knowledge 路径才发引用**：`chat` 和 `clarify` 不检索、不引用、不发 `citations / verify`。
 
-### 节点输入输出总表
+### 3.0.2 节点输入输出总表
 
 | 节点 | 输入 | 输出 | 失败/降级 |
 |---|---|---|---|
@@ -848,7 +848,7 @@ flowchart TD
 
 **输入 → 输出**：`query + session_id + JWT` → `RAGState`。
 
-### 会话长锁
+### 3.1.1 会话长锁
 
 `backend/app/services/chat_service.py:177-181`：
 
@@ -863,12 +863,12 @@ if not await db.acquire_long_lock(session_id, holder):
 
 **为什么是表而不是进程内锁**：服务是多请求并发的，进程内锁跨不了进程；而且锁要有 TTL，防止进程崩溃后永久占着。`session_locks` 表用 `ON CONFLICT ... WHERE expires_at < now()` 原子完成“空闲则拿、过期则抢”。
 
-### 两个细节
+### 3.1.2 两个细节
 
 - **心跳 30 秒续期，TTL 120 秒**：生成可能超过 2 分钟，没有心跳会被别人抢走。
 - **释放必须带 holder**：`DELETE ... WHERE holder = $2`，否则一个已超时、锁被抢走的旧请求，结束时会把新持有者的锁删掉。
 
-### 上下文加载与滚动压缩
+### 3.1.3 上下文加载与滚动压缩
 
 **完整历史 = `compressed_summary` + `messages[compressed_count:]`。**
 
@@ -883,7 +883,7 @@ if not await db.acquire_long_lock(session_id, holder):
 | `compression_min_messages` | 6 | 单次至少压 6 条，避免每轮都调模型 |
 | `summary_max_tokens` | 800 | 摘要自身上限，防止越压越胖 |
 
-### 压缩算法（`context_service.py:193-200`）
+### 3.1.4 压缩算法（`context_service.py:193-200`）
 
 ```python
 target = max(0, _low_water() - _summary_cap())
@@ -894,7 +894,7 @@ while merged < compressible and (merged < _min_merge() or remaining > target):
     merged += 1
 ```
 
-### 三个关键约束
+### 3.1.5 三个关键约束
 
 - **摘要计入预算**：否则摘要越长、可压原文越少，触发线却不动，压缩永远不收敛。
 - **压缩失败不能拦住回答**：超时/报错就退回未压缩历史，记 `degradation_events(node="compaction")`。
@@ -918,7 +918,7 @@ while merged < compressible and (merged < _min_merge() or remaining > target):
 
 **输入 → 输出**：`query + history` → `resolved_query + resolve_skipped_reason`。
 
-### 什么时候才调模型
+### 3.2.1 什么时候才调模型
 
 `backend/app/graph/nodes/resolve.py:144-154`：
 
@@ -933,7 +933,7 @@ if not (has_pronoun(query) or has_ellipsis_feature(query)):
 return True, "none"
 ```
 
-### 三个判据
+### 3.2.2 三个判据
 
 | 判据 | 说明 |
 |---|---|
@@ -943,7 +943,7 @@ return True, "none"
 
 **代词必须 jieba 分词后按词匹配**，不能子串匹配，否则“其他”会误命中“他”（`resolve.py:137-141`）。
 
-### 省略特征三条（`resolve.py:118-132`）
+### 3.2.3 省略特征三条（`resolve.py:118-132`）
 
 ```python
 if has_question and not has_policy_noun:
@@ -956,7 +956,7 @@ if len(text) < 8 and not has_policy_noun:
 
 > 中文多轮里省略比指代更常见，而且省略句往往没有代词；只判代词会漏掉这三种。
 
-### 模型调用与失败处理
+### 3.2.4 模型调用与失败处理
 
 - 只给最近 8 条历史，要求输出 `{"resolved": "..."}`；
 - 输出长度做上限校验，异常就透传原句；
@@ -981,7 +981,7 @@ if len(text) < 8 and not has_policy_noun:
 
 **输入 → 输出**：`resolved_query + last_route + 澄清计数` → `route + route_source`。
 
-### 规则层的两条收严原则
+### 3.3.1 规则层的两条收严原则
 
 `backend/app/graph/nodes/route.py:59-87`：
 
@@ -1004,7 +1004,7 @@ return None
 
 **冲突优先级：`knowledge > chat`**——宁可多检索，不可漏答。
 
-### “保持上一轮”只对 knowledge 生效
+### 3.3.2 “保持上一轮”只对 knowledge 生效
 
 | 上一轮是 | 本轮不明确时 | 为什么 |
 |---|---|---|
@@ -1012,7 +1012,7 @@ return None
 | chat | 不保持 | 否则“你好”→“那这个要多久”被粘成 chat，不检索、答非所问 |
 | clarify | 不保持 | 否则用户回答澄清后的新问题会被再次拽回 clarify，反复反问 |
 
-### 澄清触发只剩一个条件
+### 3.3.3 澄清触发只剩一个条件
 
 `backend/app/graph/nodes/route.py:109-147`：
 
@@ -1037,7 +1037,7 @@ return True
 
 **为什么删掉了“消解失败”这个触发源**：实测发现两个缺陷——长句会被硬拦成澄清，LLM 没机会复核；“那个数学建模比赛”会被判“消解失败”，但它本来就自足。删掉之后，短句的澄清不受影响，因为它们本来就被长度判据兜住。
 
-### 澄清轮次上限
+### 3.3.4 澄清轮次上限
 
 - 同一条追问链最多 2 轮，整个会话最多 6 次；
 - 到顶**不再反问**，改为按最可能的理解作答，并下发 `clarify_skipped` 说明；
@@ -1059,7 +1059,7 @@ return True
 
 **一句话**：chat 负责“知识库答不了的闲聊/系统问题”；clarify 负责“真的不知道你在问什么”，先反问一句。
 
-### chat 节点
+### 3.4.1 chat 节点
 
 `backend/app/graph/nodes/chat.py`：
 
@@ -1067,7 +1067,7 @@ return True
 - 有 stream writer 就边收边发，纯文本直接透传；
 - LLM 抖动时用固定兜底话术，不让闲聊失败。
 
-### clarify 节点
+### 3.4.2 clarify 节点
 
 `backend/app/graph/nodes/clarify.py`：
 
@@ -1095,7 +1095,7 @@ return True
 
 **输入 → 输出**：`resolved_query` → `list[RetrievalQuery]`。
 
-### 三类查询的分工（`backend/app/graph/nodes/rewrite.py:36-37`）
+### 3.5.1 三类查询的分工（`backend/app/graph/nodes/rewrite.py:36-37`）
 
 ```python
 TARGET_BY_SOURCE = {"verbatim": "both", "keywords": "bm25", "hyde": "vector"}
@@ -1108,12 +1108,12 @@ WEIGHT = 1.0
 | `keywords` | LLM 抽关键词 | bm25 | 1.0 | BM25 对短查询敏感，长句会被稀释 |
 | `hyde` | LLM 生成假设答案 | vector | 1.0 | 补口语化问法和正式文本的鸿沟 |
 
-### 两个关键设计
+### 3.5.2 两个关键设计
 
 1. **target 和 weight 由服务端派生，不由模型输出**。否则会出现“keywords 配 vector”这种非法组合，而且权重交给模型填就无法保证一律 1.0，消融实验的归因会被污染。
 2. **verbatim 必须存在且逐字等于 resolved_query**。模型有时会把原句也改写，服务端会强制覆盖回来。
 
-### 降级
+### 3.5.3 降级
 
 - 模型超时 / 解析失败 → 退化为一条 `verbatim`，也就是标准 hybrid；
 - 解析成功但一条可用查询都没有 → 同样退化，并记 `degraded`；
@@ -1136,14 +1136,14 @@ WEIGHT = 1.0
 
 **输入 → 输出**：`retrieval_queries + user + include_restricted` → `candidates`。
 
-### 两路的过滤位置不同（最容易被追问）
+### 3.6.1 两路的过滤位置不同（最容易被追问）
 
 | | 过滤位置 | 是否需要过采样 |
 |---|---|---|
 | **向量路** | 检索器内部：先按相似度取 Top-N，再按 metadata 过滤 | ✅ 需要 |
 | **BM25 路** | 全量打分 → 按文档粒度过滤 → 取 K | ❌ 不需要 |
 
-### 向量路过采样（`backend/app/retrieval/search.py:211-231`）
+### 3.6.2 向量路过采样（`backend/app/retrieval/search.py:211-231`）
 
 ```python
 chunks = await _attempt(int(cfg("retrieval.oversample_first", 3)))
@@ -1158,7 +1158,7 @@ result = chunks[:k]
 - 重试是**整体替换**首次结果，不是叠加；
 - 判据包含**版本折叠后**的条数，不只看 Chroma 过滤结果——某制度有 8 个历史版本时，Top-30 可能被占满，折叠后只剩 2–3 条。
 
-### BM25 路（`search.py:289-298`）
+### 3.6.3 BM25 路（`search.py:289-298`）
 
 ```python
 chunks = await _filter_by_documents(conn, chunks, user, ...)
@@ -1174,7 +1174,7 @@ return folded[:k]
 - ⚠️ `collection.get` **不保证按传入 ids 的顺序返回**，必须按 `hits` 的顺序重建，否则 BM25 的排序会被整条丢掉，表现为“这一路好像没起作用”；
 - 然后按文档粒度套 ACL，再做版本折叠，最后取 K。
 
-### 权限过滤
+### 3.6.4 权限过滤
 
 两路都通过 `backend/app/retrieval/filters.py` 的同一套判定：
 
@@ -1194,7 +1194,7 @@ if not resolve_escalation(role, include_restricted):
 
 **为什么日期必须是整数**：Chroma 的 `$lte` 只接受 int / float，传 ISO 字符串会直接抛错；而这个错只在运行时暴露，且会被降级链静默兜住，表面看只是“召回少一点”。项目真实踩过：向量路 12 次请求全部降级，混合检索等于从来没生效过。
 
-### 失败与降级
+### 3.6.5 失败与降级
 
 - 单路失败：记 `degradation_events`（`node=vector/bm25`，`kind=index_invalid/unavailable`），继续用剩下那一路；
 - 两路都失败：`candidates=[]`，走 `refuse` 分支；
@@ -1216,7 +1216,7 @@ if not resolve_escalation(role, include_restricted):
 
 **一句话**：把多路、多查询的结果按**排名**融合，而不是把分数相加。
 
-### 公式（`backend/app/retrieval/fusion.py`）
+### 3.7.1 公式（`backend/app/retrieval/fusion.py`）
 
 ```
 score(d) = Σ  w_i / (k + rank_i(d))
@@ -1239,15 +1239,15 @@ for query, chunks in ranked_lists:
 ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
 ```
 
-### 为什么用排名而不是分数
+### 3.7.2 为什么用排名而不是分数
 
 余弦相似度和 BM25 分根本不同量纲，直接加权求和等于让量纲决定结果。RRF 只用排名，天然可比。
 
-### 为什么权重一律 1.0
+### 3.7.3 为什么权重一律 1.0
 
 不是懒得调，而是只有权重相等，消融表里 verbatim / keywords / hyde 三行的增益才能归因到**单个查询类型**；权重不等，增益里会混入权重差异。
 
-### 为什么去重键是 chunk_id
+### 3.7.4 为什么去重键是 chunk_id
 
 同一个片段被多条查询、两路同时命中时，分数会自然累加——这正是多查询扩展的价值。
 
@@ -1269,7 +1269,7 @@ ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
 
 **输入 → 输出**：`candidates` → `reranked + retrieval_confidence + rerank_degraded`。
 
-### 两套后端
+### 3.8.1 两套后端
 
 当前 `app.yaml` 配置的是 **Jina Reranker v3.5（listwise）**：
 
@@ -1280,7 +1280,7 @@ ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
 
 **阈值不能混用**：BGE 的 0.3 套到 Jina 上会把全部候选砍光——Jina 对相关块也只给 0.28–0.50。项目实测过：沿用 0.3 → 6 条表格题 0/6 通过；0.1 → 5/6 通过且无关块 0 误放。
 
-### 加载互斥、并发控制、预热
+### 3.8.2 加载互斥、并发控制、预热
 
 `backend/app/retrieval/reranker.py`：
 
@@ -1289,7 +1289,7 @@ ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
 - **启动时后台预热**：冷启动实测 23–80 秒，不预热的话第一个知识型提问要等一分多钟；
 - **加载失败不影响服务启动**：后续请求直接走降级链。
 
-### 降级链
+### 3.8.3 降级链
 
 `reranker.py:220-271`：
 
@@ -1362,7 +1362,7 @@ return "\n".join(
     for index, chunk in enumerate(evidence, start=1)), evidence
 ```
 
-### 四个关键规格
+### 3.9.1 四个关键规格
 
 | 项 | 规格 | 为什么 |
 |---|---|---|
@@ -1371,7 +1371,7 @@ return "\n".join(
 | “低分”的定义 | 仍按 **rerank 分**，不是分组后的顺序 | 分组只影响展示顺序，不影响裁谁 |
 | 裁剪与编号次序 | **先裁后编号** | 否则裁掉中间某条会出现 `[1] [3]` 没有 `[2]` 的空洞 |
 
-### 为什么 `reranked` 不能替代 `evidence`
+### 3.9.2 为什么 `reranked` 不能替代 `evidence`
 
 `build_context` 是“按文档分组 → 组内按 chunk_index 排序”后才拼 context，**prompt 里的顺序 ≠ reranked 的顺序**。拿 `reranked` 做映射，`[1]` 会指向错的 chunk——引用错位比漏引用更糟。
 
@@ -1395,13 +1395,13 @@ return "\n".join(
 
 **输入 → 输出**：`context + evidence + history + summary + query` → `decision + answer`。
 
-### 为什么把充分性判定和生成合并
+### 3.10.1 为什么把充分性判定和生成合并
 
 - 分开做需要两次模型调用；
 - 合并后判定和生成面对同一份证据，不会出现“判定说够、生成说不够”的错位；
 - **代价是自验证困境**：模型若误判“证据够用”，它不会在生成时自我纠正。这无法靠提示词消除，只能靠服务端校验兜底。
 
-### 结构化输出契约
+### 3.10.2 结构化输出契约
 
 ```json
 {"decision":"ANSWERED","answer":"转专业需满足以下条件[1]……"}
@@ -1414,7 +1414,7 @@ return "\n".join(
 
 **以正文为准**，校验的才是真正会被渲染的东西。
 
-### 流式 JSON 解析器
+### 3.10.3 流式 JSON 解析器
 
 `StreamJsonParser` 要处理四种真实问题：
 
@@ -1435,13 +1435,13 @@ def extract_markers(answer: str, *, evidence_count: int) -> list[int]:
 
 > 4 位方括号数字是公文年号（“桂电教[2019]36号”），不是引用编号，所以只认 1–3 位。
 
-### 拒答路径
+### 3.10.4 拒答路径
 
 - 模型返回 `REFUSED_NO_EVIDENCE`：**忽略模型文案**，服务端用固定拒答话术，避免模型在拒答时夹带解释或猜测；
 - `ANSWERED` 但正文没有任何合法标记：服务端降级为拒答；
 - 非流式路径模型调用失败：降级为拒答。
 
-### 硬上限兜底
+### 3.10.5 硬上限兜底
 
 `generate.py:469-493`：
 
@@ -1467,7 +1467,7 @@ def extract_markers(answer: str, *, evidence_count: int) -> list[int]:
 
 **输入 → 输出**：`answer + evidence` → `citations + verify_report`。
 
-### 引用计算
+### 3.11.1 引用计算
 
 `backend/app/graph/nodes/cite.py:59-90`：
 
@@ -1491,13 +1491,13 @@ for match in _MARKER_RE.finditer(answer or ""):
     ))
 ```
 
-### 三个关键点
+### 3.11.2 三个关键点
 
 - 只输出答案中**实际引用**的 chunk，不是全部检索结果；
 - **越界上界用 `len(evidence)`，不是 `len(candidates)`**：候选可达 15 条，用它会漏掉“只有 5 条证据却写 `[7]`”；
 - 图片存**文件名**不是签名 URL：签名 URL 5 分钟过期，而 citations 会落库。
 
-### 校验报告
+### 3.11.3 校验报告
 
 `build_verify_report` 产出：
 
@@ -1519,7 +1519,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 - 有实质内容（纯过渡句、过短句不算）；
 - **判定保守：拿不准的一律不算，宁可漏标，不可错标。**
 
-### 引用支持度校验
+### 3.11.4 引用支持度校验
 
 `backend/app/graph/nodes/citation_support.py` 是**字面规则**，不调模型：
 
@@ -1532,7 +1532,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 **它不做语义蕴含**：引用片段是否“真的”支撑结论，需要 LLM 或 NLI 模型，这是明确的后续项。
 
-### 流式与后校验的冲突
+### 3.11.5 流式与后校验的冲突
 
 **Token 一旦流出就已经到达用户，校验无法撤回内容。** 所以定位是：
 
@@ -1556,14 +1556,14 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 **一句话**：精排后候选为空时，零成本短路，不调模型，返回固定话术。
 
-### 两条拒答路径的区别
+### 3.12.1 两条拒答路径的区别
 
 | 来源 | 触发 | `decision` 事件 | `refused` 事件 |
 |---|---|---|---|
 | 候选为空 → `refuse` 节点 | `reranked` 为空 | **不发送** | 发送，`reason=no_candidate` |
 | 模型判定证据不足 → `generate` 直接 END | `REFUSED_NO_EVIDENCE` | 发送 | 发送，`reason=insufficient_evidence` |
 
-### 为什么区分
+### 3.12.2 为什么区分
 
 - 候选为空是**检索问题**：可能需要补文档、查索引；
 - 证据不足是**生成判断**：检索到了，但材料答不了这个问题；
@@ -1584,7 +1584,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 **一句话**：把图里的阶段、token、最终状态翻译成前端能消费的 SSE 事件，并在短锁保护下落库。
 
-### 事件清单
+### 3.13.1 事件清单
 
 | 事件 | 何时发 | 关键载荷 |
 |---|---|---|
@@ -1601,13 +1601,13 @@ for match in _MARKER_RE.finditer(answer or ""):
 | `done` | 正常结束 | `latency_ms` |
 | `error` | 任何异常 | `code`、`message`；**终止事件** |
 
-### 三个协议级铁律
+### 3.13.2 三个协议级铁律
 
 1. **`error` 是终止事件**：发完 error 不再发 decision / citations / verify / refused / done；前端保留已流出的正文。
 2. **`route` 事件不能只看 `final.get("route")`**：`new_state()` 给 route 设了默认值 `knowledge`，必须确认 route 节点真的跑过。
 3. **stage 与节点名解耦**：`NODE_TO_STAGE` 只此一份，节点重构不改 SSE 协议；`clarify` 和 `refuse` 刻意不在表里。
 
-### 落库
+### 3.13.3 落库
 
 `chat_service.py:405-450`：
 
@@ -1645,7 +1645,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 **问题**：只锁检索是不够的。原文下载、文本导出、图片读取都是绕过检索期权限的捷径；如果那里另写一套判定，两套迟早不一致。
 
-### 做法
+### 4.1.1 做法
 
 - 过滤条件只在 `backend/app/retrieval/filters.py` 生成；
 - 三处共用：向量检索、BM25 的文档粒度过滤、用户端原文访问；
@@ -1660,7 +1660,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 ## 4.2 降级：任何外部依赖都会坏
 
-### 原则
+### 4.2.1 原则
 
 **宁可降级，不让请求 500；降级必须留痕，不能只打日志。**
 
@@ -1683,7 +1683,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 ## 4.3 可观测：一条请求怎么定位
 
-### 三件套
+### 4.3.1 三件套
 
 1. **trace_id**：HTTP 中间件生成或续接入站 `traceparent`，响应头 `x-trace-id` 回传；后台任务显式落库再挂回。
 2. **节点 span**：Langfuse 每个节点一个 span，metadata 只放“多少钱、几秒、降不降级”，**不放正文**；异常只记类型、不记 message（message 可能回显 prompt）。
@@ -1698,7 +1698,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 ## 4.4 评测：怎么证明改有效
 
-### 四层评测
+### 4.4.1 四层评测
 
 | 层 | 指标 | 目的 |
 |---|---|---|
@@ -1707,7 +1707,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 | 生成 | ragas 四项：faithfulness、answer_relevancy、context_precision、context_recall | 答案是否有依据、是否切题 |
 | 工程 | 拒答率、引用越界数、无依据结论占比、降级率、节点 p95 | 线上可观测 |
 
-### 消融设计
+### 4.4.2 消融设计
 
 - **累积消融**：逐层打开开关（纯向量 → 加 BM25 → 加 RRF → 加精排 → 加三种查询扩展），每行只与上一行差一个变量；
 - **最后一行重复上一行配置**：测这组指标的**噪声底**；没有这一行，任何小于噪声的“提升”都无法证伪；
@@ -1721,7 +1721,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 ## 4.5 关键数字与口径（能引用，但别乱吹）
 
-### 可以引用的数字
+### 4.5.1 可以引用的数字
 
 | 指标 | 数值 | 出处/口径 |
 |---|---|---|
@@ -1734,7 +1734,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 | 精排模型显存 | 约 **2.3–2.5 GB** | 代码注释实测 |
 | 精排冷启动 | **23–80 秒** | 代码注释实测；启动时后台预热 |
 
-### 关键参数
+### 4.5.2 关键参数
 
 - 分块 500 字 / 50 重叠 / 最小 5 字；
 - 嵌入每批 20 chunk / 18000 字，重试 3 次；
@@ -1743,7 +1743,7 @@ for match in _MARKER_RE.finditer(answer or ""):
 - 历史预算 16000 token，高水位 12800，低水位 8000，保留最近 10 条，摘要上限 800；
 - 检索上下文预算 8000 token。
 
-### 不要吹的牛
+### 4.5.3 不要吹的牛
 
 1. **不要说“融合带来了 Recall 提升”**：语料太小，BM25 单路已经是 1.000，项目文档如实记录“融合未超出单路”。能讲的是“建立了可复现的对照基准”。
 2. **不要说“语义蕴含校验”**：引用支持度是字面规则（二元组、数字、4-gram），不做 NLI/LLM 语义判定。
@@ -1816,25 +1816,25 @@ for match in _MARKER_RE.finditer(answer or ""):
 
 ## 附录 C｜三天学习路线
 
-### Day 1：把线上主链跑通
+### C.1 Day 1：把线上主链跑通
 
 - 读第一章 + `builder.py` + `chat_service.py`；
 - 读 `search.py` / `fusion.py` / `reranker.py`；
 - 目标：能不看文档画出 11 个节点，并说清每一段的输入输出。
 
-### Day 2：把构建链和设计取舍补上
+### C.2 Day 2：把构建链和设计取舍补上
 
 - 读 `pipeline.py` + `pdf.py` + `chunker.py` + `index_service.py`；
 - 读 `filters.py` + `document_service.py` 的版本/权限部分；
 - 目标：能讲清“为什么先建行、为什么补偿删除、为什么日期存整数”。
 
-### Day 3：评测与口播
+### C.3 Day 3：评测与口播
 
 - 读 `docs/检索基线.md`、`docs/多轮指代评测.md`、`docs/评测与ragas.md`；
 - 把每节的口播自己讲一遍，录音回听；
 - 目标：每个节点 40 秒内讲完“做什么 + 为什么 + 一个坑”。
 
-### 跑起来（如果需要演示）
+### C.4 跑起来（如果需要演示）
 
 ```bash
 docker compose up -d --wait postgres
