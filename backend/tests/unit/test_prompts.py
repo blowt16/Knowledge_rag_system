@@ -123,6 +123,17 @@ def test_eval_generation_prompts_keep_realism_rules(name, needles):
     assert not missing, f"{name}.txt 少了真实感要求 {missing}"
 
 
+# 两个出题提示词固定为四段式，方便人工阅读和调整（负责人 2026-11-01 要求）。
+EVAL_PROMPT_SECTIONS = ["【角色】", "【目标（任务）】", "【约束（要求）】", "【示例】"]
+
+
+@pytest.mark.parametrize("name", ["eval_single", "eval_multi"])
+def test_eval_prompts_keep_structured_sections(name):
+    text = prompts.render(name, **{k: "X" for k in EXPECTED_PLACEHOLDERS[name]})
+    missing = [s for s in EVAL_PROMPT_SECTIONS if s not in text]
+    assert not missing, f"{name}.txt 缺少结构段 {missing}"
+
+
 def test_missing_variable_is_still_reported(caplog):
     """反向锁：真漏传变量时，那条告警**必须还在**（别把护栏一起删了）。"""
     with caplog.at_level(logging.WARNING, logger="app.core.prompts"):
