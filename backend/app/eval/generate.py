@@ -156,9 +156,13 @@ def split_clauses(answer: str) -> list[str]:
 
 
 def _substantive(clause: str) -> bool:
-    """实质分句：归一化后 ≥8 字，或含数字，或含长度 ≥2 的英文 token。"""
+    """实质分句：归一化后 ≥6 字，或含数字，或含长度 ≥2 的英文 token。
+
+    ⚠️ 2026-11-03 从 8 降到 6：实测「由任课教师查阅。」（7 字）是明确答案，
+       却被判成「没有实质分句」。「可以申请」（4 字）这类泛化片段仍会被拒。
+    """
     squeezed = squeeze(clause)
-    return (len(squeezed) >= 8 or bool(_NUMBER_RE.search(squeezed))
+    return (len(squeezed) >= 6 or bool(_NUMBER_RE.search(squeezed))
             or bool(_ALPHA_RE.search(squeezed)))
 
 
@@ -211,7 +215,8 @@ async def ask_model_for_case(chunk: str, title: str,
         try:
             data = await llm.complete_json(
                 [{"role": "user", "content": asked}], timeout=45, max_tokens=800)
-        except Exception:  # noqa: BLE001 —— 模型抽风就重试，不该拖垮整轮生成
+        except Exception as e:  # noqa: BLE001 —— 模型抽风就重试，不该拖垮整轮生成
+            logger.debug("单轮生成调用失败：%s", str(e)[:200])
             continue
         if not isinstance(data, dict):
             continue
@@ -374,7 +379,8 @@ async def ask_model_for_multi(window_text: str, title: str, target_turns: int,
             data = await llm.complete_json(
                 [{"role": "user", "content": prompt}],
                 timeout=90, max_tokens=MULTI_MAX_TOKENS)
-        except Exception:  # noqa: BLE001 —— 模型抽风就重试
+        except Exception as e:  # noqa: BLE001 —— 模型抽风就重试
+            logger.debug("多轮生成调用失败：%s", str(e)[:200])
             continue
         got = validate_multi_dialogue(data, window_text, title, target_turns)
         if got:

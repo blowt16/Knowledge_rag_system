@@ -65,6 +65,12 @@ def test_validate_rejects_thin_generalization():
     assert not generate.validate_ground_truth("可以申请。", WINDOW)[0]
 
 
+def test_short_but_specific_clause_is_accepted():
+    """7 字的明确答案（由任课教师查阅）不该被判成「没有实质分句」。"""
+    window = "学生申请查卷的，由任课教师查阅。"
+    assert generate.validate_ground_truth("由任课教师查阅。", window)[0]
+
+
 def test_validate_multi_accepts_two_to_four_turns():
     data = {"turns": [
         {"question": "退役复学可以申请什么？",
