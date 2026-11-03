@@ -28,7 +28,7 @@ import uuid
 from pathlib import Path
 
 from app import db
-from app.core import llm
+from app.core import llm, prompts
 from app.core.config import repo_path
 from app.eval import sets
 from app.retrieval import vector
@@ -161,32 +161,9 @@ def validate_ground_truth(answer: str, window_text: str) -> tuple[bool, str]:
 
 
 def _prompt(chunk: str, title: str, instruction: str) -> str:
-    return (
-        f"下面是《{title}》里的一段材料：\n\n\"\"\"\n{chunk}\n\"\"\"\n\n"
-        f"{instruction}\n\n"
-        "严格要求：\n"
-        "1. `ground_truth` 由 1~3 个原文分句组成；多个分句直接用“；”或“。”"
-        "按原文拼接，不要改写、不要概括、不要添加原文没有的连接词。\n"
-        "2. 每个实质分句（≥8 字、含数字或含英文词）都必须是上面材料里的逐字原文，"
-        "不要求连续；所有数字都必须出现在材料里。\n"
-        "3. **问句里不许出现代词**（这个 / 那个 / 该 / 其 / 上述 …）—— "
-        "这是**单轮**提问，没有上文，代词会让问题指代不明。"
-        "请用学生自己的处境或要办的事把问题问清楚（如「转专业需要满足什么条件？」）。"
-        "**不要点名文件**：不说出文件名称（如「××管理规定里」），"
-        "也不出现「这份文件」「本办法」「本规定」「该细则」、"
-        "《》书名号或桂电××号之类的文号 —— 真实学生提问很少这样说，"
-        "而且等于把答案所在的文件直接告诉了检索。\n"
-        "4. 只输出 JSON：{\"question\": \"...\", \"ground_truth\": \"...\"}\n\n"
-        # ★ few-shot 是决定性的：不给例子时模型爱改写（首轮实测 50 段里只通过 19），
-        #   给了例子之后通过率大幅上升 —— 这类「照抄」任务上，一个例子顶十条规则。
-        "示例（假设材料里写着「学生应当在考试前向所在学院提出申请。"
-        "经批准后方可缓考。」）：\n"
-        "{\"question\": \"缓考要提前跟谁说、什么时候说？\", "
-        "\"ground_truth\": \"学生应当在考试前向所在学院提出申请。经批准后方可缓考。\"}\n"
-        "注意答案由两句原文组成，每一句都能在材料里逐字找到。\n"
-        "反面示例（**不要**这样问）：「《本科生管理规定》里的缓考手续要怎么走？」"
-        "—— 点名了文件。改成：「缓考手续要怎么走？」"
-    )
+    """单轮出题 prompt —— 正文在 app/config/prompts/eval_single.txt。"""
+    return prompts.render("eval_single", title=title, chunk=chunk,
+                          instruction=instruction)
 
 
 async def ask_model_for_case(chunk: str, title: str,
@@ -301,42 +278,11 @@ def build_windows(chunks: list[dict], window: int, count: int,
 
 def _multi_prompt(window: str, title: str, target_turns: int,
                   instruction: str | None) -> str:
-    extra = (
-        f"\n【管理员额外要求】\n{instruction}\n"
-        "额外要求只影响选题与问法；与下面的硬性要求冲突时，一律以硬性要求为准。\n"
-        if instruction else ""
-    )
-    return (
-        f"下面是《{title}》里连续的一段材料：\n\n\"\"\"\n{window}\n\"\"\"\n\n"
-        f"{extra}"
-        f"请围绕这段材料生成 {target_turns} 轮连续追问（2~4 轮都接受）。\n"
-        "严格要求：\n"
-        "1. 只输出 JSON：{\"turns\":[{\"question\":\"...\",\"ground_truth\":\"...\"}]}\n"
-        "2. 第一轮必须自足，问句里**不许出现代词**。"
-        "自足指把要办的事或遇到的问题说清楚，**不是**点名文件："
-        "不说出文件名称（如「××管理规定里」），也不出现「这份文件」「本办法」"
-        "「本规定」「该细则」、《》书名号或桂电××号之类的文号。\n"
-        "3. 后续轮要像真人追问，**不要每轮把主语完整说一遍**："
-        "第 2 轮起不要再出现「学生」「学校」「学院」「委员会」这类主语，"
-        "用省略或代词承接（「要提前多久申请？」「那材料呢？」「多久能办下来？」）；"
-        "需要指代时用「它 / 这个 / 那个 / 该」；可以用口语（咋办 / 能不能 / 要不要）。\n"
-        "4. 每轮追问必须**承接上一轮的话题**：就上一轮提到的对象继续问条件、材料、"
-        "时限、后果或例外，不要跳到窗口材料里无关的另一件事。\n"
-        "5. 每轮 ground_truth 由 1~3 个原文分句组成；多个分句按原文用“；”或“。”拼接，"
-        "不要改写、概括或添加原文没有的连接词；每个实质分句都必须是窗口材料里的逐字原文。\n"
-        "6. 各轮答案不能重复，至少覆盖 2 个不同事实。\n"
-        "7. 不许跨出窗口材料，不许用常识补全。\n"
-        "8. 轮数 2~4，默认 3。\n\n"
-        "示例（第 1 轮自足；第 2 轮用代词；第 3 轮省主语）：\n"
-        "{\"turns\":[\n"
-        " {\"question\":\"退役复学可以申请什么？\","
-        "\"ground_truth\":\"退役复学学生可以申请免修课程。\"},\n"
-        " {\"question\":\"那成绩怎么记？\","
-        "\"ground_truth\":\"免修成绩按85分记录。\"},\n"
-        " {\"question\":\"要提前多久申请？\","
-        "\"ground_truth\":\"退役复学学生应当在开学两周内提出申请。\"}\n"
-        "]}\n"
-    )
+    """多轮出题 prompt —— 正文在 app/config/prompts/eval_multi.txt。"""
+    return prompts.render(
+        "eval_multi", title=title, window=window,
+        instruction=instruction or "（无额外要求）",
+        target_turns=target_turns)
 
 
 def validate_multi_dialogue(data: dict, window_text: str, title: str,
@@ -419,6 +365,9 @@ async def generate_cases(set_id: str, document_id: str, count: int,
     返回形状见 §8.2 —— 前端要拿它显示「要了 5 条，实际生成 4 条」这类提示，
     所以 `created` 必须是**实际入库条数**，且 `cases` 只回必要字段。
     """
+    # 提示词在 app/config/prompts/，管理员可能边调边改 —— 每次生成前重载，
+    # 免得改完文件还要重启后端才生效（只影响本端点的少量文件读取）。
+    prompts.reload_prompts()
     count = max(1, min(MAX_COUNT, int(count or DEFAULT_COUNT)))
     mode = "multi" if mode == "multi" else "single"
     turns = max(2, min(4, int(turns or 3)))

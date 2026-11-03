@@ -27,6 +27,9 @@ EXPECTED_PLACEHOLDERS = {
     # summary 是滚动压缩的产物（§3.8.5 的组装顺序里排在 history 之前）
     "generate": {"summary", "history", "context", "query"},
     "summarize": {"previous", "messages"},
+    # 评测用例生成（app/eval/generate.py）
+    "eval_single": {"chunk", "instruction", "title"},
+    "eval_multi": {"instruction", "target_turns", "title", "window"},
 }
 
 
@@ -100,6 +103,24 @@ def test_generate_prompt_keeps_injection_guard():
 def test_generate_contract_has_no_citation_numbers():
     """引用编号由服务端从正文派生，契约里**不能**再要模型给一份编号。"""
     assert "citation_numbers" not in _render_generate()
+
+
+# 评测用例生成提示词的「真实感」要求 —— 改提示词时别顺手删掉。
+# 这些是问法要求，不是硬校验：删了不会报错，但生成出来的题会重新变得像在查文件。
+EVAL_GEN_RULES = {
+    "eval_single": ["不许出现代词", "不要点名文件", "逐字原文"],
+    "eval_multi": [
+        "第一轮必须自足", "不许出现代词", "不要每轮把主语完整说一遍",
+        "承接上一轮的话题", "不要点名文件",
+    ],
+}
+
+
+@pytest.mark.parametrize("name,needles", sorted(EVAL_GEN_RULES.items()))
+def test_eval_generation_prompts_keep_realism_rules(name, needles):
+    text = prompts.render(name, **{k: "X" for k in EXPECTED_PLACEHOLDERS[name]})
+    missing = [n for n in needles if n not in text]
+    assert not missing, f"{name}.txt 少了真实感要求 {missing}"
 
 
 def test_missing_variable_is_still_reported(caplog):
