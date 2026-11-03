@@ -749,7 +749,7 @@ function GenerateDialog({ setId, setName, onClose, onFinished }: {
             )}
             <p className="text-xs text-muted-foreground">
               {mode === 'multi'
-                ? '多轮生成按相邻 chunk 窗口出题，耗时更长；标准答案严格取自窗口原文。'
+                ? '多轮生成按相邻 chunk 窗口出题，耗时更长；标准答案严格取自窗口原文，追问会带代词和省略主语，贴近真实学生对话。'
                 : '单轮生成的标准答案同样要求逐句原文，最多 3 个分句。'}
             </p>
             {err && <p className="text-sm text-destructive">{err}</p>}
