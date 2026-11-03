@@ -14,9 +14,11 @@
 `chunk_text()` 切一遍。但检索看到的是**入库时切的那份** —— 两套切法一旦不一致，
 「来源片段」就是假的。从 Chroma 取还能白拿 `page` 与 `chunk_index`。
 
-**为什么校验②是必须的**：旧脚本的实测教训 —— 单轮题带代词（「这个细则管的是
-哪些学生？」）会被图的 `resolve` 节点**正确**判成「指代不明」→ 走 `clarify`，
-于是评测里凭空多出「路由错」的假失败。代词是多轮题库在干的活儿。
+**为什么校验②要保留但收窄**：澄清只在「问题过短（< `clarify.min_length`）
+且定位不到主题」时触发（route._should_clarify）；长句即使含「这些规定」
+也照常回答。所以只拒绝**短且含代词**的首轮/单轮题 —— 一律拒代词会把
+真实问法误杀（2026-11-03 实测：『我是一名本科生，想了解学校制定这些
+管理规定…』被错误拒绝）。
 """
 
 from __future__ import annotations
@@ -24,12 +26,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 import uuid
 from pathlib import Path
 
 from app import db
 from app.core import llm, prompts
-from app.core.config import repo_path
+from app.core.config import cfg, repo_path
 from app.eval import sets
 from app.retrieval import vector
 
@@ -57,8 +60,11 @@ MIN_CHUNK_CHARS = 120
 #: 单段/单窗口最多问几次（首次 + 重试 2 次）
 MAX_ATTEMPTS = 3
 
-#: 标准答案切分：按句号/分号/感叹/问号/换行切，**不按逗号切**
-_CLAUSE_RE = re.compile(r"[。；！？\n]+")
+#: 标准答案切分：按句号/分号/感叹/问号切，**不按逗号切**。
+#: ⚠️ **不把 `\n` 当分句符**：PDF 提取的正文会在词间硬换行
+#:    （`…本科\\n\\n学生的管理。`），按换行切会把同一句话拆成多段，
+#:    覆盖率算下来不足 0.8 —— 实测正是多轮生成被拒的主因之一。
+_CLAUSE_RE = re.compile(r"[。；！？]+")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _ALPHA_RE = re.compile(r"[A-Za-z]{2,}")
 
@@ -70,21 +76,28 @@ class DocumentNotIndexed(LookupError):
     """这份文档在向量库里没有可用的片段 —— 接口层译成 409/400。"""
 
 
+#: 「逐字」比对时丢弃的**格式字符**：空白、标点、括号、引号、书名号等。
+#: 保留中文/字母/数字，以及**带语义的运算符**（≥ ≤ > < % . + - * / =）——
+#: 去掉 ≥ 会让「成绩≥60」和「成绩≤60」都变成「成绩60」，那是真的放松了语义。
+_FORMAT_DROP_RE = re.compile(r"[^\w.%+\-*/=<>≥≤]")
+
+
 def squeeze(s: str) -> str:
-    """去掉**所有空白 + 表格序列化分隔符**再比。用于「逐字」校验。
+    """归一化后只保留「内容字符」，用于逐字校验。
 
-    ⚠️ 空白必须去掉：规范化正文里有 PDF 提取留下的硬换行与空行
-    （实测：`…提出申请并经\\n\\n学院审核同意后送达；`），模型复述时自然写成
-    一行 —— 用带空白的原串去比会判成「不是原文」，而**它确实是原文**。
+    去掉：所有空白与标点/括号/引号/书名号；保留：中文、字母、数字，
+    以及 ≥ ≤ > < % . + - * / = 这些**会改变语义**的符号。
 
-    ⚠️ `｜` 与 `：` 也要去掉（2026-10-15 放宽）：表格改成键值序列化后
-    （`参考学分：2分/次`），标准答案与正文之间的分隔符不属于「字」——
-    不去掉的话表格题的标准答案**永远校验不过**（题面抄的是一句话，
-    正文里却处处隔着 `｜`／`：`）。
+    ⚠️ 空白必须去掉：PDF 正文有硬换行（`…提出申请并经\\n\\n学院审核…`），
+       模型复述时写成一行 —— 用带空白的原串比会判成「不是原文」，而它确实是。
+    ⚠️ 标点也要去掉（2026-11-03 放宽）：模型常把顿号写成逗号、全角括号写成
+       半角、`≧` 写成 `≥`；这些只是格式差异，内容仍逐字来自原文。
+       实测多轮生成被拒的主因之一就是这类标点变体。
+    ⚠️ NFKC 负责全角/半角（`ＣＥＴ４` → `CET4`、`％` → `%`）；
+       `≧/≦/×/÷` 先手动统一，再按白名单保留。
 
-    代价如实写明：**校验强度降低了**。去掉冒号后，原本被 `：` 隔开的两段
-    文字（`A：B` 与 `AB`）会被判成同一串 —— 含 `：` 的正文题会校验得更松。
-    这是负责人 2026-10-15 明确接受的取舍，不是疏忽。
+    代价如实写明：**校验强度降低了** —— 去掉标点后，`A：B` 与 `AB` 会被判成
+    同一串。这是负责人 2026-11-03 明确接受的取舍，不是疏忽。
 
     `tools/make_eval_cases.py` 与 `tests/integration/test_eval_cases.py` 都 import
     这里，不另抄一份 —— 抄一份就会漂移，而漂移之后「生成期放行、校验期报
@@ -94,7 +107,10 @@ def squeeze(s: str) -> str:
        **原文偏移**，只能自己逐字符扫一遍，用的是「只去空白」口径。于是界面高亮
        比这里更严（宁可不高亮，也不高亮错位置）—— 这是有意的，别去「对齐」它。
     """
-    return re.sub(r"[\s｜：]+", "", s or "")
+    text = unicodedata.normalize("NFKC", s or "")
+    text = (text.replace("≧", "≥").replace("≦", "≤")
+                .replace("×", "*").replace("÷", "/"))
+    return _FORMAT_DROP_RE.sub("", text)
 
 
 def pronoun_words() -> frozenset[str]:
@@ -110,17 +126,33 @@ def pronoun_words() -> frozenset[str]:
 
 
 def has_pronoun(question: str, pronouns: frozenset[str] | None = None) -> bool:
-    """单轮题里**不许出现代词**（见模块头的实测教训）。"""
+    """检测代词（词表与 resolve 节点同源）。"""
     import jieba
     words = pronouns if pronouns is not None else pronoun_words()
     return bool(set(jieba.lcut(question or "")) & words)
 
 
+def _first_turn_is_ambiguous(question: str) -> bool:
+    """首轮/单轮：只有**短且含代词**才判为指代不明。
+
+    ⚠️ 不能改成「只要含代词就拒」：图的澄清判据是
+       「长度 < clarify.min_length 且定位不到主题」，长句即使写「这些规定」
+       也会正常回答。生成期一律拒代词会把真实问法误杀（2026-11-03 实测）。
+    """
+    text = (question or "").strip()
+    return has_pronoun(text) and len(text) < int(cfg("clarify.min_length", 8))
+
+
 # ---- 标准答案：逐句原文拼接（单轮/多轮共用）----------------------------
 
 def split_clauses(answer: str) -> list[str]:
-    """按 `。；！？\\n` 切句，**不按逗号切**（避免“可以申请”这类过短泛化片段）。"""
-    return [c.strip() for c in _CLAUSE_RE.split(answer or "") if c.strip()]
+    """先去掉所有空白，再按 `。；！？` 切句，**不按逗号切**。
+
+    去空白是为了合并 PDF 硬换行；否则一句话会被拆成多段，
+    覆盖率校验会误判（见 `_CLAUSE_RE` 的说明）。
+    """
+    text = re.sub(r"\s+", "", answer or "")
+    return [c.strip() for c in _CLAUSE_RE.split(text) if c.strip()]
 
 
 def _substantive(clause: str) -> bool:
@@ -150,7 +182,8 @@ def validate_ground_truth(answer: str, window_text: str) -> tuple[bool, str]:
     for clause in clauses:
         if squeeze(clause) not in window:
             return False, f"分句不是窗口原文：{clause[:30]}"
-    for number in _NUMBER_RE.findall(answer):
+    # NFKC：全角数字（`８５`）与半角数字（`85`）视为同一个数字
+    for number in _NUMBER_RE.findall(unicodedata.normalize("NFKC", answer)):
         if number not in window:
             return False, f"数字不在原文：{number}"
     total = len(squeeze(answer)) or 1
@@ -187,10 +220,13 @@ async def ask_model_for_case(chunk: str, title: str,
         # ★ 硬校验一：逐句原文拼接（单轮/多轮共用）
         if not question:
             continue
-        if not validate_ground_truth(answer, chunk)[0]:
+        ok, why = validate_ground_truth(answer, chunk)
+        if not ok:
+            logger.debug("单轮答案校验失败：%s | %s", why, answer[:80])
             continue
-        # ★ 硬校验二：单轮题**不许带代词**（见模块头的实测教训）
-        if has_pronoun(question):
+        # ★ 硬校验二：短且含代词才可能触发澄清（长句放行）
+        if _first_turn_is_ambiguous(question):
+            logger.debug("单轮问句过短且含代词：%s", question)
             continue
         return {"question": question, "ground_truth": answer}
     return None
@@ -287,7 +323,7 @@ def _multi_prompt(window: str, title: str, target_turns: int,
 
 def validate_multi_dialogue(data: dict, window_text: str, title: str,
                             target_turns: int) -> dict | None:
-    """多轮结构校验：2~4 轮、首轮无代词、每个答案逐句原文、答案不重复。
+    """多轮结构校验：2~4 轮、首轮短句无代词、每个答案逐句原文、答案不重复。
 
     ⚠️ “后续轮必须用代词/省略”**只写进 Prompt，不做硬拒绝**：
        “办理流程要多久？”这类合法省略不含代词，硬拦会误伤。
@@ -305,12 +341,17 @@ def validate_multi_dialogue(data: dict, window_text: str, title: str,
         ground_truth = str(raw.get("ground_truth") or "").strip()
         if not question or not ground_truth or question in questions:
             return None
-        if i == 1 and has_pronoun(question):
+        if i == 1 and _first_turn_is_ambiguous(question):
+            logger.debug("多轮校验失败：首轮过短且含代词：%s", question)
             return None
-        if not validate_ground_truth(ground_truth, window_text)[0]:
+        ok, why = validate_ground_truth(ground_truth, window_text)
+        if not ok:
+            logger.debug("多轮校验失败：第 %d 轮答案不是窗口原文（%s）：%s",
+                         i, why, ground_truth[:80])
             return None
         squeezed = squeeze(ground_truth)
         if squeezed in answers:
+            logger.debug("多轮校验失败：第 %d 轮答案重复", i)
             return None
         questions.append(question)
         answers.append(squeezed)

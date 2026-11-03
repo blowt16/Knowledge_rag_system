@@ -105,13 +105,23 @@ async def test_rewritten_answer_is_rejected(scratch_set, fake_corpus, monkeypatc
     assert stats["reason"]
 
 
-async def test_pronoun_question_is_rejected(scratch_set, fake_corpus, monkeypatch):
-    """答案逐字来自原文，但问句带代词 —— 照样拦下。"""
+async def test_short_pronoun_question_is_rejected(scratch_set, fake_corpus, monkeypatch):
+    """答案逐字来自原文，但问句短且带代词 —— 会被图判成澄清，照样拦下。"""
     chunk = CHUNKS[0]["text"]
     monkeypatch.setattr(llm, "complete_json", _llm_returning(
-        {"question": "这个规定说的是什么？", "ground_truth": chunk[:20]}))
+        {"question": "这个怎么办？", "ground_truth": chunk[:20]}))
     stats = await generate.generate_cases(scratch_set, fake_corpus, 1)
     assert stats["created"] == 0 and stats["failed"] == 1
+
+
+async def test_long_demonstrative_question_is_accepted(scratch_set, fake_corpus, monkeypatch):
+    """长句里的「这些规定」是自足的，澄清判据不会触发 —— 不该拒。"""
+    chunk = CHUNKS[0]["text"]
+    monkeypatch.setattr(llm, "complete_json", _llm_returning(
+        {"question": "我是一名本科生，想了解学校制定这些管理规定具体管什么？",
+         "ground_truth": chunk[:20]}))
+    stats = await generate.generate_cases(scratch_set, fake_corpus, 1)
+    assert stats["created"] == 1 and stats["failed"] == 0
 
 
 async def test_verbatim_answer_passes_and_lands_in_the_db(scratch_set, fake_corpus,

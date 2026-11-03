@@ -79,15 +79,55 @@ def test_validate_multi_accepts_two_to_four_turns():
     assert got["turns"][0]["expected_document"] == "某办法"
 
 
-def test_validate_multi_rejects_first_turn_pronoun():
+def test_validate_multi_rejects_short_first_turn_pronoun():
+    """短句 + 代词才可能触发澄清（长句里的「这些规定」是自足的）。"""
     data = {"turns": [
-        {"question": "这个可以申请什么？",
+        {"question": "这个怎么办？",
          "ground_truth": "退役复学学生可以申请免修课程。"},
         {"question": "那成绩怎么记？", "ground_truth": "免修成绩按85分记录。"},
     ]}
     assert generate.validate_multi_dialogue(
         data, "退役复学学生可以申请免修课程。免修成绩按85分记录。",
         "某办法", 2) is None
+
+
+def test_validate_multi_accepts_long_first_turn_with_demonstrative():
+    """长句里的「这些管理规定」不触发澄清，不应被当成指代不明拒掉。"""
+    data = {"turns": [
+        {"question": "我是一名本科生，想了解学校制定这些管理规定是为了什么？",
+         "ground_truth": "退役复学学生可以申请免修课程。"},
+        {"question": "那成绩怎么记？", "ground_truth": "免修成绩按85分记录。"},
+    ]}
+    got = generate.validate_multi_dialogue(
+        data, "退役复学学生可以申请免修课程。免修成绩按85分记录。",
+        "某办法", 2)
+    assert got is not None
+
+
+def test_pdf_hard_wrap_does_not_split_one_sentence():
+    """PDF 硬换行不能把一句话拆成多段 —— 否则覆盖率会误判。"""
+    answer = "本规定适用于学校对接受普通高等学历教育的本科\n\n学生的管理。"
+    assert generate.split_clauses(answer) == [
+        "本规定适用于学校对接受普通高等学历教育的本科学生的管理"
+    ]
+    assert generate.validate_ground_truth(answer, answer)[0]
+
+
+def test_punctuation_and_symbol_variants_are_accepted():
+    """顿号/逗号、全半角括号、≧/≥ 只是格式差异，内容仍是逐字原文。"""
+    window = ("考试命题应以教学大纲为依据，体现OBE 理念；"
+              "全国大学生英语四级考试（CET4）成绩≧425 分。")
+    assert generate.validate_ground_truth(
+        "考试命题应以教学大纲为依据、体现OBE理念。", window)[0]
+    assert generate.validate_ground_truth(
+        "全国大学生英语四级考试(CET4)成绩≥425分。", window)[0]
+
+
+def test_normalization_still_rejects_real_rewrites():
+    """放松格式不等于放松内容：改写和数字不符仍要拒绝。"""
+    window = "免修成绩按85分记录。退役复学学生可以申请免修课程。"
+    assert not generate.validate_ground_truth("免修成绩按90分记录。", window)[0]
+    assert not generate.validate_ground_truth("退役复学学生能申请不用上课。", window)[0]
 
 
 def test_validate_multi_rejects_duplicate_answers():

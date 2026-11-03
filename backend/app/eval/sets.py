@@ -496,7 +496,7 @@ def locate_highlight(snippet: str | None, answer: str | None) -> list[int] | Non
     """标准答案在 `snippet` 里的字符区间 `[start, end)`（**end 不含**）。
 
     ⚠️ **不能直接 `snippet.find(ground_truth)`。** 生成期的校验是
-       `app/eval/generate.py::squeeze()` —— **去掉所有空白之后**再比子串。
+       `app/eval/generate.py::squeeze()` —— **去掉空白与标点之后**再比子串。
        原因是规范化正文里有 PDF 提取留下的硬换行
        （`…提出申请并经\\n\\n学院审核同意后送达；`），模型复述时自然写成一行。
        所以标准答案在原文里**往往不是逐字连续子串**，`find()` 会经常返回 -1，
@@ -504,6 +504,8 @@ def locate_highlight(snippet: str | None, answer: str | None) -> list[int] | Non
 
        正确做法：**按去空白口径定位，再把区间映射回原文偏移**
        （记录每个非空白字符对应的原文下标，比对成功后取首尾映射回去）。
+       这里刻意**只去空白、不去标点**：高亮要映射回原文偏移，宁可不高亮，
+       也不高亮错位置（生成期更宽松，所以少数带标点变体的答案可能不高亮）。
 
     对不上返回 `None` —— 那往往是**文档更新过了**，正是这个功能要暴露的（§8.3）。
     """
