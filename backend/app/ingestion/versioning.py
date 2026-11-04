@@ -1,19 +1,28 @@
 """版本判定（决策 #5 / §3.4.3）。
 
+**实际调用顺序**（`pipeline._ingest` 里是**先判重、后定版本**）：
+
 ```
-新文档上传
-    ↓
-按 **title 精确匹配**已有文档组
-    ↓
-┌── 匹配到 ──┐          ┌── 未匹配到 ──┐
-↓            ↓          ↓              ↓
-version =   同组旧版     新建 group
-  旧版+1     状态不变       version = 1
-↓            ↓          ↓
-沿用同一 doc_group_id
-    ↓
-录入 effective_date（上传时指定，默认今天）
+① 格式校验
+② MD5 判重（find_existing_by_md5）
+       命中 → 标 duplicate 直接返回，不进版本判定
+       （只认 active/disabled/indexing —— failed 行不挡重传）
+③ 本模块 resolve_group_and_version（必须在事务内）
+       按 **title 精确匹配**已有文档组
+       ├─ 匹配到 → 沿用 doc_group_id，version = 组内 MAX(version) + 1
+       └─ 未匹配 → 新建 doc_group_id，version = 1
+④ 录入 effective_date（上传时指定，默认今天）
 ```
+
+⚠️ **为什么 MD5 在标题匹配之前**：两者回答的不是同一个问题 ——
+   MD5 判「这份**字节内容**是否已存在」（全库、与标题无关）；
+   标题判「这一份算**哪个文档**的新版本」。先判重可以直接跳过，
+   不必为一个注定丢弃的文件占用版本号、开事务。
+
+   ⚠️ 这也意味着**同内容换个标题上传不会生成第二份**（按内容去重，不按标题）。
+
+⚠️ 增量更新：MD5 不同但同组 → 按新版本处理。
+   **不做 chunk 级 diff**（决策 #5 已明确）。
 
 ⚠️⚠️ **「旧版+1」的基准必须钉死**：取该 `doc_group_id` 下**所有行的 `max(version)`**
    —— **包含 `failed` 与 `indexing` 的行**，不是只取 `status = "active"` 的。
@@ -26,9 +35,6 @@ version =   同组旧版     新建 group
 ⚠️ 版本分配**必须在 PostgreSQL 事务内**（§3.3.1）：
    否则两个管理员同时上传同一 doc_group 会读到相同的"旧版 version"，
    产生重复版本号。配套 `UNIQUE(doc_group_id, version)` 兜底。
-
-⚠️ 增量更新：MD5 相同 → 直接跳过；MD5 不同但同组 → 按新版本处理。
-   **不做 chunk 级 diff**（决策 #5 已明确）。
 """
 
 from __future__ import annotations
